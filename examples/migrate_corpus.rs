@@ -168,11 +168,11 @@ fn verify_reopen(folder: &SessionFolder, _src: &Path) -> Result<(), String> {
         .rev()
         .find(|n| matches!(n, Node::Message(_)))
     {
-        let path = reopened.walk_to_root(last_msg.id());
+        let path = reopened.walk_to_root(&last_msg.id());
         if path.is_empty() {
             return Err("walk_to_root from latest message is empty".into());
         }
-        let mut ids: Vec<&str> = path.iter().map(|n| n.id()).collect();
+        let mut ids: Vec<String> = path.iter().map(|n| n.id().to_string()).collect();
         let len = ids.len();
         ids.sort();
         ids.dedup();

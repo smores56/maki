@@ -18,3 +18,4 @@ maki-util = { workspace = true }
 test-case = { workspace = true }
 tempfile = { workspace = true }
 isahc = { workspace = true }
+maki-util = { workspace = true }

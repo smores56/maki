@@ -18,11 +18,12 @@ use maki_storage::tree::{
     Header, LeafEntry, Lineage, MessageNode, Node, PayloadRecord, SessionMetaFile,
     TREE_FORMAT_VERSION, new_leaf_id, new_message_id, new_payload_id,
 };
+use maki_util::EntityId;
 use serde_json::json;
 use tempfile::TempDir;
 
 const TEST_CWD: &str = "/test";
-const TEST_SESSION_ID: &str = "test-session-1";
+const TEST_SESSION_ID_HEX: &str = "01965087-4c71-7f00-8000-000000000000";
 const CREATED_AT: u64 = 1_700_000_000;
 const ROLE_USER: &str = "user";
 const ROLE_ASSISTANT: &str = "assistant";
@@ -33,7 +34,7 @@ const PAYLOAD_BLOCK_IDX: usize = 1;
 fn make_header() -> Header {
     Header {
         version: TREE_FORMAT_VERSION,
-        session_id: TEST_SESSION_ID.to_string(),
+        session_id: TEST_SESSION_ID_HEX.parse().unwrap(),
         cwd: TEST_CWD.to_string(),
         created_at: CREATED_AT,
         parent_session_id: None,
@@ -90,12 +91,12 @@ fn leaf(parent_id: &str, target: &str) -> LeafEntry {
 #[test]
 fn full_agent_turn_round_trips_through_session_folder() {
     let tmp = TempDir::new().unwrap();
-    let session_dir = tmp.path().join(TEST_SESSION_ID);
+    let session_dir = tmp.path().join("session-folder");
 
     let mut folder = SessionFolder::create(&session_dir, make_header(), Lineage::default())
         .expect("create session folder");
 
-    let header_id = folder.header.session_id.clone();
+    let header_id = folder.header.session_id.to_string();
 
     // Turn 1: user → assistant(tool_use) → tool_result → leaf.
     let user = user_message(&header_id);
@@ -134,7 +135,10 @@ fn full_agent_turn_round_trips_through_session_folder() {
     // Reopen from disk — durability check.
     let reopened = SessionFolder::open(&session_dir).expect("reopen session folder");
 
-    assert_eq!(reopened.header.session_id, TEST_SESSION_ID);
+    assert_eq!(
+        reopened.header.session_id,
+        TEST_SESSION_ID_HEX.parse::<EntityId>().unwrap()
+    );
     assert_eq!(reopened.header.version, TREE_FORMAT_VERSION);
     assert_eq!(reopened.header.cwd, TEST_CWD);
 
@@ -154,13 +158,13 @@ fn full_agent_turn_round_trips_through_session_folder() {
     // walk_to_root from user2 → assistant → user → header (header excluded).
     let path = reopened.walk_to_root(&user2_id);
     assert!(!path.is_empty(), "walk_to_root non-empty");
-    let path_ids: Vec<&str> = path.iter().map(|n| n.id()).collect();
+    let path_ids: Vec<String> = path.iter().map(|n| n.id().to_string()).collect();
     assert_eq!(path_ids[0], user2_id);
     assert_eq!(path_ids[1], assistant_id);
     assert_eq!(path_ids[2], user_id);
     // No header in the path (§4 walk excludes Header).
     assert!(
-        !path_ids.iter().any(|id| *id == header_id),
+        !path_ids.contains(&header_id),
         "header must not appear in walk_to_root"
     );
 
@@ -216,7 +220,7 @@ fn partial_line_recovery_after_truncated_write() {
 
     let mut folder =
         SessionFolder::create(&session_dir, make_header(), Lineage::default()).expect("create");
-    let header_id = folder.header.session_id.clone();
+    let header_id = folder.header.session_id.to_string();
     let user = user_message(&header_id);
     folder.append_node(Node::Message(user)).unwrap();
 
