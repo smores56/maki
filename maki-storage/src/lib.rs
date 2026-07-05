@@ -5,11 +5,14 @@
 pub mod auth;
 pub mod input_history;
 pub mod log;
+pub mod migration;
 pub mod model;
 pub mod paths;
 pub mod plans;
+pub mod session_log;
 pub mod sessions;
 pub mod theme;
+pub mod tree;
 pub mod version;
 
 use std::fs;
@@ -77,8 +80,22 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), StorageError> {
     retry_rename(&tmp_path, path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         StorageError::Io(e)
-    })
+    })?;
+    sync_parent_dir(parent);
+    Ok(())
 }
+
+/// fsync the parent directory after a rename/create so the new entry survives a
+/// crash. No-op on platforms without `fsync` on directories.
+#[cfg(unix)]
+fn sync_parent_dir(dir: &Path) {
+    if let Ok(f) = std::fs::File::open(dir) {
+        let _ = f.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_dir: &Path) {}
 
 pub(crate) fn atomic_write_permissions(
     path: &Path,

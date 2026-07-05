@@ -365,7 +365,7 @@ pub fn history_to_display(
     let mut restore_items: Vec<maki_lua::RestoreItem> = Vec::new();
     for msg in messages {
         match msg.role {
-            Role::User => {
+            Role::User | Role::System => {
                 if let Some(text) = msg.user_text() {
                     display.push(DisplayMessage::new(DisplayRole::User, text.to_owned()));
                 }

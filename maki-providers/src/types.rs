@@ -59,12 +59,13 @@ impl ImageSource {
     }
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     #[default]
     User,
     Assistant,
+    System,
 }
 
 impl Role {

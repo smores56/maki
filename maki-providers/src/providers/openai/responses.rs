@@ -109,6 +109,24 @@ pub(crate) fn convert_input(messages: &[Message]) -> Value {
                     }));
                 }
             }
+            Role::System => {
+                let text: String = msg
+                    .content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.is_empty() {
+                    input.push(json!({
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": text}]
+                    }));
+                }
+            }
         }
     }
 

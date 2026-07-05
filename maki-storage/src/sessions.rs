@@ -41,6 +41,20 @@ pub enum SessionError {
     },
     #[error("cursor ahead of session (log has {saved}, session has {actual}); compact required")]
     CursorAhead { saved: usize, actual: usize },
+    #[error("corrupt tree: {0}")]
+    CorruptTree(String),
+    #[error(
+        "dangling payload reference: node {node_id} block {block_idx} references missing payload {payload_id}"
+    )]
+    DanglingPayload {
+        node_id: String,
+        block_idx: usize,
+        payload_id: String,
+    },
+    #[error("unsupported session version {found}: {message}")]
+    UnsupportedVersion { found: u32, message: String },
+    #[error("cannot rewind past legacy compaction barrier (node {node_id})")]
+    LegacyCompactionBarrier { node_id: String },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

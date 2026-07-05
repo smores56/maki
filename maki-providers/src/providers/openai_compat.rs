@@ -331,10 +331,30 @@ pub fn convert_messages(messages: &[Message], system: &str) -> Vec<Value> {
                     out.push(msg_obj);
                 }
             }
+            Role::System => {
+                let text = system_text_block(msg);
+                if !text.is_empty()
+                    && let Some(first) = out.first_mut()
+                    && let Some(content) = first.get("content").and_then(|c| c.as_str())
+                {
+                    first["content"] = json!(format!("{content}\n{text}"));
+                }
+            }
         }
     }
 
     out
+}
+
+fn system_text_block(msg: &Message) -> String {
+    msg.content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn convert_tools(anthropic_tools: &Value) -> Value {

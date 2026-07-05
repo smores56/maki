@@ -189,7 +189,7 @@ pub fn replay_history(messages: &[Message]) -> Vec<SessionUpdate> {
     let mut updates = Vec::new();
     for msg in messages {
         match msg.role {
-            MsgRole::User => replay_user(msg, &mut updates),
+            MsgRole::User | MsgRole::System => replay_user(msg, &mut updates),
             MsgRole::Assistant => replay_assistant(msg, &mut updates),
         }
     }

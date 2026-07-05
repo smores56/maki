@@ -300,6 +300,7 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
         let role = match msg.role {
             Role::User => "user",
             Role::Assistant => "model",
+            Role::System => "user",
         };
 
         let mut parts: Vec<Value> = Vec::new();
