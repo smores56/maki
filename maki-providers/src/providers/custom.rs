@@ -7,6 +7,7 @@ use maki_config::providers::{
     Protocol, ProvidersConfig, builtin_provider, resolve_api_key_env, resolve_base_url,
     resolve_protocol,
 };
+use maki_util::EntityId;
 
 use super::ResolvedAuth;
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
@@ -205,7 +206,7 @@ impl Provider for CustomOpenAiProvider {
         tools: &'a Value,
         event_tx: &'a Sender<ProviderEvent>,
         opts: RequestOptions,
-        _session_id: Option<&'a str>,
+        _session_id: Option<EntityId>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         let auth = self.auth.lock().unwrap().clone();
         let mut body = self.compat.build_body(model, messages, system, tools);

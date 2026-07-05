@@ -10,11 +10,12 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
+use maki_util::EntityId;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +35,10 @@ pub enum SessionError {
     #[error("incompatible session version {found} (expected {expected})")]
     VersionMismatch { found: u32, expected: u32 },
     #[error("session ID mismatch: log owns {log_id}, got {given_id}")]
-    IdMismatch { log_id: String, given_id: String },
+    IdMismatch {
+        log_id: EntityId,
+        given_id: EntityId,
+    },
     #[error("cursor ahead of session (log has {saved}, session has {actual}); compact required")]
     CursorAhead { saved: usize, actual: usize },
 }
@@ -66,7 +70,7 @@ pub struct SessionMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session<M, U, T> {
     pub version: u32,
-    pub id: String,
+    pub id: EntityId,
     pub title: String,
     pub cwd: String,
     pub model: String,
@@ -83,7 +87,7 @@ pub struct Session<M, U, T> {
 }
 
 pub struct SessionSummary {
-    pub id: String,
+    pub id: EntityId,
     pub title: String,
     pub updated_at: u64,
 }
@@ -153,7 +157,7 @@ pub struct StoredSubagent {
 #[derive(Deserialize)]
 struct LegacyHeader {
     version: u32,
-    id: String,
+    id: EntityId,
     title: String,
     cwd: String,
     updated_at: u64,
@@ -190,7 +194,7 @@ enum LogRecord<M, U, T> {
     #[serde(rename = "header")]
     Header {
         v: u32,
-        id: String,
+        id: EntityId,
         model: String,
         cwd: String,
         created_at: u64,
@@ -214,7 +218,7 @@ enum LogRecord<M, U, T> {
 // -- SessionLog: append-only persistence --
 
 pub struct SessionLog {
-    session_id: String,
+    session_id: EntityId,
     file: File,
     saved_msg_count: usize,
     saved_tool_ids: HashSet<String>,
@@ -238,14 +242,14 @@ impl SessionLog {
         write_full_session(&mut file, session)?;
         file.sync_data().map_err(StorageError::from)?;
 
-        update_cwd_index(dir, &session.cwd, &session.id)?;
+        update_cwd_index(dir, &session.cwd, session.id)?;
 
         Ok(Self::cursor_from(session, file))
     }
 
     pub fn open<M, U, T>(
         dir: &Path,
-        session_id: &str,
+        session_id: EntityId,
     ) -> Result<(Session<M, U, T>, Self), SessionError>
     where
         M: Serialize + DeserializeOwned,
@@ -264,8 +268,8 @@ impl SessionLog {
         Ok((session, log))
     }
 
-    pub fn session_id(&self) -> &str {
-        &self.session_id
+    pub fn session_id(&self) -> EntityId {
+        self.session_id
     }
 
     pub fn append<M, U, T>(&mut self, session: &Session<M, U, T>) -> Result<(), SessionError>
@@ -276,8 +280,8 @@ impl SessionLog {
     {
         if session.id != self.session_id {
             return Err(SessionError::IdMismatch {
-                log_id: self.session_id.clone(),
-                given_id: session.id.clone(),
+                log_id: self.session_id,
+                given_id: session.id,
             });
         }
 
@@ -376,8 +380,8 @@ impl SessionLog {
     {
         if session.id != self.session_id {
             return Err(SessionError::IdMismatch {
-                log_id: self.session_id.clone(),
-                given_id: session.id.clone(),
+                log_id: self.session_id,
+                given_id: session.id,
             });
         }
 
@@ -403,7 +407,7 @@ impl SessionLog {
 
     fn cursor_from<M, U, T>(session: &Session<M, U, T>, file: File) -> Self {
         Self {
-            session_id: session.id.clone(),
+            session_id: session.id,
             file,
             saved_msg_count: session.messages.len(),
             saved_tool_ids: session.tool_outputs.keys().cloned().collect(),
@@ -426,7 +430,7 @@ where
         &mut buf,
         &LogRecord::<&M, &U, &T>::Header {
             v: LOG_FORMAT_VERSION,
-            id: session.id.clone(),
+            id: session.id,
             model: session.model.clone(),
             cwd: session.cwd.clone(),
             created_at: session.created_at,
@@ -492,7 +496,7 @@ where
     let reader = BufReader::new(file);
     let mut line_count = 0usize;
 
-    let mut id = String::new();
+    let mut id: Option<EntityId> = None;
     let mut model = String::new();
     let mut cwd = String::new();
     let mut created_at = 0u64;
@@ -537,7 +541,7 @@ where
                         expected: LOG_FORMAT_VERSION,
                     });
                 }
-                id = h_id;
+                id = Some(h_id);
                 model = h_model;
                 cwd = h_cwd;
                 created_at = h_created;
@@ -567,6 +571,7 @@ where
     if !got_header {
         return Err(StorageError::NotFound(path.display().to_string()).into());
     }
+    let id = id.ok_or(StorageError::NotFound(path.display().to_string()))?;
 
     Ok(Session {
         version: SESSION_VERSION,
@@ -593,24 +598,16 @@ fn load_cwd_index(dir: &Path) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-fn update_cwd_index(dir: &Path, cwd: &str, session_id: &str) -> Result<(), StorageError> {
+fn update_cwd_index(dir: &Path, cwd: &str, session_id: EntityId) -> Result<(), StorageError> {
     let mut index = load_cwd_index(dir);
     index.insert(cwd.to_string(), session_id.to_string());
     atomic_write(&dir.join(CWD_INDEX_FILE), &serde_json::to_vec(&index)?)
 }
 
-fn try_remove(path: &Path) -> Result<bool, StorageError> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn remove_from_cwd_index(dir: &Path, session_id: &str) -> Result<(), StorageError> {
+fn remove_from_cwd_index(dir: &Path, session_id: EntityId) -> Result<(), StorageError> {
     let mut index = load_cwd_index(dir);
     let before = index.len();
-    index.retain(|_, v| v != session_id);
+    index.retain(|_, v| v.parse::<EntityId>() != Ok(session_id));
     if index.len() != before {
         atomic_write(&dir.join(CWD_INDEX_FILE), &serde_json::to_vec(&index)?)?;
     }
@@ -622,7 +619,7 @@ fn remove_from_cwd_index(dir: &Path, session_id: &str) -> Result<(), StorageErro
 #[derive(Deserialize)]
 struct JsonlHeader {
     v: u32,
-    id: String,
+    id: EntityId,
     cwd: String,
 }
 
@@ -740,6 +737,57 @@ fn session_entries(dir: &Path) -> Result<Vec<PathBuf>, StorageError> {
     Ok(entries)
 }
 
+fn header_id_at(path: &Path) -> Option<EntityId> {
+    if path.extension().is_some_and(|e| e == "jsonl") {
+        let file = File::open(path).ok()?;
+        let mut reader = BufReader::new(&file);
+        let mut line = String::new();
+        reader.read_line(&mut line).ok()?;
+        let header: JsonlHeader = serde_json::from_str(line.trim_end()).ok()?;
+        return Some(header.id);
+    }
+    let data = fs::read(path).ok()?;
+    let header: LegacyHeader = serde_json::from_slice(&data).ok()?;
+    Some(header.id)
+}
+
+fn find_legacy_file(dir: &Path, id: EntityId) -> Option<PathBuf> {
+    session_entries(dir).ok()?.into_iter().find(|p| {
+        p.file_stem().and_then(|s| s.to_str()) != Some(id.to_string().as_str())
+            && header_id_at(p) == Some(id)
+    })
+}
+
+fn locate_session_file(dir: &Path, id: EntityId) -> Option<PathBuf> {
+    for ext in ["jsonl", "json"] {
+        let path = dir.join(format!("{id}.{ext}"));
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    find_legacy_file(dir, id)
+}
+
+fn load_session_at<M, U, T>(path: &Path) -> Result<Session<M, U, T>, SessionError>
+where
+    M: DeserializeOwned,
+    U: DeserializeOwned + Default,
+    T: DeserializeOwned,
+{
+    if path.extension().is_some_and(|e| e == "jsonl") {
+        return load_jsonl(path);
+    }
+    let data = fs::read(path).map_err(StorageError::from)?;
+    let session: Session<M, U, T> = serde_json::from_slice(&data).map_err(StorageError::from)?;
+    if session.version != SESSION_VERSION {
+        return Err(SessionError::VersionMismatch {
+            found: session.version,
+            expected: SESSION_VERSION,
+        });
+    }
+    Ok(session)
+}
+
 // -- Session impl --
 
 impl<M, U, T> Session<M, U, T>
@@ -752,7 +800,7 @@ where
         let now = now_epoch();
         Self {
             version: SESSION_VERSION,
-            id: uuid::Uuid::new_v4().to_string(),
+            id: EntityId::generate(),
             title: DEFAULT_TITLE.into(),
             cwd: cwd.into(),
             model: model.into(),
@@ -780,28 +828,27 @@ where
         Ok(())
     }
 
-    pub fn load(id: &str, dir: &StateDir) -> Result<Self, SessionError> {
+    pub fn load(id: EntityId, dir: &StateDir) -> Result<Self, SessionError> {
         let sessions_dir = dir.ensure_subdir(SESSIONS_DIR)?;
         Self::load_from(id, &sessions_dir)
     }
 
-    pub fn load_from(id: &str, dir: &Path) -> Result<Self, SessionError> {
-        let jsonl_path = dir.join(format!("{id}.jsonl"));
-        if jsonl_path.exists() {
-            return load_jsonl(&jsonl_path);
-        }
-
-        let json_path = dir.join(format!("{id}.json"));
-        if !json_path.exists() {
-            return Err(StorageError::NotFound(id.into()).into());
-        }
-        let data = fs::read(&json_path).map_err(StorageError::from)?;
-        let session: Self = serde_json::from_slice(&data).map_err(StorageError::from)?;
-        if session.version != SESSION_VERSION {
-            return Err(SessionError::VersionMismatch {
-                found: session.version,
-                expected: SESSION_VERSION,
-            });
+    pub fn load_from(id: EntityId, dir: &Path) -> Result<Self, SessionError> {
+        let Some(path) = locate_session_file(dir, id) else {
+            return Err(StorageError::NotFound(id.to_string()).into());
+        };
+        let session = load_session_at::<M, U, T>(&path)?;
+        let needs_migration = path.extension().is_some_and(|e| e == "json")
+            || path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s != id.to_string().as_str());
+        if needs_migration {
+            if let Err(e) = SessionLog::create(dir, &session) {
+                warn!(error = %e, "failed migrate to canonical jsonl; keeping legacy file");
+            } else if let Err(e) = fs::remove_file(&path) {
+                warn!(error = %e, path = %path.display(), "legacy file remains after migration");
+            }
         }
         Ok(session)
     }
@@ -824,15 +871,19 @@ where
 
     pub fn latest_in(cwd: &str, dir: &Path) -> Result<Option<Self>, SessionError> {
         let index = load_cwd_index(dir);
-        if let Some(id) = index.get(cwd)
-            && let Ok(s) = Self::load_from(id, dir)
-        {
-            return Ok(Some(s));
+        if let Some(id) = index.get(cwd) {
+            match id.parse::<EntityId>() {
+                Ok(id) => match Self::load_from(id, dir) {
+                    Ok(s) => return Ok(Some(s)),
+                    Err(e) => warn!(error = %e, cwd, "indexed session missing on disk; rescanning"),
+                },
+                Err(e) => warn!(error = %e, cwd, "indexed session id unparseable; rescanning"),
+            }
         }
         let summaries = scan_headers(cwd, dir)?;
         let latest = summaries.into_iter().max_by_key(|s| s.updated_at);
         match latest {
-            Some(s) => Self::load_from(&s.id, dir).map(Some),
+            Some(s) => Self::load_from(s.id, dir).map(Some),
             None => Ok(None),
         }
     }
@@ -843,26 +894,25 @@ where
         }
     }
 
-    pub fn delete(id: &str, dir: &StateDir) -> Result<(), SessionError> {
+    pub fn delete(id: EntityId, dir: &StateDir) -> Result<(), SessionError> {
         let sessions_dir = dir.ensure_subdir(SESSIONS_DIR)?;
         Self::delete_from(id, &sessions_dir)
     }
 
-    pub fn delete_from(id: &str, dir: &Path) -> Result<(), SessionError> {
-        let jsonl_gone = try_remove(&dir.join(format!("{id}.jsonl")))?;
-        let json_gone = try_remove(&dir.join(format!("{id}.json")))?;
-
-        if !jsonl_gone && !json_gone {
-            return Err(StorageError::NotFound(id.into()).into());
-        }
-
+    pub fn delete_from(id: EntityId, dir: &Path) -> Result<(), SessionError> {
+        let Some(path) = locate_session_file(dir, id) else {
+            return Err(StorageError::NotFound(id.to_string()).into());
+        };
+        fs::remove_file(&path).map_err(StorageError::from)?;
         remove_from_cwd_index(dir, id)?;
         Ok(())
     }
 
     pub fn migrate_to_jsonl(dir: &Path, session: &Self) -> Result<SessionLog, SessionError> {
         let log = SessionLog::create(dir, session)?;
-        let _ = fs::remove_file(dir.join(format!("{}.json", session.id)));
+        if let Err(e) = fs::remove_file(dir.join(format!("{}.json", session.id))) {
+            warn!(error = %e, "legacy .json remains after migrate_to_jsonl");
+        }
         Ok(log)
     }
 }
@@ -873,9 +923,10 @@ mod tests {
     use super::ThinkingParseError;
     use super::{
         CWD_INDEX_FILE, DEFAULT_TITLE, MAX_TITLE_LEN, SESSION_VERSION, TAIL_BUF, generate_title,
-        load_cwd_index, update_cwd_index,
+        load_cwd_index, update_cwd_index, write_full_session,
     };
     use super::{Session, SessionError, SessionLog, StorageError, TitleSource};
+    use maki_util::EntityId;
     use serde_json::Value;
     use std::collections::HashMap;
     use std::fs::{self, OpenOptions};
@@ -929,7 +980,7 @@ mod tests {
         );
         session.save_to(dir).unwrap();
 
-        let loaded = TestSession::load_from(&session.id, dir).unwrap();
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.model, "anthropic/claude-sonnet-4");
         assert_eq!(loaded.cwd, "/home/test/project");
@@ -967,7 +1018,7 @@ mod tests {
             .insert("sub-2".into(), vec![user_message("sub-2-prompt")]);
         log.append(&session).unwrap();
 
-        let loaded = TestSession::load_from(&session.id, dir).unwrap();
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(loaded.messages.len(), 3);
         assert_eq!(loaded.tool_outputs.len(), 1);
         assert!(loaded.tool_outputs.contains_key("tool-1"));
@@ -999,7 +1050,7 @@ mod tests {
         let mut file = OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(b"{\"t\":\"msg\",\"d\":{\"trun").unwrap();
 
-        let loaded = TestSession::load_from(&session.id, dir).unwrap();
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(loaded.messages.len(), 1);
     }
 
@@ -1027,7 +1078,7 @@ mod tests {
         session.messages.push(user_message("after-compact-3"));
         log.append(&session).unwrap();
 
-        let loaded = TestSession::load_from(&session.id, dir).unwrap();
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(loaded.messages.len(), 8);
         assert!(loaded.subagent_messages.is_empty());
     }
@@ -1041,9 +1092,9 @@ mod tests {
 
         let json_path = dir.join(format!("{}.json", session.id));
         fs::write(&json_path, serde_json::to_vec(&session).unwrap()).unwrap();
-        update_cwd_index(dir, &session.cwd, &session.id).unwrap();
+        update_cwd_index(dir, &session.cwd, session.id).unwrap();
 
-        let loaded = TestSession::load_from(&session.id, dir).unwrap();
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(loaded.messages.len(), 1);
 
         let _log = TestSession::migrate_to_jsonl(dir, &loaded).unwrap();
@@ -1051,7 +1102,7 @@ mod tests {
         assert!(!json_path.exists());
         assert!(dir.join(format!("{}.jsonl", session.id)).exists());
 
-        let reloaded = TestSession::load_from(&session.id, dir).unwrap();
+        let reloaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(reloaded.messages.len(), 1);
         assert_eq!(reloaded.model, "m");
     }
@@ -1059,11 +1110,36 @@ mod tests {
     #[test]
     fn load_nonexistent_returns_not_found() {
         let tmp = TempDir::new().unwrap();
-        let err = TestSession::load_from("nonexistent-id", tmp.path()).unwrap_err();
+        let id = EntityId::generate();
+        let err = TestSession::load_from(id, tmp.path()).unwrap_err();
         assert!(matches!(
             err,
             SessionError::Storage(StorageError::NotFound(_))
         ));
+    }
+
+    #[test_case("550e8400-e29b-41d4-a716-446655440000")]
+    #[test_case("550e8400e29b41d4a716446655440000")]
+    fn load_legacy_hex_filename_migrates_to_canonical(legacy: &str) {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let id: EntityId = legacy.parse().unwrap();
+        let mut session: TestSession = Session::new("m", "/project");
+        session.id = id;
+        session.messages.push(user_message("legacy"));
+        let legacy_path = dir.join(format!("{legacy}.jsonl"));
+        let mut file = std::fs::File::create(&legacy_path).unwrap();
+        write_full_session(&mut file, &session).unwrap();
+        drop(file);
+
+        let loaded = TestSession::load_from(id, dir).unwrap();
+        assert_eq!(loaded.id, id);
+        assert_eq!(loaded.messages.len(), 1);
+
+        assert!(!legacy_path.exists());
+        let canonical = dir.join(format!("{id}.jsonl"));
+        assert!(canonical.exists());
     }
 
     #[test]
@@ -1085,7 +1161,7 @@ mod tests {
     fn save_with_time(session: &mut TestSession, dir: &Path, time: u64) {
         session.updated_at = time;
         SessionLog::create(dir, session).unwrap();
-        update_cwd_index(dir, &session.cwd, &session.id).unwrap();
+        update_cwd_index(dir, &session.cwd, session.id).unwrap();
     }
 
     #[test]
@@ -1147,21 +1223,66 @@ mod tests {
         let mut s2: TestSession = Session::new("m", "/other");
         s2.save_to(dir).unwrap();
 
-        TestSession::delete_from(&s1.id, dir).unwrap();
+        TestSession::delete_from(s1.id, dir).unwrap();
         assert!(!dir.join(format!("{}.jsonl", s1.id)).exists());
         let index = load_cwd_index(dir);
-        assert!(!index.values().any(|v| v == &s1.id));
-        assert_eq!(index.get("/other"), Some(&s2.id));
+        assert!(!index.values().any(|v| *v == s1.id.to_string()));
+        assert_eq!(index.get("/other"), Some(&s2.id.to_string()));
     }
 
     #[test]
     fn delete_nonexistent_returns_not_found() {
         let tmp = TempDir::new().unwrap();
-        let err = TestSession::delete_from("nonexistent", tmp.path()).unwrap_err();
+        let id = EntityId::generate();
+        let err = TestSession::delete_from(id, tmp.path()).unwrap_err();
         assert!(matches!(
             err,
             SessionError::Storage(StorageError::NotFound(_))
         ));
+    }
+
+    #[test_case("550e8400-e29b-41d4-a716-446655440000")]
+    #[test_case("550e8400e29b41d4a716446655440000")]
+    fn delete_legacy_hex_filename_removes_file(legacy: &str) {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let id: EntityId = legacy.parse().unwrap();
+        let mut session: TestSession = Session::new("m", "/project");
+        session.id = id;
+        session.messages.push(user_message("legacy"));
+        let legacy_path = dir.join(format!("{legacy}.jsonl"));
+        let mut file = std::fs::File::create(&legacy_path).unwrap();
+        write_full_session(&mut file, &session).unwrap();
+        drop(file);
+
+        TestSession::delete_from(id, dir).unwrap();
+        assert!(!legacy_path.exists());
+        let canonical = dir.join(format!("{id}.jsonl"));
+        assert!(!canonical.exists());
+    }
+
+    #[test]
+    fn remove_from_cwd_index_matches_legacy_hex_value() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let legacy = "550e8400-e29b-41d4-a716-446655440000";
+        let id: EntityId = legacy.parse().unwrap();
+        let mut session: TestSession = Session::new("m", "/project");
+        session.id = id;
+
+        let mut index: HashMap<String, String> = HashMap::new();
+        index.insert("/project".into(), legacy.to_string());
+        fs::write(
+            dir.join(CWD_INDEX_FILE),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+
+        super::remove_from_cwd_index(dir, session.id).unwrap();
+        let after = load_cwd_index(dir);
+        assert!(!after.contains_key("/project"));
     }
 
     #[test]
@@ -1199,7 +1320,7 @@ mod tests {
         let path = dir.join(format!("{}.json", session.id));
         fs::write(&path, serde_json::to_vec(&session).unwrap()).unwrap();
 
-        let err = TestSession::load_from(&session.id, dir).unwrap_err();
+        let err = TestSession::load_from(session.id, dir).unwrap_err();
         assert!(matches!(
             err,
             SessionError::VersionMismatch { found: 999, .. }
@@ -1218,14 +1339,14 @@ mod tests {
         log.append(&session).unwrap();
         drop(log);
 
-        let (loaded, mut log) = SessionLog::open::<Value, Value, Value>(dir, &session.id).unwrap();
+        let (loaded, mut log) = SessionLog::open::<Value, Value, Value>(dir, session.id).unwrap();
         assert_eq!(loaded.messages.len(), 2);
 
         session.messages.push(user_message("second"));
         log.append(&session).unwrap();
         drop(log);
 
-        let reloaded = TestSession::load_from(&session.id, dir).unwrap();
+        let reloaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(reloaded.messages.len(), 3);
     }
 
@@ -1236,15 +1357,16 @@ mod tests {
         let bad_header = serde_json::json!({
             "t": "header",
             "v": 999,
-            "id": "test-id",
+            "id": "01965087-4c71-7f00-8000-000000000000",
             "model": "m",
             "cwd": "/tmp",
             "created_at": 0
         });
-        let path = dir.join("test-id.jsonl");
+        let id: EntityId = "01965087-4c71-7f00-8000-000000000000".parse().unwrap();
+        let path = dir.join(format!("{id}.jsonl"));
         fs::write(&path, format!("{}\n", bad_header)).unwrap();
 
-        let err = TestSession::load_from("test-id", dir).unwrap_err();
+        let err = TestSession::load_from(id, dir).unwrap_err();
         assert!(matches!(
             err,
             SessionError::VersionMismatch { found: 999, .. }
@@ -1288,7 +1410,7 @@ mod tests {
         session.meta.fast = true;
         session.save_to(dir).unwrap();
 
-        let loaded = TestSession::load_from(&session.id, dir).unwrap();
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(
             loaded.meta.thinking,
             Some(StoredThinking::Budget { tokens: 8192 })
@@ -1319,7 +1441,7 @@ mod tests {
         .unwrap();
         file.write_all(b"\n").unwrap();
 
-        let loaded = TestSession::load_from(&session.id, dir).unwrap();
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(loaded.messages.len(), 2);
         assert!(loaded.tool_outputs.contains_key("t1"));
     }
@@ -1328,7 +1450,7 @@ mod tests {
     fn corrupt_header_line_only_returns_not_found() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
-        let id = "fake-session-id";
+        let id: EntityId = "01965087-4c71-7f00-8000-000000000000".parse().unwrap();
         let path = dir.join(format!("{id}.jsonl"));
         fs::write(&path, "NOT_A_HEADER\n").unwrap();
 
@@ -1358,7 +1480,7 @@ mod tests {
         .unwrap();
         file.write_all(b"\n").unwrap();
 
-        let loaded = TestSession::load_from(&session.id, dir).unwrap();
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(loaded.messages.len(), 2);
     }
 
@@ -1382,7 +1504,7 @@ mod tests {
         .unwrap();
         file.write_all(b"\n").unwrap();
 
-        let loaded = TestSession::load_from(&session.id, dir).unwrap();
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
         assert_eq!(loaded.messages.len(), 2);
     }
 

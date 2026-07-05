@@ -15,7 +15,6 @@ use maki_providers::{ContentBlock, Model, ModelError, Role, ThinkingConfig};
 use mlua::{Lua, Result as LuaResult, Table, Value as LuaValue};
 use serde_json::Value as JsonValue;
 use tracing::info;
-use uuid::Uuid;
 
 use crate::api::util::convert::{json_to_lua, lua_to_json};
 use crate::api::util::ctx::AgentContext;
@@ -223,7 +222,7 @@ async fn run(lua: Lua, (agent_ctx_ud, opts): (mlua::AnyUserData, Table)) -> LuaR
 
     let description = name.as_deref().unwrap_or_default();
 
-    let session_id = Uuid::new_v4().to_string();
+    let session_id = maki_util::EntityId::generate();
     let (sub_tx, sub_rx) = flume::unbounded::<Envelope>();
     let sub_event_tx = EventSender::new(sub_tx, agent_ctx.event_tx.run_id());
     let parent_tx = agent_ctx.event_tx.clone();

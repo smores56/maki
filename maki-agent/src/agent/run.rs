@@ -22,6 +22,7 @@ use crate::{
     InterruptSource, TurnCompleteEvent,
 };
 use maki_config::ToolOutputLines;
+use maki_util::EntityId;
 
 const MAX_REAUTH_ATTEMPTS: u32 = 2;
 const NUDGE_PROMPT: &str = "You just executed tool calls but returned an empty response. Please process the tool results above and continue with the task.";
@@ -54,7 +55,7 @@ pub struct AgentParams {
     pub config: AgentConfig,
     pub tool_output_lines: ToolOutputLines,
     pub permissions: Arc<PermissionManager>,
-    pub session_id: Option<String>,
+    pub session_id: Option<EntityId>,
     pub timeouts: maki_providers::Timeouts,
     pub file_tracker: Arc<FileReadTracker>,
     pub prompt_slots: Arc<crate::prompt::ResolvedSlots>,
@@ -93,7 +94,7 @@ pub struct Agent<'h> {
     post_tool_empty_retried: bool,
     permissions: Arc<PermissionManager>,
     opts: RequestOptions,
-    session_id: Option<String>,
+    session_id: Option<EntityId>,
     timeouts: maki_providers::Timeouts,
     file_tracker: Arc<FileReadTracker>,
     prompt_slots: Arc<crate::prompt::ResolvedSlots>,
@@ -220,7 +221,7 @@ impl<'h> Agent<'h> {
             &self.event_tx,
             &self.cancel,
             self.opts,
-            self.session_id.as_deref(),
+            self.session_id,
         )
         .await
         {
@@ -532,7 +533,7 @@ mod tests {
             _: &'a Value,
             _: &'a flume::Sender<ProviderEvent>,
             _: RequestOptions,
-            _: Option<&str>,
+            _: Option<EntityId>,
         ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
             Box::pin(async {
                 let mut responses = self.responses.lock().unwrap();
@@ -817,7 +818,7 @@ mod tests {
                     _: &'a Value,
                     _: &'a flume::Sender<ProviderEvent>,
                     _: RequestOptions,
-                    _: Option<&'a str>,
+                    _: Option<EntityId>,
                 ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
                     Box::pin(async {
                         futures_lite::future::pending::<()>().await;

@@ -156,8 +156,7 @@ maki.api.register_tool({
   end,
 
   restore = function(input, output, _is_error, ctx)
-    local content = (input.command == "write" and input.content) or output
-    return render_content(content, input.path or "file.md", ctx)
+    return render_content(output, input.path or "file.md", ctx)
   end,
 
   handler = function(input, ctx)
