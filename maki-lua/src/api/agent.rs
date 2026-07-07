@@ -448,7 +448,7 @@ async fn session(
         None => agent_ctx.opts.thinking,
     };
 
-    let session_id = Uuid::new_v4().to_string();
+    let session_id = Uuid::now_v7().to_string();
     let (sub_tx, sub_rx) = flume::unbounded::<Envelope>();
     let sub_event_tx = EventSender::new(sub_tx, agent_ctx.event_tx.run_id());
     let parent_tx = agent_ctx.event_tx.clone();

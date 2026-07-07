@@ -172,7 +172,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
 
     let (raw_tx, event_rx) = flume::unbounded::<Envelope>();
 
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let session_id = uuid::Uuid::now_v7().to_string();
 
     let fast = params.fast;
     let workflow = params.workflow;
@@ -312,7 +312,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
 
     let session_id = params
         .session_id
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
     let working_dir = params.initial_wd.to_string_lossy().into_owned();
     let permissions = Arc::new(PermissionManager::new(

@@ -6,10 +6,12 @@ pub mod auth;
 pub mod input_history;
 pub mod log;
 pub mod model;
+pub mod payloads;
 pub mod paths;
 pub mod plans;
 pub mod sessions;
 pub mod theme;
+pub mod tree;
 pub mod version;
 
 use std::fs;
@@ -77,7 +79,26 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), StorageError> {
     retry_rename(&tmp_path, path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         StorageError::Io(e)
-    })
+    })?;
+    sync_parent_dir(path)
+}
+
+/// fsync the parent directory after a path-introducing rename/create so the
+/// rename itself is durable across a crash. `atomic_write` already calls this;
+/// callers that rename/create files outside `atomic_write` must call it too.
+pub fn sync_parent_dir(path: &Path) -> Result<(), StorageError> {
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 pub(crate) fn atomic_write_permissions(
@@ -98,7 +119,8 @@ pub(crate) fn atomic_write_permissions(
     retry_rename(&tmp_path, path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         StorageError::Io(e)
-    })
+    })?;
+    sync_parent_dir(path)
 }
 
 /// Rename with fibonacci backoff to handle transient `PermissionDenied` from

@@ -1256,6 +1256,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fearless_simd"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a847f35d37ef14f89ccd8028d7d98a43a59d3c9bfae690ca7a8a95a5937ff9b5"
+
+[[package]]
 name = "filedescriptor"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2149,7 +2155,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2672,6 +2678,7 @@ dependencies = [
 name = "maki-storage"
 version = "0.3.26"
 dependencies = [
+ "bs58",
  "etcetera",
  "getrandom 0.3.4",
  "isahc",
@@ -2682,6 +2689,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "zrip",
 ]
 
 [[package]]
@@ -6384,6 +6392,42 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zrip"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8375d48aa35c331f07cbe710b4991c701d0216ed88f58b3d4741d4b7c4537daf"
+dependencies = [
+ "zrip-core",
+ "zrip-decode",
+ "zrip-encode",
+]
+
+[[package]]
+name = "zrip-core"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c08c58dd1601e891cd12fc6a722027819e38d0979a713743e88a08de26d27a0"
+
+[[package]]
+name = "zrip-decode"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d431eb77dcd9f5293b6e8e6d577940e228f0ed42065ee0447d2b943ea3b8029c"
+dependencies = [
+ "fearless_simd",
+ "zrip-core",
+]
+
+[[package]]
+name = "zrip-encode"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "293fa608e036fd972879fa27564656a8233b08a09ba9f1833555413d8fa74644"
+dependencies = [
+ "zrip-core",
+]
 
 [[package]]
 name = "zune-core"

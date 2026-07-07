@@ -5,11 +5,34 @@ use std::sync::{Arc, Mutex};
 
 use flume::Sender;
 use maki_providers::{AgentError, ContentBlock, Message, Role, StopReason, TokenUsage};
+use maki_storage::payloads::{PayloadReader, PayloadWriter, StoredInTree};
+use maki_storage::sessions::SessionError;
 use maki_tool_macro::{ArgEnum, Args};
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub const NO_FILES_FOUND: &str = "No files found";
+
+const PAYLOAD_REF_KEY: &str = "payload_id";
+
+impl StoredInTree for ToolOutput {
+    fn encode(&self, writer: &mut PayloadWriter) -> Result<Value, SessionError> {
+        let bytes = serde_json::to_vec(self).map_err(maki_storage::StorageError::from)?;
+        let id = writer.write(&bytes)?;
+        Ok(serde_json::json!({ PAYLOAD_REF_KEY: id.as_str() }))
+    }
+
+    fn decode(value: Value, reader: &PayloadReader) -> Result<Self, SessionError> {
+        let payload_id = value
+            .get(PAYLOAD_REF_KEY)
+            .and_then(Value::as_str)
+            .ok_or_else(|| SessionError::MissingPayload("tool_output".into()))?;
+        let bytes = reader.read(payload_id)?;
+        let output: Self = serde_json::from_slice(&bytes).map_err(maki_storage::StorageError::from)?;
+        Ok(output)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrepFileEntry {

@@ -56,7 +56,7 @@ impl StorageWriter {
                     let l = log.as_mut().unwrap();
                     match l.append(&*session) {
                         Ok(()) => {}
-                        Err(SessionError::CursorAhead { .. }) => {
+                        Err(SessionError::CorruptTree(_)) => {
                             match l.compact(&sessions_dir, &*session) {
                                 Ok(()) => {}
                                 Err(e) => {
@@ -96,8 +96,8 @@ fn open_or_create_log(
     sessions_dir: &Path,
     session: &AppSession,
 ) -> Result<SessionLog, maki_storage::sessions::SessionError> {
-    let jsonl_path = sessions_dir.join(format!("{}.jsonl", session.id));
-    if jsonl_path.exists() {
+    let session_dir = sessions_dir.join(&session.id);
+    if session_dir.is_dir() {
         let (_loaded, log) = SessionLog::open::<
             maki_providers::Message,
             maki_providers::TokenUsage,

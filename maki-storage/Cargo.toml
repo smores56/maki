@@ -13,6 +13,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 etcetera = { workspace = true }
 uuid = { workspace = true }
+bs58 = { workspace = true }
+zrip = { workspace = true }
 
 [dev-dependencies]
 test-case = { workspace = true }

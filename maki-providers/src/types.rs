@@ -189,6 +189,158 @@ impl TitleSource for Message {
     }
 }
 
+const PAYLOAD_REF_KEY: &str = "payload_id";
+const MEDIA_TYPE_KEY: &str = "media_type";
+const TOOL_USE_ID_KEY: &str = "tool_use_id";
+const IS_ERROR_KEY: &str = "is_error";
+const TYPE_KEY: &str = "type";
+
+fn externalize_block(
+    block: &ContentBlock,
+    writer: &mut maki_storage::payloads::PayloadWriter,
+) -> Result<Value, maki_storage::sessions::SessionError> {
+    let mut value = serde_json::to_value(block).map_err(maki_storage::StorageError::from)?;
+    let Some(obj) = value.as_object_mut() else {
+        return Ok(value);
+    };
+    match block {
+        ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            let id = writer.write(content.as_bytes())?;
+            obj.clear();
+            obj.insert(TYPE_KEY.into(), json!("tool_result"));
+            obj.insert(TOOL_USE_ID_KEY.into(), tool_use_id.clone().into());
+            obj.insert(PAYLOAD_REF_KEY.into(), id.as_str().into());
+            if *is_error {
+                obj.insert(IS_ERROR_KEY.into(), true.into());
+            }
+        }
+        ContentBlock::Image { source } => {
+            let raw = base64_decode(&source.data)?;
+            let id = writer.write(&raw)?;
+            let media = serde_json::to_value(source.media_type).unwrap_or_default();
+            obj.clear();
+            obj.insert(TYPE_KEY.into(), json!("image"));
+            obj.insert(MEDIA_TYPE_KEY.into(), media);
+            obj.insert(PAYLOAD_REF_KEY.into(), id.as_str().into());
+        }
+        _ => {}
+    }
+    Ok(value)
+}
+
+fn rehydrate_block(
+    block: &Value,
+    reader: &maki_storage::payloads::PayloadReader,
+) -> Result<ContentBlock, maki_storage::sessions::SessionError> {
+    use maki_storage::sessions::SessionError;
+    let t = block.get(TYPE_KEY).and_then(Value::as_str).unwrap_or("");
+    match t {
+        "tool_result" => {
+            let tool_use_id = block
+                .get(TOOL_USE_ID_KEY)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let payload_id = block
+                .get(PAYLOAD_REF_KEY)
+                .and_then(Value::as_str)
+                .ok_or_else(|| SessionError::MissingPayload(t.into()))?;
+            let bytes = reader.read(payload_id)?;
+            let content = String::from_utf8(bytes)
+                .map_err(|e| SessionError::CorruptPayload(e.into_bytes()))?;
+            let is_error = block
+                .get(IS_ERROR_KEY)
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Ok(ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            })
+        }
+        "image" => {
+            let payload_id = block
+                .get(PAYLOAD_REF_KEY)
+                .and_then(Value::as_str)
+                .ok_or_else(|| SessionError::MissingPayload(t.into()))?;
+            let raw = reader.read(payload_id)?;
+            let data = base64_encode(&raw);
+            let media_type: ImageMediaType = block
+                .get(MEDIA_TYPE_KEY)
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or(ImageMediaType::Png);
+            Ok(ContentBlock::Image {
+                source: ImageSource::new(media_type, data),
+            })
+        }
+        _ => serde_json::from_value(block.clone())
+            .map_err(maki_storage::StorageError::from)
+            .map_err(SessionError::from),
+    }
+}
+
+fn base64_decode(data: &Arc<str>) -> Result<Vec<u8>, maki_storage::sessions::SessionError> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| maki_storage::sessions::SessionError::CorruptPayload(e.to_string().into_bytes()))
+}
+
+fn base64_encode(data: &[u8]) -> Arc<str> {
+    use base64::Engine;
+    let s = base64::engine::general_purpose::STANDARD.encode(data);
+    Arc::<str>::from(s)
+}
+
+impl maki_storage::payloads::StoredInTree for Message {
+    fn encode(
+        &self,
+        writer: &mut maki_storage::payloads::PayloadWriter,
+    ) -> Result<Value, maki_storage::sessions::SessionError> {
+        let role = serde_json::to_value(&self.role).unwrap_or_default();
+        let content: Vec<Value> = self
+            .content
+            .iter()
+            .map(|b| externalize_block(b, writer))
+            .collect::<Result<_, _>>()?;
+        Ok(json!({
+            "role": role,
+            "content": content,
+            "display_text": self.display_text,
+        }))
+    }
+
+    fn decode(
+        value: Value,
+        reader: &maki_storage::payloads::PayloadReader,
+    ) -> Result<Self, maki_storage::sessions::SessionError> {
+        let role = value
+            .get("role")
+            .cloned()
+            .map(|v| serde_json::from_value(v).unwrap_or_default())
+            .unwrap_or_default();
+        let content: Vec<ContentBlock> = value
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .map(|b| rehydrate_block(b, reader))
+                    .collect::<Result<_, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let display_text = value
+            .get("display_text")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        Ok(Self {
+            role,
+            content,
+            display_text,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub enum ProviderEvent {
     TextDelta { text: String },

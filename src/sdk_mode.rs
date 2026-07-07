@@ -336,7 +336,7 @@ impl StreamSynth {
         vec![serde_json::json!({
             "type": "message_start",
             "message": {
-                "id": uuid::Uuid::new_v4().to_string(),
+                "id": uuid::Uuid::now_v7().to_string(),
                 "type": "message",
                 "role": "assistant",
                 "content": [],
@@ -398,7 +398,7 @@ impl SdkWriter {
         let msg = WireMessage {
             inner,
             session_id: self.session_id.clone(),
-            uuid: uuid::Uuid::new_v4().to_string(),
+            uuid: uuid::Uuid::now_v7().to_string(),
         };
         self.out_tx
             .send(serde_json::to_string(&msg)?)
@@ -940,7 +940,7 @@ impl EventPump {
                 }
                 self.writer.emit(WireInner::Assistant(AssistantPayload {
                     message: AssistantMessage {
-                        id: uuid::Uuid::new_v4().to_string(),
+                        id: uuid::Uuid::now_v7().to_string(),
                         model: tc.model.clone(),
                         role: "assistant",
                         content: map_tool_names_in_content(&content_value),
