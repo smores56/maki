@@ -25,6 +25,7 @@ pub mod update;
 mod agent;
 pub(crate) mod doorbell;
 mod event_loop;
+mod input;
 mod terminal;
 
 use color_eyre::Result;

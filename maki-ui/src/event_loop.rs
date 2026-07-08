@@ -6,7 +6,7 @@ use color_eyre::Result;
 use color_eyre::eyre::Context;
 
 use crossterm::event::{
-    self, Event, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
+    Event, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
 };
 use maki_agent::command::CustomCommand;
 use maki_agent::permissions::PermissionManager;
@@ -26,6 +26,7 @@ use crate::app::{App, Msg};
 use crate::components::input::Submission;
 use crate::components::usage_modal::UsageFetchState;
 use crate::components::{Action, ExitRequest, Status};
+use crate::input::InputSource;
 
 use crate::storage_writer::StorageWriter;
 use crate::terminal;
@@ -67,6 +68,7 @@ pub(crate) struct EventLoop<'t> {
     storage_writer: Arc<StorageWriter>,
     timeouts: Timeouts,
     ui_action_rx: Option<flume::Receiver<UiAction>>,
+    input: InputSource,
     _model_fetch_task: smol::Task<()>,
 }
 
@@ -258,6 +260,7 @@ impl<'t> EventLoop<'t> {
             storage_writer,
             timeouts,
             ui_action_rx,
+            input: InputSource::spawn(),
             _model_fetch_task: bg.task,
         })
     }
@@ -331,6 +334,7 @@ impl<'t> EventLoop<'t> {
                         self.app.flash(msg);
                     }
                     UiAction::OpenEditor { path, reply_tx } => {
+                        let _pause = self.input.pause();
                         let code = match crate::terminal::open_in_editor(&path, self.terminal) {
                             Ok(code) => code,
                             Err(e) => {
@@ -372,25 +376,27 @@ impl<'t> EventLoop<'t> {
             Duration::from_millis(IDLE_POLL_INTERVAL_MS)
         };
 
-        if !event::poll(poll_duration)? {
-            return Ok(());
-        }
-
-        if let Some(msg) = self.translate_input()? {
+        let raw = match self.input.rx.recv_timeout(poll_duration) {
+            Ok(raw) => raw,
+            Err(flume::RecvTimeoutError::Timeout) => return Ok(()),
+            Err(flume::RecvTimeoutError::Disconnected) => {
+                return Err(color_eyre::eyre::eyre!("input reader thread exited"));
+            }
+        };
+        if let Some(msg) = self.translate_input(raw) {
             let actions = self.app.update(msg);
             self.dispatch(actions);
         }
         Ok(())
     }
 
-    fn translate_input(&mut self) -> Result<Option<Msg>> {
-        let raw = event::read()?;
+    fn translate_input(&mut self, raw: Event) -> Option<Msg> {
         match raw {
-            Event::Key(key) if key.kind == KeyEventKind::Press => Ok(Some(Msg::Key(key))),
-            Event::Key(_) => Ok(None),
-            Event::Paste(text) => Ok(Some(Msg::Paste(text))),
-            Event::Mouse(mouse) => Ok(self.translate_mouse(mouse)),
-            _ => Ok(None),
+            Event::Key(key) if key.kind == KeyEventKind::Press => Some(Msg::Key(key)),
+            Event::Key(_) => None,
+            Event::Paste(text) => Some(Msg::Paste(text)),
+            Event::Mouse(mouse) => self.translate_mouse(mouse),
+            _ => None,
         }
     }
 
@@ -398,6 +404,7 @@ impl<'t> EventLoop<'t> {
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let (scroll, extra) = aggregate_scroll(
+                    &self.input.rx,
                     mouse.column,
                     mouse.row,
                     scroll_delta(mouse.kind, self.app.ui_config.mouse_scroll_lines),
@@ -406,16 +413,16 @@ impl<'t> EventLoop<'t> {
                 if let Some(extra) = extra {
                     let actions = self.app.update(scroll);
                     self.dispatch(actions);
-                    Some(extra)
+                    self.translate_input(extra)
                 } else {
                     Some(scroll)
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                let (drag, extra) = coalesce_drag(mouse);
+                let (drag, extra) = coalesce_drag(&self.input.rx, mouse);
                 let actions = self.app.update(Msg::Mouse(drag));
                 self.dispatch(actions);
-                extra
+                extra.and_then(|ev| self.translate_input(ev))
             }
             _ => Some(Msg::Mouse(mouse)),
         }
@@ -524,11 +531,13 @@ impl<'t> EventLoop<'t> {
                 );
             }
             Action::OpenEditor(path) => {
+                let _pause = self.input.pause();
                 if let Err(e) = terminal::open_in_editor(&path, self.terminal) {
                     self.app.flash(e);
                 }
             }
             Action::EditInputInEditor => {
+                let _pause = self.input.pause();
                 let current_text = self.app.input_box.buffer.value();
                 match terminal::edit_temp_content(&current_text, self.terminal) {
                     Ok(edited) => self.app.input_box.set_input(edited),
@@ -540,7 +549,10 @@ impl<'t> EventLoop<'t> {
                 self.app
                     .start_btw(question, Arc::clone(&slot.provider), slot.model.clone());
             }
-            Action::Suspend => terminal::suspend(self.terminal),
+            Action::Suspend => {
+                let _pause = self.input.pause();
+                terminal::suspend(self.terminal);
+            }
             Action::RefreshModels => self.refresh_models(),
             Action::RefreshUsage => self.refresh_usage(),
             Action::Quit => {}
@@ -639,36 +651,40 @@ fn scroll_delta(kind: MouseEventKind, lines: u32) -> i32 {
 }
 
 fn aggregate_scroll(
+    rx: &flume::Receiver<Event>,
     column: u16,
     row: u16,
     mut delta: i32,
     scroll_lines: u32,
-) -> (Msg, Option<Msg>) {
-    while event::poll(Duration::ZERO).unwrap_or(false) {
-        if let Ok(Event::Mouse(next)) = event::read() {
-            match next.kind {
+) -> (Msg, Option<Event>) {
+    while let Ok(next) = rx.try_recv() {
+        if let Event::Mouse(m) = next {
+            match m.kind {
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                    delta += scroll_delta(next.kind, scroll_lines);
+                    delta += scroll_delta(m.kind, scroll_lines);
                 }
-                _ => return (Msg::Scroll { column, row, delta }, Some(Msg::Mouse(next))),
+                _ => return (Msg::Scroll { column, row, delta }, Some(Event::Mouse(m))),
             }
         } else {
-            break;
+            return (Msg::Scroll { column, row, delta }, Some(next));
         }
     }
     (Msg::Scroll { column, row, delta }, None)
 }
 
-fn coalesce_drag(mut latest: CtMouseEvent) -> (CtMouseEvent, Option<Msg>) {
-    while event::poll(Duration::ZERO).unwrap_or(false) {
-        if let Ok(Event::Mouse(next)) = event::read() {
-            if matches!(next.kind, MouseEventKind::Drag(MouseButton::Left)) {
-                latest = next;
+fn coalesce_drag(
+    rx: &flume::Receiver<Event>,
+    mut latest: CtMouseEvent,
+) -> (CtMouseEvent, Option<Event>) {
+    while let Ok(next) = rx.try_recv() {
+        if let Event::Mouse(m) = next {
+            if matches!(m.kind, MouseEventKind::Drag(MouseButton::Left)) {
+                latest = m;
             } else {
-                return (latest, Some(Msg::Mouse(next)));
+                return (latest, Some(Event::Mouse(m)));
             }
         } else {
-            break;
+            return (latest, Some(next));
         }
     }
     (latest, None)
