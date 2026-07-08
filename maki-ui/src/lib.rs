@@ -23,6 +23,7 @@ mod theme;
 pub mod update;
 
 mod agent;
+pub(crate) mod doorbell;
 mod event_loop;
 mod terminal;
 
