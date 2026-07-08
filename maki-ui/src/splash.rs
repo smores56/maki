@@ -128,6 +128,14 @@ impl Default for Splash {
 }
 
 impl Splash {
+    pub fn is_animating_at(&self, now: Instant) -> bool {
+        self.animate || now.duration_since(self.start).as_secs_f32() < FADE_DURATION
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.is_animating_at(Instant::now())
+    }
+
     pub fn new(animate: bool) -> Self {
         let mut rng = [0u8; 8];
         getrandom::fill(&mut rng).ok();
@@ -532,6 +540,35 @@ mod tests {
         assert_eq!(
             ct.resolve_rgb(ct.start + Duration::from_secs(1)),
             (100, 140, 255)
+        );
+    }
+
+    #[test]
+    fn fade_in_progress_is_animating() {
+        let splash = Splash::new(false);
+        assert!(
+            splash.is_animating(),
+            "fade should be in progress right after construction"
+        );
+    }
+
+    #[test]
+    fn static_splash_settles_after_fade() {
+        let splash = Splash::new(false);
+        let now = Instant::now() + Duration::from_secs(2);
+        assert!(
+            !splash.is_animating_at(now),
+            "static splash must stop animating once the fade duration elapses"
+        );
+    }
+
+    #[test]
+    fn wave_field_animates_forever() {
+        let splash = Splash::new(true);
+        let now = Instant::now() + Duration::from_secs(100);
+        assert!(
+            splash.is_animating_at(now),
+            "wave field must keep animating indefinitely"
         );
     }
 }

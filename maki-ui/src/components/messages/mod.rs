@@ -724,7 +724,7 @@ impl MessagesPanel {
         self.in_progress_count() > 0
             || self.streaming_thinking.is_animating()
             || self.streaming_text.is_animating()
-            || self.show_idle_splash()
+            || (self.show_idle_splash() && self.idle_splash.is_animating())
             || self.accent.is_animating()
             || !self.live_bufs.is_empty()
     }
