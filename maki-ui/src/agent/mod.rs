@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::doorbell::Ringer;
 use arc_swap::ArcSwap;
 use maki_agent::mcp;
 use maki_agent::permissions::PermissionManager;
@@ -69,8 +70,10 @@ impl AgentHandles {
         session_id: Option<String>,
         timeouts: maki_providers::Timeouts,
         lua_handle: Option<EventHandle>,
+        ringer: Ringer,
     ) -> Self {
-        let (mcp_handle, mcp_config_errors) = smol::block_on(mcp::start(&cwd));
+        let notify: Option<Box<dyn Fn() + Send + Sync>> = Some(Box::new(move || ringer.ring()));
+        let (mcp_handle, mcp_config_errors) = smol::block_on(mcp::start(&cwd, notify));
         spawn_agent_internal(
             model_slot,
             initial_history,

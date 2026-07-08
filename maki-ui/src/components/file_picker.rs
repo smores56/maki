@@ -23,6 +23,7 @@ use crate::components::Overlay;
 use crate::components::keybindings::key;
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
+use crate::doorbell::Ringer;
 use crate::text_buffer::TextBuffer;
 use crate::theme;
 
@@ -78,17 +79,22 @@ impl Drop for Session {
 
 pub struct FilePickerModal {
     session: Option<Session>,
+    ringer: Ringer,
 }
 
 impl FilePickerModal {
-    pub fn new() -> Self {
-        Self { session: None }
+    pub fn new(ringer: Ringer) -> Self {
+        Self {
+            session: None,
+            ringer,
+        }
     }
 
     pub fn open(&mut self, cwd: &str) {
         self.close();
 
-        let notify = Arc::new(|| {});
+        let bell = self.ringer.clone();
+        let notify = Arc::new(move || bell.ring());
         let nucleo = Nucleo::new(Config::DEFAULT.match_paths(), notify, None, 1);
         let injector = nucleo.injector();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -534,7 +540,7 @@ mod tests {
     }
 
     fn pending_picker() -> (FilePickerModal, flume::Sender<()>) {
-        let mut picker = FilePickerModal::new();
+        let mut picker = FilePickerModal::new(Ringer::disconnected());
         let notify = Arc::new(|| {});
         let nucleo = Nucleo::new(Config::DEFAULT.match_paths(), notify, None, 1);
         let (done_tx, done_rx) = flume::bounded(1);
@@ -751,7 +757,7 @@ mod tests {
 
     #[test]
     fn handle_paste_returns_false_when_closed() {
-        let mut picker = FilePickerModal::new();
+        let mut picker = FilePickerModal::new(Ringer::disconnected());
         assert!(!picker.handle_paste("test"));
     }
 

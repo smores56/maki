@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use arc_swap::{ArcSwapAny, RefCnt};
-use flume::{Receiver, Sender, TryRecvError};
+use flume::{Receiver, Sender};
+
+#[cfg(test)]
+use flume::TryRecvError;
 
 /// Wakes the event loop after a producer publishes to its own data channel
 /// or slot. bounded(1) so rings collapse: a full doorbell means a wake is
@@ -68,21 +71,26 @@ impl<T> NotifyingSender<T> {
         Self { data, bell }
     }
 
+    #[allow(dead_code)]
     pub fn send(&self, value: T) {
         let _ = self.data.send(value);
         self.bell.ring();
     }
 
-    #[expect(dead_code)]
-    pub fn try_send(&self, value: T) {
-        let _ = self.data.try_send(value);
+    pub fn try_send(&self, value: T) -> Result<(), flume::TrySendError<T>> {
+        let res = self.data.try_send(value);
         self.bell.ring();
+        res
     }
 }
 
 impl<A: RefCnt> NotifyingSlot<A> {
     pub fn new(slot: Arc<ArcSwapAny<A>>, bell: Ringer) -> Self {
         Self { slot, bell }
+    }
+
+    pub fn slot(&self) -> &ArcSwapAny<A> {
+        &self.slot
     }
 
     pub fn store(&self, value: A) {

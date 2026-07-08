@@ -8,6 +8,7 @@ use color_eyre::eyre::Context;
 use crossterm::event::{
     Event, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
 };
+use maki_agent::Envelope;
 use maki_agent::command::CustomCommand;
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{AgentConfig, CancelToken, McpCommand};
@@ -26,13 +27,11 @@ use crate::app::{App, Msg};
 use crate::components::input::Submission;
 use crate::components::usage_modal::UsageFetchState;
 use crate::components::{Action, ExitRequest, Status};
+use crate::doorbell::{Doorbell, NotifyingSlot, Ringer};
 use crate::input::InputSource;
 
 use crate::storage_writer::StorageWriter;
 use crate::terminal;
-
-const ANIMATION_INTERVAL_MS: u64 = 16;
-const IDLE_POLL_INTERVAL_MS: u64 = 100;
 
 pub struct EventLoopParams {
     pub model: Model,
@@ -69,6 +68,8 @@ pub(crate) struct EventLoop<'t> {
     timeouts: Timeouts,
     ui_action_rx: Option<flume::Receiver<UiAction>>,
     input: InputSource,
+    doorbell: Doorbell,
+    agent_rx: Option<flume::Receiver<Envelope>>,
     _model_fetch_task: smol::Task<()>,
 }
 
@@ -79,8 +80,21 @@ struct BackgroundModels {
     task: smol::Task<()>,
 }
 
+enum Woke {
+    Input(Event),
+    Agent(Envelope),
+    Shell(ShellEvent),
+    Warn(String),
+    UiAction(UiAction),
+    Doorbell,
+    Deadline,
+    InputDead,
+    AgentDead,
+    UiActionDead,
+}
+
 fn merge_batch(
-    available: &Arc<ArcSwapOption<Vec<String>>>,
+    available: &NotifyingSlot<Option<Arc<Vec<String>>>>,
     batch: maki_providers::provider::ModelBatch,
     warn_tx: &flume::Sender<String>,
 ) {
@@ -90,7 +104,12 @@ fn merge_batch(
     if batch.models.is_empty() {
         return;
     }
-    let mut merged = available.load().as_deref().cloned().unwrap_or_default();
+    let mut merged = available
+        .slot()
+        .load()
+        .as_deref()
+        .cloned()
+        .unwrap_or_default();
     for spec in &batch.models {
         if !merged.contains(spec) {
             merged.push(spec.clone());
@@ -99,16 +118,20 @@ fn merge_batch(
     available.store(Some(Arc::new(merged)));
 }
 
-fn spawn_model_fetch(model_slot: &Arc<ArcSwap<ModelSlot>>, timeouts: Timeouts) -> BackgroundModels {
+fn spawn_model_fetch(
+    model_slot: &Arc<ArcSwap<ModelSlot>>,
+    timeouts: Timeouts,
+    bell: Ringer,
+) -> BackgroundModels {
     let available: Arc<ArcSwapOption<Vec<String>>> = Arc::new(ArcSwapOption::empty());
-    let bg = Arc::clone(&available);
+    let bg = NotifyingSlot::new(Arc::clone(&available), bell.clone());
     let (warn_tx, warn_rx) = flume::unbounded::<String>();
     let warn_tx_bg = warn_tx.clone();
-    let model_slot = Arc::clone(model_slot);
+    let model_slot = NotifyingSlot::new(Arc::clone(model_slot), bell);
     let task = smol::spawn(async move {
         let warn_tx = warn_tx_bg;
         let done = Box::new(move || {
-            let spec = model_slot.load().model.spec();
+            let spec = model_slot.slot().load().model.spec();
             let mut resolved = match Model::from_spec(&spec) {
                 Ok(m) => m,
                 Err(e) => {
@@ -178,7 +201,13 @@ impl<'t> EventLoop<'t> {
         } = params;
 
         std::thread::spawn(crate::highlight::warmup);
-        crate::update::spawn_check();
+        // Producers that publish while is_animating() stays true are drained by
+        // tick()/view() and the 16ms frame deadline, so need no doorbell:
+        // image decodes, the /btw stream, session-list loading, the file-picker
+        // walker, live tool buffers, Lua float windows, and the restore flag.
+        // If any ever leaves is_animating(), it must gain a doorbell.
+        let doorbell = Doorbell::new();
+        crate::update::spawn_check(doorbell.ringer());
 
         let storage_writer = Arc::new(StorageWriter::new(storage.clone()));
         let (shell_tx, shell_rx) = flume::unbounded::<ShellEvent>();
@@ -198,7 +227,7 @@ impl<'t> EventLoop<'t> {
             model: model.clone(),
             provider,
         }));
-        let bg = spawn_model_fetch(&model_slot, timeouts);
+        let bg = spawn_model_fetch(&model_slot, timeouts, doorbell.ringer());
         let handles = AgentHandles::spawn(
             &model_slot,
             initial_history,
@@ -209,6 +238,7 @@ impl<'t> EventLoop<'t> {
             Some(session.id.clone()),
             timeouts,
             lua_event_handle.clone(),
+            doorbell.ringer(),
         );
 
         let custom_commands: Arc<[CustomCommand]> = Arc::from(commands);
@@ -227,6 +257,7 @@ impl<'t> EventLoop<'t> {
             input_history_size,
             Arc::clone(&permissions),
             custom_commands,
+            doorbell.ringer(),
         );
         app.exit_on_done = exit_on_done;
         app.lua_event_handle = lua_event_handle;
@@ -245,6 +276,7 @@ impl<'t> EventLoop<'t> {
             restore_session(&mut app, &handles);
         }
 
+        let agent_rx = Some(handles.agent_rx.clone());
         Ok(Self {
             terminal,
             app,
@@ -261,6 +293,8 @@ impl<'t> EventLoop<'t> {
             timeouts,
             ui_action_rx,
             input: InputSource::spawn(),
+            doorbell,
+            agent_rx,
             _model_fetch_task: bg.task,
         })
     }
@@ -276,14 +310,30 @@ impl<'t> EventLoop<'t> {
         }
         loop {
             self.tick();
-            let had_agent_msg = self.drain_channels();
+            self.drain_channels();
             self.terminal.draw(|f| self.app.view(f))?;
 
             if self.app.exit_request != ExitRequest::None {
                 return Ok(self.shutdown());
             }
-
-            self.poll_and_handle_input(had_agent_msg)?;
+            match self.wait_for_event() {
+                Woke::Input(raw) => {
+                    if let Some(msg) = self.translate_input(raw) {
+                        let actions = self.app.update(msg);
+                        self.dispatch(actions);
+                    }
+                }
+                Woke::Agent(envelope) => self.handle_agent_envelope(envelope),
+                Woke::Shell(ev) => self.app.handle_shell_event(ev),
+                Woke::Warn(w) => self.app.flash(w),
+                Woke::UiAction(a) => self.handle_ui_action(a),
+                Woke::Doorbell | Woke::Deadline => {}
+                Woke::AgentDead => self.mark_agent_dead(),
+                Woke::UiActionDead => self.ui_action_rx = None,
+                Woke::InputDead => {
+                    return Err(color_eyre::eyre::eyre!("input reader thread exited"));
+                }
+            }
         }
     }
 
@@ -297,21 +347,62 @@ impl<'t> EventLoop<'t> {
         self.app.float_mgr.tick();
     }
 
-    fn drain_channels(&mut self) -> bool {
+    fn handle_agent_envelope(&mut self, envelope: Envelope) {
+        let actions = self.app.update(Msg::Agent(Box::new(envelope)));
+        self.dispatch(actions);
+    }
+
+    fn handle_ui_action(&mut self, action: UiAction) {
+        match action {
+            UiAction::Flash(msg) => {
+                self.app.flash(msg);
+            }
+            UiAction::OpenEditor { path, reply_tx } => {
+                let _pause = self.input.pause();
+                let code = match crate::terminal::open_in_editor(&path, self.terminal) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        self.app.flash(e);
+                        -1
+                    }
+                };
+                let _ = reply_tx.send(code);
+            }
+            UiAction::OpenWin {
+                buf,
+                config,
+                focus,
+                event_tx,
+                cmd_rx,
+            } => {
+                self.app
+                    .float_mgr
+                    .open(buf, config, focus, event_tx, cmd_rx);
+                if focus {
+                    self.app
+                        .transition_plan(crate::app::mode::PlanTrigger::InteractivePrompt);
+                }
+            }
+        }
+    }
+
+    fn mark_agent_dead(&mut self) {
+        self.agent_rx = None;
+        if self.app.status == Status::Streaming {
+            self.app.status = Status::error("agent stopped unexpectedly".into());
+        }
+    }
+
+    fn drain_channels(&mut self) {
         while let Ok(event) = self.shell_rx.try_recv() {
             self.app.handle_shell_event(event);
         }
 
-        let mut had_agent_msg = false;
-        loop {
-            match self.handles.agent_rx.try_recv() {
-                Ok(envelope) => {
-                    had_agent_msg = true;
-                    let actions = self.app.update(Msg::Agent(Box::new(envelope)));
-                    self.dispatch(actions);
-                }
-                Err(flume::TryRecvError::Disconnected) if self.app.status == Status::Streaming => {
-                    self.app.status = Status::error("agent stopped unexpectedly".into());
+        while let Some(rx) = &self.agent_rx {
+            match rx.try_recv() {
+                Ok(envelope) => self.handle_agent_envelope(envelope),
+                Err(flume::TryRecvError::Disconnected) => {
+                    self.mark_agent_dead();
                     break;
                 }
                 Err(_) => break,
@@ -327,67 +418,38 @@ impl<'t> EventLoop<'t> {
             self.app.update_model(&slot_model.model);
         }
 
-        if let Some(rx) = &self.ui_action_rx {
-            while let Ok(action) = rx.try_recv() {
-                match action {
-                    UiAction::Flash(msg) => {
-                        self.app.flash(msg);
-                    }
-                    UiAction::OpenEditor { path, reply_tx } => {
-                        let _pause = self.input.pause();
-                        let code = match crate::terminal::open_in_editor(&path, self.terminal) {
-                            Ok(code) => code,
-                            Err(e) => {
-                                self.app.flash(e);
-                                -1
-                            }
-                        };
-                        let _ = reply_tx.send(code);
-                    }
-                    UiAction::OpenWin {
-                        buf,
-                        config,
-                        focus,
-                        event_tx,
-                        cmd_rx,
-                    } => {
-                        self.app
-                            .float_mgr
-                            .open(buf, config, focus, event_tx, cmd_rx);
-                        if focus {
-                            self.app
-                                .transition_plan(crate::app::mode::PlanTrigger::InteractivePrompt);
-                        }
-                    }
-                }
+        let actions: Option<Vec<UiAction>> =
+            self.ui_action_rx.as_ref().map(|rx| rx.try_iter().collect());
+        if let Some(actions) = actions {
+            for action in actions {
+                self.handle_ui_action(action);
             }
         }
-
-        had_agent_msg
     }
 
-    fn poll_and_handle_input(&mut self, had_agent_msg: bool) -> Result<()> {
-        let has_pending_ui_action = self.ui_action_rx.as_ref().is_some_and(|rx| !rx.is_empty());
-        let poll_duration = if had_agent_msg || has_pending_ui_action {
-            Duration::ZERO
-        } else if self.app.is_animating() {
-            Duration::from_millis(ANIMATION_INTERVAL_MS)
-        } else {
-            Duration::from_millis(IDLE_POLL_INTERVAL_MS)
-        };
-
-        let raw = match self.input.rx.recv_timeout(poll_duration) {
-            Ok(raw) => raw,
-            Err(flume::RecvTimeoutError::Timeout) => return Ok(()),
-            Err(flume::RecvTimeoutError::Disconnected) => {
-                return Err(color_eyre::eyre::eyre!("input reader thread exited"));
-            }
-        };
-        if let Some(msg) = self.translate_input(raw) {
-            let actions = self.app.update(msg);
-            self.dispatch(actions);
+    fn wait_for_event(&self) -> Woke {
+        let deadline = self.app.next_deadline();
+        let mut sel = flume::Selector::new()
+            .recv(&self.input.rx, |r| {
+                r.map(Woke::Input).unwrap_or(Woke::InputDead)
+            })
+            .recv(self.doorbell.receiver(), |_| Woke::Doorbell)
+            .recv(&self.shell_rx, |r| {
+                r.map(Woke::Shell).unwrap_or(Woke::Deadline)
+            })
+            .recv(&self.warn_rx, |r| {
+                r.map(Woke::Warn).unwrap_or(Woke::Deadline)
+            });
+        if let Some(rx) = &self.agent_rx {
+            sel = sel.recv(rx, |r| r.map(Woke::Agent).unwrap_or(Woke::AgentDead));
         }
-        Ok(())
+        if let Some(rx) = &self.ui_action_rx {
+            sel = sel.recv(rx, |r| r.map(Woke::UiAction).unwrap_or(Woke::UiActionDead));
+        }
+        match deadline {
+            Some(d) => sel.wait_deadline(d).unwrap_or(Woke::Deadline),
+            None => sel.wait(),
+        }
     }
 
     fn translate_input(&mut self, raw: Event) -> Option<Msg> {
@@ -445,6 +507,7 @@ impl<'t> EventLoop<'t> {
             &mut self.app,
             lua_handle,
         );
+        self.agent_rx = Some(self.handles.agent_rx.clone());
     }
 
     fn handle_action(&mut self, action: Action) {
@@ -578,7 +641,8 @@ impl<'t> EventLoop<'t> {
     }
 
     fn refresh_models(&self) {
-        let available = Arc::clone(&self.available_models);
+        let available =
+            NotifyingSlot::new(Arc::clone(&self.available_models), self.app.ringer.clone());
         let warn_tx = self.warn_tx.clone();
         available.store(None);
         smol::spawn(async move {
@@ -589,7 +653,7 @@ impl<'t> EventLoop<'t> {
 
     fn refresh_usage(&self) {
         let provider = Arc::clone(&self.model_slot.load().provider);
-        let slot = Arc::clone(&self.app.usage_slot);
+        let slot = NotifyingSlot::new(Arc::clone(&self.app.usage_slot), self.app.ringer.clone());
         slot.store(Some(Arc::new(UsageFetchState::Loading)));
         smol::spawn(async move {
             let state = match provider.fetch_usage().await {

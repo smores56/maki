@@ -133,6 +133,7 @@ impl ServerEntry {
 struct McpManagerInner {
     entries: Vec<ServerEntry>,
     generation: u64,
+    notify: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 #[derive(Default)]
@@ -298,21 +299,28 @@ impl McpHandle {
     }
 }
 
-pub async fn start(cwd: &Path) -> (Option<McpHandle>, McpConfigErrors) {
+pub async fn start(
+    cwd: &Path,
+    notify: Option<Box<dyn Fn() + Send + Sync>>,
+) -> (Option<McpHandle>, McpConfigErrors) {
     tracing::info!(cwd = %cwd.display(), "starting MCP");
     let cwd = cwd.to_owned();
     let (config, config_errors) = smol::unblock(move || load_config(&cwd)).await;
-    let handle = start_with_config(config).await;
+    let handle = start_with_config(config, notify).await;
     (handle, config_errors)
 }
 
-pub async fn start_with_config(config: McpConfig) -> Option<McpHandle> {
+pub async fn start_with_config(
+    config: McpConfig,
+    notify: Option<Box<dyn Fn() + Send + Sync>>,
+) -> Option<McpHandle> {
     if config.is_empty() {
         tracing::info!("no MCP servers configured, skipping");
         return None;
     }
 
     let mut inner = parse_entries(config);
+    inner.notify = notify;
     start_enabled(&mut inner).await;
     inner.generation += 1;
 
@@ -568,6 +576,7 @@ fn parse_entries(config: McpConfig) -> McpManagerInner {
     McpManagerInner {
         entries,
         generation: 0,
+        notify: None,
     }
 }
 
@@ -674,6 +683,9 @@ fn publish(inner: &McpManagerInner, index: &ArcSwap<ToolIndex>, snapshot: &ArcSw
         pids,
         generation: inner.generation,
     }));
+    if let Some(notify) = &inner.notify {
+        notify();
+    }
 }
 
 fn transport_url(transport: &Transport) -> Option<String> {
@@ -852,6 +864,7 @@ mod tests {
         let inner = McpManagerInner {
             entries,
             generation: 0,
+            notify: None,
         };
         let index = Arc::new(ArcSwap::from_pointee(ToolIndex::default()));
         let snapshot = Arc::new(ArcSwap::from_pointee(McpSnapshot::default()));
@@ -867,7 +880,7 @@ mod tests {
     #[test]
     fn start_with_config_produces_terminal_statuses() {
         smol::block_on(async {
-            let handle = start_with_config(McpConfig::default()).await;
+            let handle = start_with_config(McpConfig::default(), None).await;
             assert!(handle.is_none());
 
             let mut disabled = stdio_raw(&["unused-disabled-cmd"]);
@@ -876,7 +889,7 @@ mod tests {
                 ("disabled-srv", disabled),
                 ("bad-srv", stdio_raw(&[])),
             ]);
-            let handle = start_with_config(config).await;
+            let handle = start_with_config(config, None).await;
             let handle = handle.unwrap();
             let infos = handle.reader().load().infos.clone();
 
@@ -972,6 +985,7 @@ mod tests {
                     fake_entry("b", Arc::clone(&t2) as _),
                 ],
                 generation: 0,
+                notify: None,
             };
             let index = Arc::new(ArcSwap::from_pointee(ToolIndex::default()));
             let snapshot = Arc::new(ArcSwap::from_pointee(McpSnapshot::default()));

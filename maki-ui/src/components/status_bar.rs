@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use super::{RetryInfo, Status};
 
 use crate::animation::spinner_frame;
+use crate::doorbell::Ringer;
 use crate::theme;
 
 use maki_providers::{ModelPricing, TokenUsage};
@@ -59,13 +60,13 @@ pub struct StatusBar {
 }
 
 impl StatusBar {
-    pub fn new(flash_duration: Duration) -> Self {
+    pub fn new(flash_duration: Duration, bell: Ringer) -> Self {
         Self {
             flash: None,
             started_at: Instant::now(),
             cwd_branch: cwd_branch_label(),
             flash_duration,
-            branch_update_rx: spawn_branch_watcher(),
+            branch_update_rx: spawn_branch_watcher(bell),
         }
     }
 
@@ -103,6 +104,10 @@ impl StatusBar {
         {
             self.flash = None;
         }
+    }
+
+    pub fn flash_deadline(&self) -> Option<Instant> {
+        self.flash.as_ref().map(|(_, at)| *at + self.flash_duration)
     }
 
     pub fn view(&self, frame: &mut Frame, area: Rect, ctx: &StatusBarContext) {
@@ -285,7 +290,7 @@ fn find_git_dir(cwd: &Path) -> Option<std::path::PathBuf> {
     }
 }
 
-fn spawn_branch_watcher() -> Option<flume::Receiver<()>> {
+fn spawn_branch_watcher(bell: Ringer) -> Option<flume::Receiver<()>> {
     use notify::{RecursiveMode, Watcher};
 
     let cwd = env::current_dir().ok()?;
@@ -296,6 +301,7 @@ fn spawn_branch_watcher() -> Option<flume::Receiver<()>> {
         let Ok(mut watcher) = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
             if res.is_ok_and(|e| e.paths.iter().any(|p| p.ends_with("HEAD"))) {
                 let _ = tx.try_send(());
+                bell.ring();
             }
         }) else {
             return;
@@ -365,7 +371,7 @@ mod tests {
 
     #[test]
     fn clear_expired_hint_removes_stale_flash() {
-        let mut bar = StatusBar::new(Duration::ZERO);
+        let mut bar = StatusBar::new(Duration::ZERO, Ringer::disconnected());
         bar.flash("Copied".into());
         bar.clear_expired_hint();
         assert!(bar.flash.is_none());
@@ -373,7 +379,7 @@ mod tests {
 
     #[test]
     fn clear_flash_removes_flash() {
-        let mut bar = StatusBar::new(Duration::from_secs(999));
+        let mut bar = StatusBar::new(Duration::from_secs(999), Ringer::disconnected());
         bar.flash("Copied".into());
         bar.clear_flash();
         assert!(bar.flash.is_none());

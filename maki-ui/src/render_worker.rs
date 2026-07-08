@@ -10,6 +10,7 @@ use std::time::Duration;
 use tracing::error;
 
 use crate::components::code_view::{self, RenderLimits};
+use crate::doorbell::{NotifyingSender, Ringer};
 use maki_agent::{ToolInput, ToolOutput};
 use ratatui::text::Line;
 
@@ -32,7 +33,7 @@ static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(0);
 
 struct PoolInner {
     job_rx: flume::Receiver<RenderJob>,
-    result_tx: flume::Sender<RenderResult>,
+    result_tx: NotifyingSender<RenderResult>,
     active_threads: AtomicUsize,
     max_threads: usize,
 }
@@ -44,7 +45,7 @@ pub struct RenderWorker {
 }
 
 impl RenderWorker {
-    pub fn new() -> Self {
+    pub fn new(bell: Ringer) -> Self {
         let (job_tx, job_rx) = flume::unbounded();
         let (result_tx, result_rx) = flume::unbounded();
         let max_threads = thread::available_parallelism()
@@ -55,7 +56,7 @@ impl RenderWorker {
             job_tx,
             inner: Arc::new(PoolInner {
                 job_rx,
-                result_tx,
+                result_tx: NotifyingSender::new(result_tx, bell),
                 active_threads: AtomicUsize::new(0),
                 max_threads,
             }),
@@ -119,7 +120,7 @@ fn worker_loop(inner: &PoolInner) {
         );
         if inner
             .result_tx
-            .send(RenderResult {
+            .try_send(RenderResult {
                 id: job.id,
                 lines: content.lines,
             })
@@ -142,7 +143,7 @@ mod tests {
             job_tx,
             inner: Arc::new(PoolInner {
                 job_rx,
-                result_tx,
+                result_tx: NotifyingSender::new(result_tx, Ringer::disconnected()),
                 active_threads: AtomicUsize::new(active),
                 max_threads: max,
             }),

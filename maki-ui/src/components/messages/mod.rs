@@ -20,6 +20,7 @@ use super::{
 };
 use crate::animation::spinner_str;
 use crate::components::keybindings::key;
+use crate::doorbell::Ringer;
 use crate::markdown::{hr_line, plain_lines, text_to_lines, truncate_output};
 use crate::render_worker::RenderWorker;
 use crate::selection::Selection;
@@ -73,7 +74,7 @@ pub struct MessagesPanel {
 }
 
 impl MessagesPanel {
-    pub fn new(ui_config: UiConfig) -> Self {
+    pub fn new(ui_config: UiConfig, ringer: Ringer) -> Self {
         let thinking = thinking_style();
         let assistant = assistant_style();
         let ms = ui_config.typewriter_ms_per_char;
@@ -98,7 +99,7 @@ impl MessagesPanel {
             viewport_width: crossterm::terminal::size().map_or(80, |(w, _)| w.saturating_sub(1)),
             cache: SegmentCache::new(),
             last_total_lines: 0,
-            hl_worker: RenderWorker::new(),
+            hl_worker: RenderWorker::new(ringer),
             theme_generation: theme::generation(),
             highlight_segment: None,
             idle_splash: Splash::new(ui_config.splash_animation),

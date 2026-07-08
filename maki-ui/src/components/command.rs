@@ -13,6 +13,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
+use crate::doorbell::Ringer;
 use crate::theme;
 
 pub struct BuiltinCommand {
@@ -158,6 +159,7 @@ pub struct CommandPalette {
     nucleo: Nucleo<CommandItem>,
     matcher: Matcher,
     current_arg_count: usize,
+    ringer: Ringer,
 }
 
 impl CommandPalette {
@@ -165,6 +167,7 @@ impl CommandPalette {
         custom_commands: Arc<[CustomCommand]>,
         mcp_reader: McpSnapshotReader,
         lua_reader: LuaCommandReader,
+        ringer: Ringer,
     ) -> Self {
         let snap = mcp_reader.load();
         let mcp_generation = snap.generation;
@@ -174,7 +177,7 @@ impl CommandPalette {
         let lua_generation = lua_snap.generation;
         let lua_commands = lua_snap.commands.clone();
 
-        let nucleo = Self::build_nucleo(&custom_commands, &prompts, &lua_commands);
+        let nucleo = Self::build_nucleo(&custom_commands, &prompts, &lua_commands, &ringer);
         Self {
             selected: 0,
             filtered: Vec::new(),
@@ -188,6 +191,7 @@ impl CommandPalette {
             nucleo,
             matcher: Matcher::new(Config::DEFAULT),
             current_arg_count: 0,
+            ringer,
         }
     }
 
@@ -195,8 +199,10 @@ impl CommandPalette {
         custom_commands: &[CustomCommand],
         mcp_prompts: &[McpPromptInfo],
         lua_commands: &[LuaCommandInfo],
+        ringer: &Ringer,
     ) -> Nucleo<CommandItem> {
-        let nucleo = Nucleo::new(Config::DEFAULT, Arc::new(|| {}), None, 1);
+        let bell = ringer.clone();
+        let nucleo = Nucleo::new(Config::DEFAULT, Arc::new(move || bell.ring()), None, 1);
         let injector = nucleo.injector();
 
         for cmd in BUILTIN_COMMANDS.iter() {
@@ -304,7 +310,12 @@ impl CommandPalette {
             self.mcp_prompts = mcp_snap.prompts.clone();
             self.lua_generation = lua_snap.generation;
             self.lua_commands = lua_snap.commands.clone();
-            self.nucleo = Self::build_nucleo(&self.custom, &self.mcp_prompts, &self.lua_commands);
+            self.nucleo = Self::build_nucleo(
+                &self.custom,
+                &self.mcp_prompts,
+                &self.lua_commands,
+                &self.ringer,
+            );
         }
         let Some(stripped) = input.strip_prefix('/') else {
             self.filtered.clear();
@@ -577,13 +588,23 @@ mod tests {
     }
 
     fn synced(input: &str) -> CommandPalette {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Ringer::disconnected(),
+        );
         p.sync(input);
         p
     }
 
     fn synced_with_custom(input: &str, custom: Arc<[CustomCommand]>) -> CommandPalette {
-        let mut p = CommandPalette::new(custom, empty_snapshot(), LuaCommandReader::empty());
+        let mut p = CommandPalette::new(
+            custom,
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Ringer::disconnected(),
+        );
         p.sync(input);
         p
     }
@@ -654,7 +675,12 @@ mod tests {
 
     #[test]
     fn confirm_when_inactive_returns_none() {
-        let p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
+        let p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Ringer::disconnected(),
+        );
         assert!(p.confirm("").is_none());
     }
 
@@ -707,7 +733,12 @@ mod tests {
     #[test_case("/pct", "/compact", ""    ; "fuzzy-match-2")]
     #[test_case("/btw hello world", "/btw", "hello world" ; "btw_multi_word")]
     fn confirm_parses_args(input: &str, expected_name: &str, expected_args: &str) {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Ringer::disconnected(),
+        );
         p.sync(input);
         let cmd = p.confirm(input).unwrap();
         assert_eq!(cmd.name, expected_name);
@@ -717,7 +748,12 @@ mod tests {
     #[test]
     fn confirm_custom_command() {
         let custom = sample_custom();
-        let mut p = CommandPalette::new(custom, empty_snapshot(), LuaCommandReader::empty());
+        let mut p = CommandPalette::new(
+            custom,
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Ringer::disconnected(),
+        );
         p.sync("/project:review");
         assert!(p.is_active());
         let cmd = p.confirm("/project:review some-file.rs").unwrap();
@@ -728,7 +764,12 @@ mod tests {
     #[test]
     fn find_custom_command_lookup() {
         let custom = sample_custom();
-        let p = CommandPalette::new(custom, empty_snapshot(), LuaCommandReader::empty());
+        let p = CommandPalette::new(
+            custom,
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            Ringer::disconnected(),
+        );
         let found = p.find_custom_command("/project:review");
         assert!(found.is_some());
         assert_eq!(found.unwrap().content, "Review $ARGUMENTS");
@@ -762,7 +803,12 @@ mod tests {
     }
 
     fn synced_with_prompts(input: &str) -> CommandPalette {
-        let mut p = CommandPalette::new(Arc::from([]), sample_prompts(), LuaCommandReader::empty());
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            sample_prompts(),
+            LuaCommandReader::empty(),
+            Ringer::disconnected(),
+        );
         p.sync(input);
         p
     }
@@ -820,7 +866,12 @@ mod tests {
     #[test]
     fn mcp_update_clears_old_prompts() {
         let reader = sample_prompts();
-        let mut p = CommandPalette::new(Arc::from([]), reader, LuaCommandReader::empty());
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            reader,
+            LuaCommandReader::empty(),
+            Ringer::disconnected(),
+        );
 
         p.sync("/");
         let initial_count = p
@@ -905,7 +956,12 @@ mod tests {
     }
 
     fn synced_with_lua(input: &str) -> CommandPalette {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), sample_lua_commands());
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            sample_lua_commands(),
+            Ringer::disconnected(),
+        );
         p.sync(input);
         p
     }
@@ -943,7 +999,12 @@ mod tests {
 
     #[test]
     fn confirm_lua_command_parses_args() {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), sample_lua_commands());
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            sample_lua_commands(),
+            Ringer::disconnected(),
+        );
         p.sync("/memory");
         let cmd = p.confirm("/memory some-arg").unwrap();
         assert_eq!(cmd.name, "/memory");
@@ -958,7 +1019,12 @@ mod tests {
             description: Arc::from("old command"),
             plugin: Arc::from("p"),
         }]);
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), reader);
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            reader,
+            Ringer::disconnected(),
+        );
         p.sync("/");
         let initial_lua = p
             .filtered

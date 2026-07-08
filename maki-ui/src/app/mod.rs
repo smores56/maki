@@ -48,6 +48,7 @@ use crate::components::usage_modal::{UsageFetchState, UsageModal};
 use crate::components::{
     Action, DisplayMessage, DisplayRole, ExitRequest, Overlay, RetryInfo, Status, is_ctrl,
 };
+use crate::doorbell::Ringer;
 use crate::image;
 use crate::selection::{SelectionState, ZoneRegistry};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -73,6 +74,10 @@ pub(crate) use mode::{Mode, PlanState, PlanTrigger};
 use mouse::EDGE_SCROLL_LINES;
 pub(crate) use queue::MessageQueue;
 use session_state::SessionState;
+
+pub(crate) const ANIMATION_FRAME: Duration = Duration::from_millis(16);
+const SPINNER_FRAME: Duration = Duration::from_millis(80);
+const RETRY_TICK: Duration = Duration::from_millis(250);
 
 const CANCEL_MSG: &str = "Cancelled.";
 /// Bypasses the per-run staleness filter because re-bake replies
@@ -182,6 +187,7 @@ pub struct App {
     pub(crate) restore_event_tx: Option<maki_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
     subagent_answers: HashMap<String, flume::Sender<String>>,
+    pub(crate) ringer: Ringer,
 }
 
 impl App {
@@ -201,11 +207,12 @@ impl App {
         input_history_size: usize,
         permissions: Arc<PermissionManager>,
         custom_commands: Arc<[maki_agent::command::CustomCommand]>,
+        ringer: Ringer,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage);
         let mut app = Self {
-            chats: vec![Chat::new("Main".into(), ui_config)],
+            chats: vec![Chat::new("Main".into(), ui_config, ringer.clone())],
             active_chat: 0,
             chat_index: HashMap::new(),
             input_box: InputBox::new(InputHistory::load(&storage, input_history_size)),
@@ -213,6 +220,7 @@ impl App {
                 custom_commands,
                 mcp_reader.clone(),
                 lua_command_reader,
+                ringer.clone(),
             ),
             task_picker: ListPicker::new(),
             task_picker_original: None,
@@ -227,10 +235,10 @@ impl App {
             btw_modal: BtwModal::new(ui_config.typewriter_ms_per_char),
             float_mgr: FloatManager::new(),
             search_modal: SearchModal::new(),
-            file_picker: FilePickerModal::new(),
+            file_picker: FilePickerModal::new(ringer.clone()),
             permission_prompt: PermissionPrompt::new(),
             plan_form: PlanForm::new(),
-            status_bar: StatusBar::new(ui_config.flash_duration()),
+            status_bar: StatusBar::new(ui_config.flash_duration(), ringer.clone()),
             status: Status::Idle,
             state,
             exit_request: ExitRequest::None,
@@ -261,6 +269,7 @@ impl App {
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
             subagent_answers: HashMap::new(),
+            ringer,
         };
         app.model_picker
             .set_recents(maki_storage::model::read_recents(&app.storage));
@@ -1133,7 +1142,7 @@ impl App {
         if let Some(ref model) = subagent.model {
             self.chats[0].update_tool_model(id, model);
         }
-        let mut chat = Chat::new(subagent.name.clone(), self.ui_config);
+        let mut chat = Chat::new(subagent.name.clone(), self.ui_config, self.ringer.clone());
         chat.set_restore_channel(self.lua_event_handle.clone(), self.restore_event_tx.clone());
         chat.model_id = subagent.model.clone();
         if let Some(ref prompt) = subagent.prompt {
@@ -1454,6 +1463,34 @@ impl App {
                 .is_some_and(|s| s.is_edge_scrolling())
             || self.restoring.load(Ordering::Relaxed)
             || self.chats.iter().any(|c| c.is_animating())
+    }
+
+    /// Earliest instant the loop must wake for a timed transition.
+    // Every source here must be cleared or advanced within one iteration of its
+    // deadline firing, else a past-Instant entry spins the loop at 100% CPU.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        if self.is_animating() {
+            return Some(Instant::now() + ANIMATION_FRAME);
+        }
+        [
+            self.status_bar.flash_deadline(),
+            self.status.error_deadline(),
+            self.streaming_spinner_deadline(),
+            self.retry_countdown_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    fn streaming_spinner_deadline(&self) -> Option<Instant> {
+        matches!(self.status, Status::Streaming).then(|| Instant::now() + SPINNER_FRAME)
+    }
+
+    fn retry_countdown_deadline(&self) -> Option<Instant> {
+        self.retry_info
+            .as_ref()
+            .map(|_| Instant::now() + RETRY_TICK)
     }
 
     fn finish_subagents(&mut self, role: DisplayRole, text: &str) {

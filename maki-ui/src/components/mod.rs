@@ -249,6 +249,13 @@ impl Status {
     pub fn is_error_expired(&self) -> bool {
         matches!(self, Self::Error { since, .. } if since.elapsed() >= ERROR_DISPLAY)
     }
+
+    pub fn error_deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Error { since, .. } => Some(*since + ERROR_DISPLAY),
+            _ => None,
+        }
+    }
 }
 
 impl PartialEq for Status {
