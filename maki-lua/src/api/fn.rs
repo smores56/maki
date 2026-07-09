@@ -346,6 +346,7 @@ pub(crate) fn create_fn_table(lua: &Lua, perms: &PluginPermissions) -> LuaResult
                         Some(JobEvent::Stdout(line)) => stdout_lines.push(line),
                         Some(JobEvent::Stderr(line)) => stderr_lines.push(line),
                         Some(JobEvent::Exit(code)) => {
+                            with_task_jobs(&lua, |store| store.mark_dead(job_id));
                             break code;
                         }
                     }

@@ -419,6 +419,15 @@ fn start_event_pump(
                     }
                     continue;
                 }
+                AgentEvent::AutoCompacting | AgentEvent::Compacted { .. } => {
+                    // ACP is an append-only event stream of session/update chunks
+                    // built from replay_history; there is no rewind/replace
+                    // primitive to reset the client's conversation to the
+                    // compacted message set. Emitting deltas here would only
+                    // double the context. Silently absorb, matching the prior
+                    // wildcard behavior.
+                    continue;
+                }
                 _ => continue,
             };
             session_update(&out_tx, &sid, update);

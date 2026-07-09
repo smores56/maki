@@ -961,6 +961,13 @@ impl App {
             ) {
                 self.save_session();
             }
+            // A stale Compacted carries the old run's compacted message set.
+            // Rebuilding main_chat here would clobber the in-flight new run's UI;
+            // the compacted history is already saved in shared_history, so persist
+            // it without touching the live conversation.
+            if matches!(envelope.event, AgentEvent::Compacted { .. }) {
+                self.save_session();
+            }
             return vec![];
         }
 
@@ -1034,7 +1041,8 @@ impl App {
                 .as_ref()
                 .map(|o| o.lock().unwrap_or_else(|e| e.into_inner()).clone())
                 .unwrap_or_default();
-            let _ = self.rebuild_main_chat(messages, &outputs);
+            let restore_items = self.rebuild_main_chat(messages, &outputs);
+            self.fire_restore_items(restore_items);
         }
 
         let plan_path = if self.state.mode == Mode::Plan {

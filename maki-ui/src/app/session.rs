@@ -155,7 +155,7 @@ impl App {
         }
     }
 
-    fn fire_restore_items(&self, items: Vec<maki_lua::RestoreItem>) {
+    pub(super) fn fire_restore_items(&self, items: Vec<maki_lua::RestoreItem>) {
         let (Some(eh), Some(tx)) = (&self.lua_event_handle, &self.restore_event_tx) else {
             return;
         };
