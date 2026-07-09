@@ -1032,17 +1032,15 @@ impl App {
 
         self.retry_info = None;
 
-        if let AgentEvent::Compacted { ref messages } = envelope.event {
-            if chat_idx == 0 {
-                let outputs = self
-                    .shared_tool_outputs
-                    .as_ref()
-                    .map(|o| o.lock().unwrap_or_else(|e| e.into_inner()).clone())
-                    .unwrap_or_default();
-                let _ = self.rebuild_main_chat(messages, &outputs);
-                self.save_session();
-            }
-            return vec![];
+        if let AgentEvent::Compacted { ref messages } = envelope.event
+            && chat_idx == 0
+        {
+            let outputs = self
+                .shared_tool_outputs
+                .as_ref()
+                .map(|o| o.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                .unwrap_or_default();
+            let _ = self.rebuild_main_chat(messages, &outputs);
         }
 
         let plan_path = if self.state.mode == Mode::Plan {
@@ -1071,6 +1069,7 @@ impl App {
             self.chats[chat_idx].set_pending_turn_usage(formatted);
         }
 
+        let is_boundary = chat_idx == 0 && Self::is_turn_boundary(&envelope.event);
         let result = self.chats[chat_idx].handle_event(envelope.event, plan_path);
 
         if let ChatEventResult::QueueItemConsumed { text, image_count } = result {
@@ -1104,7 +1103,6 @@ impl App {
             match result {
                 ChatEventResult::Done => {
                     self.status_bar.clear_flash();
-                    self.save_session();
                     self.chat_index.clear();
                     self.subagent_answers.clear();
                     self.status = Status::Idle;
@@ -1118,7 +1116,6 @@ impl App {
                 ChatEventResult::Error(message) => {
                     self.status = Status::error(message.clone());
                     self.status_bar.clear_flash();
-                    self.save_session();
                     self.queue.clear();
                     self.subagent_answers.clear();
                     self.finish_subagents(DisplayRole::Error, ERROR_TEXT);
@@ -1138,7 +1135,20 @@ impl App {
                 ChatEventResult::Continue => {}
             }
         }
+        if is_boundary {
+            self.save_session();
+        }
         vec![]
+    }
+
+    fn is_turn_boundary(event: &AgentEvent) -> bool {
+        matches!(
+            event,
+            AgentEvent::TurnComplete(_)
+                | AgentEvent::Done { .. }
+                | AgentEvent::Error { .. }
+                | AgentEvent::Compacted { .. }
+        )
     }
 
     fn resolve_or_create_chat(&mut self, subagent: &SubagentInfo) -> usize {
