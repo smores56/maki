@@ -15,7 +15,7 @@ use maki_agent::{
 use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::{HintReader, KeymapReader, LuaCommandReader};
 use maki_providers::{ContentBlock, Message, Role, TokenUsage};
-use maki_storage::sessions::StoredThinking;
+use maki_storage::sessions::{StoredThinking, StoredTokenUsage};
 use ratatui::layout::Rect;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -2799,5 +2799,92 @@ fn compacted_rebuilds_main_chat_from_summary() {
         app.input_box.buffer.value(),
         draft,
         "compaction must not touch the input draft",
+    );
+}
+
+#[test]
+fn usage_counters_agree_after_turns() {
+    const STALE_RUN_ID: u64 = 999;
+    const MODEL_A: &str = "model-a";
+    const MODEL_B: &str = "model-b";
+
+    let mut app = test_app();
+    app.run_id = 1;
+    app.status = Status::Streaming;
+
+    let turn_a = TokenUsage {
+        input: 100,
+        output: 50,
+        ..Default::default()
+    };
+    let turn_b = TokenUsage {
+        input: 200,
+        output: 75,
+        ..Default::default()
+    };
+    let stale_usage = TokenUsage {
+        input: 999,
+        ..Default::default()
+    };
+    let expected_total = TokenUsage {
+        input: turn_a.input + turn_b.input,
+        output: turn_a.output + turn_b.output,
+        ..Default::default()
+    };
+
+    app.update(agent_msg(AgentEvent::TurnComplete(Box::new(
+        TurnCompleteEvent {
+            message: Default::default(),
+            usage: turn_a,
+            model: MODEL_A.into(),
+            context_size: None,
+        },
+    ))));
+    app.update(agent_msg(AgentEvent::TurnComplete(Box::new(
+        TurnCompleteEvent {
+            message: Default::default(),
+            usage: turn_b,
+            model: MODEL_B.into(),
+            context_size: None,
+        },
+    ))));
+
+    assert_eq!(app.state.token_usage, expected_total);
+    assert_eq!(app.chats[0].token_usage, expected_total);
+
+    let usage_by_model = &app.state.session.meta.usage_by_model;
+    assert_eq!(usage_by_model.len(), 2);
+    let summed_by_model: StoredTokenUsage =
+        usage_by_model
+            .values()
+            .copied()
+            .fold(StoredTokenUsage::default(), |mut acc, v| {
+                acc += v;
+                acc
+            });
+    assert_eq!(
+        summed_by_model,
+        StoredTokenUsage::from(app.state.token_usage)
+    );
+    assert_eq!(
+        usage_by_model.get(MODEL_A).copied(),
+        Some(StoredTokenUsage::from(turn_a))
+    );
+
+    app.update(agent_msg_with_run_id(
+        AgentEvent::TurnComplete(Box::new(TurnCompleteEvent {
+            message: Default::default(),
+            usage: stale_usage,
+            model: MODEL_A.into(),
+            context_size: None,
+        })),
+        STALE_RUN_ID,
+    ));
+
+    assert_eq!(app.state.token_usage, expected_total);
+    assert_eq!(app.chats[0].token_usage, expected_total);
+    assert_eq!(
+        app.state.session.meta.usage_by_model.get(MODEL_A).copied(),
+        Some(StoredTokenUsage::from(turn_a))
     );
 }

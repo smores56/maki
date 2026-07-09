@@ -56,7 +56,7 @@ use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
     AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptInfo, McpSnapshotReader,
-    SubagentInfo, ToolOutput,
+    SubagentInfo, ToolOutput, TurnCompleteEvent,
 };
 use maki_config::UiConfig;
 use maki_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader};
@@ -1044,33 +1044,17 @@ impl App {
         }
 
         let plan_path = if self.state.mode == Mode::Plan {
-            self.state.plan.path()
+            self.state.plan.path().map(PathBuf::from)
         } else {
             None
         };
 
         if let AgentEvent::TurnComplete(ref tc) = envelope.event {
-            self.state.token_usage += tc.usage;
-            self.chats[chat_idx].token_usage += tc.usage;
-            *self
-                .state
-                .session
-                .meta
-                .usage_by_model
-                .entry(tc.model.clone())
-                .or_default() += tc.usage.into();
-            let ctx_size = tc.context_size.unwrap_or_else(|| tc.usage.context_tokens());
-            self.chats[chat_idx].context_size = ctx_size;
-            if chat_idx == 0 {
-                self.state.context_size = ctx_size;
-            }
-            let formatted =
-                format_turn_usage(&tc.usage, &self.state.model.pricing, self.state.fast);
-            self.chats[chat_idx].set_pending_turn_usage(formatted);
+            self.record_turn_usage(chat_idx, tc);
         }
 
         let is_boundary = chat_idx == 0 && Self::is_turn_boundary(&envelope.event);
-        let result = self.chats[chat_idx].handle_event(envelope.event, plan_path);
+        let result = self.chats[chat_idx].handle_event(envelope.event, plan_path.as_deref());
 
         if let ChatEventResult::QueueItemConsumed { text, image_count } = result {
             if chat_idx == 0 {
@@ -1139,6 +1123,25 @@ impl App {
             self.save_session();
         }
         vec![]
+    }
+
+    fn record_turn_usage(&mut self, chat_idx: usize, tc: &TurnCompleteEvent) {
+        self.state.token_usage += tc.usage;
+        self.chats[chat_idx].token_usage += tc.usage;
+        *self
+            .state
+            .session
+            .meta
+            .usage_by_model
+            .entry(tc.model.clone())
+            .or_default() += tc.usage.into();
+        let ctx_size = tc.context_size.unwrap_or_else(|| tc.usage.context_tokens());
+        self.chats[chat_idx].context_size = ctx_size;
+        if chat_idx == 0 {
+            self.state.context_size = ctx_size;
+        }
+        let formatted = format_turn_usage(&tc.usage, &self.state.model.pricing, self.state.fast);
+        self.chats[chat_idx].set_pending_turn_usage(formatted);
     }
 
     fn is_turn_boundary(event: &AgentEvent) -> bool {
