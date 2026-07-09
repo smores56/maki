@@ -908,6 +908,7 @@ impl EventPump {
             | AgentEvent::BatchProgress(_)
             | AgentEvent::QueueItemConsumed { .. }
             | AgentEvent::AutoCompacting
+            | AgentEvent::Compacted { .. }
             | AgentEvent::AuthRequired
             | AgentEvent::SubagentHistory { .. }
             | AgentEvent::ToolSnapshot { .. }

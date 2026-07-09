@@ -237,6 +237,7 @@ pub fn run(
             | AgentEvent::BatchProgress(_)
             | AgentEvent::QueueItemConsumed { .. }
             | AgentEvent::AutoCompacting
+            | AgentEvent::Compacted { .. }
             | AgentEvent::AuthRequired
             | AgentEvent::PermissionRequest { .. }
             | AgentEvent::SubagentHistory { .. }

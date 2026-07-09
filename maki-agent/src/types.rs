@@ -535,6 +535,9 @@ pub enum AgentEvent {
         stop_reason: Option<StopReason>,
     },
     AutoCompacting,
+    Compacted {
+        messages: Vec<Message>,
+    },
     Retry {
         attempt: u32,
         message: String,

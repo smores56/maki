@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -5,7 +6,8 @@ use crate::chat::{Chat, DONE_TEXT, history_to_display};
 use crate::components::DisplayRole;
 use crate::components::rewind_picker::RewindEntry;
 use crate::components::{Action, LoadedSession};
-use maki_providers::{Model, TokenUsage};
+use maki_agent::ToolOutput;
+use maki_providers::{Message, Model, TokenUsage};
 use maki_storage::sessions::StoredSubagent;
 
 use crate::AppSession;
@@ -91,16 +93,24 @@ impl App {
         self.plan_form.reset();
     }
 
+    pub(crate) fn rebuild_main_chat(
+        &mut self,
+        messages: &[Message],
+        outputs: &HashMap<String, ToolOutput>,
+    ) -> Vec<maki_lua::RestoreItem> {
+        let (display_msgs, restore_items) =
+            history_to_display(messages, outputs, &self.ui_config.tool_output_lines);
+        self.main_chat().load_messages(display_msgs);
+        restore_items
+    }
+
     pub(crate) fn restore_display(&mut self) {
         let restoring = Arc::new(AtomicBool::new(true));
         self.restoring = restoring.clone();
 
-        let (display_msgs, restore_items) = history_to_display(
-            &self.state.session.messages,
-            &self.state.session.tool_outputs,
-            &self.ui_config.tool_output_lines,
-        );
-        self.main_chat().load_messages(display_msgs);
+        let messages = self.state.session.messages.clone();
+        let outputs = self.state.session.tool_outputs.clone();
+        let restore_items = self.rebuild_main_chat(&messages, &outputs);
         self.main_chat().token_usage = self.state.token_usage;
         self.main_chat().context_size = self.state.context_size;
         if let Some(draft) = self.state.session.meta.input_draft.take() {

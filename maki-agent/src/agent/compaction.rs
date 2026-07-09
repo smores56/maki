@@ -89,7 +89,10 @@ fn finish_compact(
         Message::user("What did we do so far?".into()),
         response.message,
     ];
-    history.replace(new_history);
+    history.replace(new_history.clone());
+    let _ = event_tx.send(AgentEvent::Compacted {
+        messages: new_history,
+    });
     info!(
         model = %model.id,
         duration_ms = compact_start.elapsed().as_millis() as u64,

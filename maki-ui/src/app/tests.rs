@@ -14,7 +14,7 @@ use maki_agent::{
 };
 use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::{HintReader, KeymapReader, LuaCommandReader};
-use maki_providers::{ContentBlock, Role, TokenUsage};
+use maki_providers::{ContentBlock, Message, Role, TokenUsage};
 use maki_storage::sessions::StoredThinking;
 use ratatui::layout::Rect;
 use std::env;
@@ -2733,4 +2733,71 @@ fn subagent_cancel_then_navigate_back_main_unaffected() {
     assert_eq!(app.active_chat, 0);
     assert_eq!(app.status, Status::Streaming);
     assert!(!app.chats[0].is_finished());
+}
+
+const COMPACTION_SUMMARY_USER: &str = "What did we do so far?";
+const COMPACTION_SUMMARY_ASSISTANT: &str = "Here is the summary.";
+
+fn compaction_summary_messages() -> Vec<Message> {
+    vec![
+        Message::user(COMPACTION_SUMMARY_USER.into()),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: COMPACTION_SUMMARY_ASSISTANT.into(),
+            }],
+            ..Default::default()
+        },
+    ]
+}
+
+#[test]
+fn compacted_rebuilds_main_chat_from_summary() {
+    let mut app = test_app();
+
+    type_and_submit(&mut app, "first turn");
+    app.queue_and_notify(queued_msg("second turn"));
+    app.update(agent_msg_with_run_id(
+        AgentEvent::QueueItemConsumed {
+            text: "second turn".into(),
+            image_count: 0,
+        },
+        app.run_id,
+    ));
+    app.update(agent_msg(AgentEvent::TextDelta {
+        text: "assistant reply".into(),
+    }));
+    app.update(agent_msg(AgentEvent::AutoCompacting));
+    let pre_count = app.main_chat().message_count();
+    assert!(
+        pre_count > 2,
+        "precondition: streaming must grow the panel beyond the summary size, got {pre_count}",
+    );
+
+    let draft = "draft that must survive compaction";
+    for c in draft.chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+
+    app.update(agent_msg_with_run_id(
+        AgentEvent::Compacted {
+            messages: compaction_summary_messages(),
+        },
+        app.run_id,
+    ));
+
+    assert_eq!(
+        app.main_chat().message_count(),
+        2,
+        "compaction must replace the panel with the summary conversation",
+    );
+    assert_eq!(
+        app.main_chat().last_message_text(),
+        COMPACTION_SUMMARY_ASSISTANT,
+    );
+    assert_eq!(
+        app.input_box.buffer.value(),
+        draft,
+        "compaction must not touch the input draft",
+    );
 }

@@ -1032,6 +1032,19 @@ impl App {
 
         self.retry_info = None;
 
+        if let AgentEvent::Compacted { ref messages } = envelope.event {
+            if chat_idx == 0 {
+                let outputs = self
+                    .shared_tool_outputs
+                    .as_ref()
+                    .map(|o| o.lock().unwrap_or_else(|e| e.into_inner()).clone())
+                    .unwrap_or_default();
+                let _ = self.rebuild_main_chat(messages, &outputs);
+                self.save_session();
+            }
+            return vec![];
+        }
+
         let plan_path = if self.state.mode == Mode::Plan {
             self.state.plan.path()
         } else {
