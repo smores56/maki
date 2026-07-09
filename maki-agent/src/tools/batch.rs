@@ -217,6 +217,10 @@ impl Batch {
                     Emit::Silent,
                 )
                 .await;
+                ctx.tool_outputs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(done.id.clone(), done.output.clone());
                 ctx.event_tx
                     .try_send(AgentEvent::ToolDone(Box::new(done.clone())));
                 let text = done.output.as_text().to_string();

@@ -350,6 +350,10 @@ pub(super) async fn process_tool_calls(
     }
 
     for err in &immediate_errors {
+        ctx.tool_outputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(err.id.clone(), err.output.clone());
         event_tx.try_send(AgentEvent::ToolDone(Box::new(err.clone())));
     }
 
@@ -374,6 +378,11 @@ pub(super) async fn process_tool_calls(
                 Emit::Notify,
             )
             .await;
+            tool_ctx
+                .tool_outputs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(done.id.clone(), done.output.clone());
             event_tx_clone.try_send(AgentEvent::ToolDone(Box::new(done.clone())));
             done
         });

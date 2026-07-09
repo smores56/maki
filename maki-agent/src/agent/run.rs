@@ -19,7 +19,7 @@ use crate::permissions::PermissionManager;
 use crate::tools::{Deadline, FileReadTracker, LocalTools, ToolAudience, ToolContext};
 use crate::{
     AgentConfig, AgentError, AgentEvent, AgentInput, AgentMode, EventSender, ExtractedCommand,
-    InterruptSource, TurnCompleteEvent,
+    InterruptSource, ToolOutputs, TurnCompleteEvent,
 };
 use maki_config::ToolOutputLines;
 
@@ -62,6 +62,7 @@ pub struct AgentParams {
     pub subagent_cancels: Arc<CancelMap<String>>,
     pub registry: Arc<crate::tools::ToolRegistry>,
     pub audience: ToolAudience,
+    pub tool_outputs: ToolOutputs,
 }
 
 pub struct AgentRunParams<'h> {
@@ -105,6 +106,7 @@ pub struct Agent<'h> {
     audience: ToolAudience,
     workflow: bool,
     local_tools: LocalTools,
+    tool_outputs: ToolOutputs,
 }
 
 impl<'h> Agent<'h> {
@@ -143,6 +145,7 @@ impl<'h> Agent<'h> {
             audience: params.audience,
             workflow: false,
             local_tools: LocalTools::default(),
+            tool_outputs: params.tool_outputs,
         }
     }
 
@@ -411,6 +414,7 @@ impl<'h> Agent<'h> {
             workflow: self.workflow,
             audience: self.audience,
             local_tools: Arc::clone(&self.local_tools),
+            tool_outputs: Arc::clone(&self.tool_outputs),
         }
     }
 
@@ -623,6 +627,7 @@ mod tests {
                 subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                 registry: Arc::new(crate::tools::ToolRegistry::with_natives()),
                 audience: ToolAudience::MAIN,
+                tool_outputs: crate::empty_tool_outputs(),
             },
             AgentRunParams {
                 history,
@@ -886,6 +891,7 @@ mod tests {
                     subagent_cancels: Arc::new(crate::cancel::CancelMap::new()),
                     registry: Arc::new(crate::tools::ToolRegistry::with_natives()),
                     audience: ToolAudience::MAIN,
+                    tool_outputs: crate::empty_tool_outputs(),
                 },
                 AgentRunParams {
                     history: &mut history,

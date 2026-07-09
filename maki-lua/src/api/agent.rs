@@ -512,6 +512,7 @@ async fn session(
             subagent_cancels: Arc::new(CancelMap::new()),
             registry: Arc::clone(maki_agent::tools::ToolRegistry::native_arc()),
             audience,
+            tool_outputs: Arc::clone(&agent_ctx.tool_outputs),
         },
         system: system.unwrap_or_default(),
         tools: tools_json,

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -248,6 +249,12 @@ pub enum ToolOutput {
         /// the pixels ride separately as a `ContentBlock::Image`.
         text: String,
     },
+}
+
+pub type ToolOutputs = Arc<Mutex<HashMap<String, ToolOutput>>>;
+
+pub fn empty_tool_outputs() -> ToolOutputs {
+    Arc::new(Mutex::new(HashMap::new()))
 }
 
 /// Saturating arithmetic so callers can't overflow with any combination of inputs.

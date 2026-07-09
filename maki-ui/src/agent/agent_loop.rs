@@ -13,7 +13,7 @@ use maki_agent::tools::{
 use maki_agent::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentParams, AgentRunParams, CancelMap,
     CancelToken, CancelTrigger, Envelope, EventSender, History, Instructions, McpCommand,
-    PromptRole, ToolOutputLines,
+    PromptRole, ToolOutputLines, ToolOutputs,
 };
 use maki_lua::EventHandle;
 use maki_providers::{AgentError, Message, Model, TokenUsage};
@@ -46,6 +46,7 @@ pub(super) struct AgentLoop {
     timeouts: maki_providers::Timeouts,
     lua_handle: Option<EventHandle>,
     subagent_cancels: Arc<CancelMap<String>>,
+    tool_outputs: ToolOutputs,
 }
 
 impl AgentLoop {
@@ -68,6 +69,7 @@ impl AgentLoop {
         timeouts: maki_providers::Timeouts,
         lua_handle: Option<EventHandle>,
         subagent_cancels: Arc<CancelMap<String>>,
+        tool_outputs: ToolOutputs,
     ) -> Self {
         Self {
             model_slot,
@@ -91,6 +93,7 @@ impl AgentLoop {
             timeouts,
             lua_handle,
             subagent_cancels,
+            tool_outputs,
         }
     }
 
@@ -236,6 +239,7 @@ impl AgentLoop {
                 subagent_cancels: Arc::clone(&self.subagent_cancels),
                 registry: Arc::clone(maki_agent::tools::ToolRegistry::native_arc()),
                 audience: ToolAudience::MAIN,
+                tool_outputs: Arc::clone(&self.tool_outputs),
             },
             AgentRunParams {
                 history: &mut self.history,

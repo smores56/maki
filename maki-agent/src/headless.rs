@@ -213,6 +213,7 @@ pub fn spawn(params: HeadlessParams) -> HeadlessHandle {
                     subagent_cancels: Arc::new(CancelMap::new()),
                     registry: Arc::clone(ToolRegistry::native_arc()),
                     audience: ToolAudience::MAIN,
+                    tool_outputs: crate::empty_tool_outputs(),
                 },
                 AgentRunParams {
                     history: &mut history,
@@ -419,6 +420,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> InteractiveHandle {
                         subagent_cancels: Arc::new(CancelMap::new()),
                         registry: Arc::clone(ToolRegistry::native_arc()),
                         audience: ToolAudience::MAIN,
+                        tool_outputs: crate::empty_tool_outputs(),
                     },
                     AgentRunParams {
                         history: &mut history,

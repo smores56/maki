@@ -235,6 +235,7 @@ fn spawn_agent_internal(
         timeouts,
         lua_handle,
         subagent_cancels,
+        Arc::clone(&shared_tool_outputs),
     );
 
     let task = smol::spawn(agent_loop.run());

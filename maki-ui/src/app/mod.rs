@@ -997,12 +997,6 @@ impl App {
             {
                 self.transition_plan(PlanTrigger::WriteDone);
             }
-            if let Some(ref outputs) = self.shared_tool_outputs {
-                outputs
-                    .lock()
-                    .unwrap()
-                    .insert(e.id.clone(), e.output.clone());
-            }
             if let Some(&sub_idx) = self.chat_index.get(&e.id) {
                 let (role, text) = if e.is_error {
                     (DisplayRole::Error, ERROR_TEXT)

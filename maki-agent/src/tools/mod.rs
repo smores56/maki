@@ -36,7 +36,7 @@ use crate::agent::LoadedInstructions;
 use crate::cancel::{CancelMap, CancelToken};
 use crate::mcp::McpHandle;
 use crate::permissions::PermissionManager;
-use crate::{AgentConfig, AgentMode, EventSender};
+use crate::{AgentConfig, AgentMode, EventSender, ToolOutputs};
 use maki_config::ToolOutputLines;
 use maki_providers::Model;
 use maki_providers::RequestOptions;
@@ -215,6 +215,7 @@ pub struct ToolContext {
     pub workflow: bool,
     pub audience: ToolAudience,
     pub local_tools: LocalTools,
+    pub tool_outputs: ToolOutputs,
 }
 
 pub(crate) fn resolve_path(path: &str) -> Result<String, String> {
@@ -573,6 +574,7 @@ pub fn interpreter_ctx(
         workflow: false,
         audience: ToolAudience::MAIN,
         local_tools: LocalTools::default(),
+        tool_outputs: crate::empty_tool_outputs(),
     }
 }
 
