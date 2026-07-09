@@ -37,14 +37,23 @@ struct JobMeta {
 pub(crate) struct JobStore {
     jobs: HashMap<u32, JobMeta>,
     next_id: u32,
+    ping_tx: flume::Sender<()>,
+    ping_rx: flume::Receiver<()>,
 }
 
 impl JobStore {
     pub fn new() -> Self {
+        let (ping_tx, ping_rx) = flume::bounded(1);
         Self {
             jobs: HashMap::new(),
             next_id: 1,
+            ping_tx,
+            ping_rx,
         }
+    }
+
+    pub fn ping_rx(&self) -> flume::Receiver<()> {
+        self.ping_rx.clone()
     }
 
     pub fn start(
@@ -98,6 +107,7 @@ impl JobStore {
             ($stream:expr, $name:expr, $variant:ident) => {
                 if let Some(stream) = $stream {
                     let tx = event_tx.clone();
+                    let ping_tx = self.ping_tx.clone();
                     Some(
                         thread::Builder::new()
                             .name($name.into())
@@ -109,6 +119,7 @@ impl JobStore {
                                     if tx.send(JobEvent::$variant(line)).is_err() {
                                         break;
                                     }
+                                    let _ = ping_tx.try_send(());
                                 }
                             })
                             .map_err(|e| e.to_string())?,
@@ -121,6 +132,7 @@ impl JobStore {
         let stdout_handle = spawn_reader!(stdout, "job-stdout", Stdout);
         let stderr_handle = spawn_reader!(stderr, "job-stderr", Stderr);
 
+        let ping_tx = self.ping_tx.clone();
         thread::Builder::new()
             .name("job-wait".into())
             .spawn(move || {
@@ -132,6 +144,7 @@ impl JobStore {
                     let _ = h.join();
                 }
                 let _ = event_tx.send(JobEvent::Exit(code));
+                let _ = ping_tx.try_send(());
             })
             .map_err(|e| e.to_string())?;
 

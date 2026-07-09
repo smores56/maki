@@ -40,7 +40,7 @@ use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
 const INTERRUPT_SHUTDOWN_MSG: &str = "plugin interrupted: host shutting down";
 const INTERRUPT_CANCELLED_MSG: &str = "plugin interrupted: task cancelled";
 const INTERRUPT_DEADLINE_MSG: &str = "plugin interrupted: deadline exceeded";
-const DISPATCH_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const DISPATCH_FINISH_GRACE: Duration = Duration::from_millis(50);
 const NIL_WITHOUT_FINISH_MSG: &str =
     "handler returned nil without calling ctx:finish() or starting jobs";
 pub(crate) const CANCELLED_MSG: &str = "cancelled";
@@ -1317,8 +1317,64 @@ fn extract_restore_reply(ret: &LuaValue) -> Option<RestoreReply> {
     Some(RestoreReply { body, header })
 }
 
-/// Handler returned nil, meaning it went async. Polls job events
-/// until `ctx:finish()`, all jobs die, or the deadline expires.
+/// Handler returned nil, meaning it went async. Blocks on job
+/// activity until `ctx:finish()`, all jobs die, or the deadline expires.
+enum Signal {
+    Finished(Box<ToolCallReply>),
+    FinishClosed,
+    JobActivity,
+    Cancelled,
+    TimedOut,
+}
+
+async fn wait_signal(
+    finish_rx: &flume::Receiver<ToolCallReply>,
+    ping_rx: &flume::Receiver<()>,
+    cancel: &CancelToken,
+    deadline: Option<Instant>,
+) -> Signal {
+    use futures_lite::future::{or, pending};
+    or(
+        async {
+            match finish_rx.recv_async().await {
+                Ok(reply) => Signal::Finished(Box::new(reply)),
+                Err(_) => Signal::FinishClosed,
+            }
+        },
+        or(
+            async {
+                let _ = ping_rx.recv_async().await;
+                Signal::JobActivity
+            },
+            or(
+                async {
+                    cancel.cancelled().await;
+                    Signal::Cancelled
+                },
+                async {
+                    match deadline {
+                        Some(d) => {
+                            smol::Timer::at(d).await;
+                            Signal::TimedOut
+                        }
+                        None => pending().await,
+                    }
+                },
+            ),
+        ),
+    )
+    .await
+}
+
+async fn finish_or_grace(finish_rx: &flume::Receiver<ToolCallReply>) -> Option<ToolCallReply> {
+    use futures_lite::future::or;
+    or(async { finish_rx.recv_async().await.ok() }, async {
+        smol::Timer::after(DISPATCH_FINISH_GRACE).await;
+        None
+    })
+    .await
+}
+
 async fn dispatch_async(
     lua: &Lua,
     handle: TaskHandle,
@@ -1326,17 +1382,20 @@ async fn dispatch_async(
     tool: &str,
     finish_rx: flume::Receiver<ToolCallReply>,
 ) -> ToolCallReply {
-    let (cancel, has_jobs) = {
+    let (cancel, ping_rx, has_jobs) = {
         let cell = lock_cell(&handle);
-        (cell.cancel.clone(), !cell.jobs.is_empty())
+        (
+            cell.cancel.clone(),
+            cell.jobs.ping_rx(),
+            !cell.jobs.is_empty(),
+        )
     };
 
     if !has_jobs {
         lua.gc_collect().ok();
-        smol::Timer::after(DISPATCH_POLL_INTERVAL).await;
-        return match finish_rx.try_recv() {
-            Ok(reply) => reply,
-            _ => ToolCallReply::err(NIL_WITHOUT_FINISH_MSG),
+        return match finish_or_grace(&finish_rx).await {
+            Some(reply) => reply,
+            None => ToolCallReply::err(NIL_WITHOUT_FINISH_MSG),
         };
     }
 
@@ -1367,16 +1426,20 @@ async fn dispatch_async(
         lock_cell(&handle).jobs.drain_events(&mut event_buf);
 
         if event_buf.is_empty() {
-            let has_alive = lock_cell(&handle).jobs.has_alive_jobs();
-            if !has_alive {
-                smol::Timer::after(DISPATCH_POLL_INTERVAL).await;
-                return match finish_rx.try_recv() {
-                    Ok(reply) => reply,
-                    _ => ToolCallReply::err(NIL_WITHOUT_FINISH_MSG),
+            if !lock_cell(&handle).jobs.has_alive_jobs() {
+                return match finish_or_grace(&finish_rx).await {
+                    Some(reply) => reply,
+                    None => ToolCallReply::err(NIL_WITHOUT_FINISH_MSG),
                 };
             }
-            smol::Timer::after(DISPATCH_POLL_INTERVAL).await;
-            continue;
+            let deadline = lock_cell(&handle).deadline.get();
+            match wait_signal(&finish_rx, &ping_rx, &cancel, deadline).await {
+                Signal::Finished(reply) => return *reply,
+                Signal::FinishClosed => return ToolCallReply::err(NIL_WITHOUT_FINISH_MSG),
+                Signal::Cancelled => return ToolCallReply::err(CANCELLED_MSG),
+                Signal::TimedOut => return timeout_reply(&handle, plugin, tool),
+                Signal::JobActivity => continue,
+            }
         }
 
         for (job_id, event) in event_buf.drain(..) {
@@ -1968,6 +2031,7 @@ pub(crate) fn install_live_ctx(lua: &Lua, tool_use_id: &str) {
 mod tests {
     use super::*;
     use crate::api::tool::ToolCallReply;
+    use std::sync::atomic::AtomicUsize;
 
     fn make_buf_handle(text: &str) -> BufHandle {
         let buf = Arc::new(maki_agent::SharedBuf::new());
@@ -2309,5 +2373,142 @@ mod tests {
             }
             panic!("gate count never reached 0 after draining");
         }));
+    }
+
+    const FINISH_REPLY_TEXT: &str = "finished";
+    const DISPATCH_TIMING_CAP: Duration = Duration::from_millis(150);
+    const CHATTY_PROMPT_AFTER_FIRST: Duration = Duration::from_millis(250);
+
+    fn make_handle_with_jobs(
+        lua: &Lua,
+        cmd: &str,
+        on_stdout: Option<RegistryKey>,
+        on_exit: Option<RegistryKey>,
+    ) -> (TaskScope, TaskHandle) {
+        let scope = TaskScope::detached(lua);
+        let handle = Arc::clone(scope.handle());
+        {
+            let mut cell = lock_cell(&handle);
+            cell.jobs
+                .start(cmd, None, None, on_stdout, None, on_exit)
+                .unwrap();
+        }
+        (scope, handle)
+    }
+
+    #[test]
+    fn finish_during_job_output_returns_without_draining() {
+        let lua = Lua::new();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let seen_cb = Arc::clone(&seen);
+        let on_stdout = lua
+            .create_function(move |_, (_id, _line): (u32, mlua::String)| {
+                seen_cb.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        let on_stdout_key = lua.create_registry_value(on_stdout).unwrap();
+
+        let cmd = "for i in 1 2 3 4 5 6 7 8 9 10; do echo line$i; sleep 0.05; done";
+        let (scope, handle) = make_handle_with_jobs(&lua, cmd, Some(on_stdout_key), None);
+        let (finish_tx, finish_rx) = flume::bounded::<ToolCallReply>(1);
+
+        let finish_reply = ToolCallReply::plain(Ok(FINISH_REPLY_TEXT.to_string()));
+        let ex = smol::LocalExecutor::new();
+        let started = Instant::now();
+        let reply = smol::block_on(ex.run(async {
+            let sender = ex.spawn(async {
+                loop {
+                    if seen.load(Ordering::SeqCst) > 0 {
+                        break;
+                    }
+                    smol::Timer::after(Duration::from_millis(2)).await;
+                }
+                let _ = finish_tx.send(finish_reply);
+            });
+            let reply = dispatch_async(&lua, Arc::clone(&handle), "test", "test", finish_rx).await;
+            sender.await;
+            reply
+        }));
+        let elapsed = started.elapsed();
+        let job_alive_after = lock_cell(&handle).jobs.has_alive_jobs();
+        drop(scope);
+        assert_eq!(
+            reply.result.as_ref().map(String::as_str),
+            Ok(FINISH_REPLY_TEXT)
+        );
+        assert!(
+            elapsed < CHATTY_PROMPT_AFTER_FIRST,
+            "dispatch returned in {elapsed:?} but the chatty job runs ~500ms; \
+             finish must take priority over continued output"
+        );
+        assert!(
+            job_alive_after,
+            "job should still be alive when finish reply returns"
+        );
+    }
+
+    #[test]
+    fn job_output_dispatches_without_poll_delay() {
+        let lua = Lua::new();
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let lines_cb = Arc::clone(&lines);
+        let on_stdout = lua
+            .create_function(move |_, (_id, line): (u32, mlua::String)| {
+                if let Ok(s) = line.to_str() {
+                    lines_cb.lock().unwrap().push(s.to_string());
+                }
+                Ok(())
+            })
+            .unwrap();
+        let on_stdout_key = lua.create_registry_value(on_stdout).unwrap();
+
+        let exited = Arc::new(AtomicBool::new(false));
+        let exited_cb = Arc::clone(&exited);
+        let on_exit = lua
+            .create_function(move |_, (_id, code): (u32, i64)| {
+                if code == 0 {
+                    exited_cb.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            })
+            .unwrap();
+        let on_exit_key = lua.create_registry_value(on_exit).unwrap();
+
+        let (scope, handle) = make_handle_with_jobs(
+            &lua,
+            "printf 'a\\nb\\nc\\n'",
+            Some(on_stdout_key),
+            Some(on_exit_key),
+        );
+        let (finish_tx, finish_rx) = flume::bounded::<ToolCallReply>(1);
+
+        let finish_reply = ToolCallReply::plain(Ok(FINISH_REPLY_TEXT.to_string()));
+        let ex = smol::LocalExecutor::new();
+        let started = Instant::now();
+        let reply = smol::block_on(ex.run(async {
+            let sender = ex.spawn(async {
+                while !exited.load(Ordering::SeqCst) {
+                    smol::Timer::after(Duration::from_millis(1)).await;
+                }
+                let _ = finish_tx.send(finish_reply);
+            });
+            let reply = dispatch_async(&lua, Arc::clone(&handle), "test", "test", finish_rx).await;
+            sender.await;
+            reply
+        }));
+        let elapsed = started.elapsed();
+        drop(scope);
+
+        assert_eq!(
+            reply.result.as_ref().map(String::as_str),
+            Ok(FINISH_REPLY_TEXT)
+        );
+        let got = lines.lock().unwrap().clone();
+        assert_eq!(got, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert!(
+            elapsed < DISPATCH_TIMING_CAP,
+            "dispatch completed in {elapsed:?}; old 50ms-per-cycle polling would exceed {DISPATCH_TIMING_CAP:?}"
+        );
     }
 }
