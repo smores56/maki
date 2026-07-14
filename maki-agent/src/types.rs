@@ -764,7 +764,7 @@ impl BufferSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotLine {
     pub spans: Vec<SnapshotSpan>,
 }
@@ -1414,5 +1414,18 @@ mod tests {
         let display = output.as_display_text();
         assert!(display.contains("fn main()"), "{EXCLUDES_MSG}");
         assert!(!display.contains("Instructions from:"), "{EXCLUDES_MSG}");
+    }
+
+    #[test]
+    fn snapshot_line_roundtrip() {
+        let line = SnapshotLine {
+            spans: vec![SnapshotSpan {
+                text: "x".into(),
+                style: SpanStyle::Named("spinner".into()),
+            }],
+        };
+        let json = serde_json::to_string(&line).unwrap();
+        let back: SnapshotLine = serde_json::from_str(&json).unwrap();
+        assert_eq!(line, back);
     }
 }

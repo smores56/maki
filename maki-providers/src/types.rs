@@ -252,7 +252,7 @@ pub enum ProviderEvent {
     ToolUseStart { id: String, name: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Display, IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
@@ -311,7 +311,7 @@ pub enum EffortScale {
     Glm,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThinkingConfig {
     #[default]
     Off,
@@ -768,5 +768,22 @@ mod tests {
         };
         let json = serde_json::to_value(&block).unwrap();
         assert!(json.get("signature").is_none());
+    }
+
+    #[test_case(StopReason::EndTurn; "end_turn")]
+    #[test_case(StopReason::ToolUse; "tool_use")]
+    #[test_case(StopReason::MaxTokens; "max_tokens")]
+    fn stop_reason_roundtrip(reason: StopReason) {
+        let json = serde_json::to_string(&reason).unwrap();
+        let back: StopReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(reason, back);
+    }
+
+    #[test]
+    fn thinking_config_roundtrip() {
+        let cfg = ThinkingConfig::Budget(4096);
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: ThinkingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, back);
     }
 }
