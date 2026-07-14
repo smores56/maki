@@ -2,3 +2,7 @@
 __pycache__/
 runs.csv
 /.direnv/
+
+# perf spike (standalone, throwaway)
+spike/target/
+spike/Cargo.lock
