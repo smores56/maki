@@ -22,7 +22,7 @@ use tracing::error;
 
 use super::ModelSlot;
 use super::cancel_map::RunCancelMap;
-use super::shared_queue::{QueueItem, QueueReceiver};
+use maki_agent::{QueueItem, QueueReceiver};
 
 pub(super) struct AgentLoop {
     model_slot: Arc<ArcSwap<ModelSlot>>,

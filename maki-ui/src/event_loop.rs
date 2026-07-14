@@ -10,7 +10,7 @@ use crossterm::event::{
 };
 use maki_agent::command::CustomCommand;
 use maki_agent::permissions::PermissionManager;
-use maki_agent::{AgentConfig, CancelToken, McpCommand};
+use maki_agent::{AgentConfig, CancelToken, McpCommand, QueueItem};
 use maki_config::UiConfig;
 use maki_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader, UiAction};
 use maki_providers::Timeouts;
@@ -20,7 +20,7 @@ use maki_storage::StateDir;
 use tracing::warn;
 
 use crate::AppSession;
-use crate::agent::{AgentCommand, AgentHandles, ModelSlot, shared_queue::QueueItem};
+use crate::agent::{AgentCommand, AgentHandles, ModelSlot};
 use crate::app::shell::{ShellEvent, spawn_shell};
 use crate::app::{App, Msg};
 use crate::components::input::Submission;

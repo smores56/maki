@@ -20,6 +20,8 @@ pub mod command;
 pub mod diff;
 pub mod permissions;
 pub mod prompt;
+pub mod queue;
+pub use queue::{QueueItem, QueueReceiver, QueueSender, QueuedMessage};
 pub mod template;
 pub mod tools;
 pub use tools::ToolFilter;

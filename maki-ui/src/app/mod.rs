@@ -868,7 +868,7 @@ impl App {
                 visible: prefix.visible,
             }];
         }
-        let msg: QueuedMessage = sub.into();
+        let msg = crate::agent::queue_view::queued_message(sub);
         if self.status == Status::Streaming {
             self.queue_and_notify(msg);
             vec![]

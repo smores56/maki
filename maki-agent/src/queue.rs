@@ -6,35 +6,19 @@
 //! nobody needs a separate "please stop" flag, and callers can't forget to
 //! set it.
 
-use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use maki_agent::{AgentInput, ExtractedCommand, ImageSource, InterruptSource};
-
-use crate::components::input::Submission;
-use crate::components::queue_panel::QueueEntry;
-use crate::theme;
-
-const COMPACT_LABEL: &str = "/compact";
+use crate::{AgentInput, ExtractedCommand, ImageSource, InterruptSource};
 
 type Items = Arc<Mutex<VecDeque<QueueItem>>>;
 
-pub(crate) struct QueuedMessage {
-    pub(crate) text: String,
-    pub(crate) images: Vec<ImageSource>,
+pub struct QueuedMessage {
+    pub text: String,
+    pub images: Vec<ImageSource>,
 }
 
-impl From<Submission> for QueuedMessage {
-    fn from(sub: Submission) -> Self {
-        Self {
-            text: sub.text,
-            images: sub.images,
-        }
-    }
-}
-
-pub(crate) enum QueueItem {
+pub enum QueueItem {
     Message {
         text: String,
         image_count: usize,
@@ -52,25 +36,9 @@ pub(crate) enum QueueItem {
 }
 
 impl QueueItem {
-    pub(crate) fn run_id(&self) -> u64 {
+    pub fn run_id(&self) -> u64 {
         match self {
             Self::Message { run_id, .. } | Self::Compact { run_id } => *run_id,
-        }
-    }
-
-    fn as_queue_entry(&self) -> QueueEntry<'static> {
-        match self {
-            Self::Message { text, .. } => QueueEntry {
-                text: Cow::Owned(text.clone()),
-                color: theme::current().foreground,
-            },
-            Self::Compact { .. } => QueueEntry {
-                text: Cow::Borrowed(COMPACT_LABEL),
-                color: theme::current()
-                    .queue
-                    .fg
-                    .unwrap_or(theme::current().foreground),
-            },
         }
     }
 
@@ -84,7 +52,7 @@ impl QueueItem {
     /// Immediate-dispatch messages already sit in the chat, so hiding them
     /// here stops the panel from reserving a row the agent is about to free,
     /// which used to make the bubble hop up by one frame.
-    fn visible_in_panel(&self) -> bool {
+    pub fn visible_in_panel(&self) -> bool {
         match self {
             Self::Message { displayed, .. } => !displayed,
             Self::Compact { .. } => true,
@@ -97,17 +65,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 #[derive(Clone)]
-pub(crate) struct QueueSender {
+pub struct QueueSender {
     items: Items,
     notify_tx: flume::Sender<()>,
 }
 
-pub(crate) struct QueueReceiver {
+pub struct QueueReceiver {
     items: Items,
     notify_rx: flume::Receiver<()>,
 }
 
-pub(crate) fn queue() -> (QueueSender, QueueReceiver) {
+pub fn queue() -> (QueueSender, QueueReceiver) {
     let (notify_tx, notify_rx) = flume::bounded(1);
     let items: Items = Arc::new(Mutex::new(VecDeque::new()));
     (
@@ -120,30 +88,29 @@ pub(crate) fn queue() -> (QueueSender, QueueReceiver) {
 }
 
 impl QueueSender {
-    pub(crate) fn push(&self, entry: QueueItem) {
+    pub fn push(&self, entry: QueueItem) {
         lock(&self.items).push_back(entry);
         let _ = self.notify_tx.try_send(());
     }
 
-    pub(crate) fn remove(&self, index: usize) -> Option<QueueItem> {
+    pub fn remove(&self, index: usize) -> Option<QueueItem> {
         let mut items = lock(&self.items);
         (index < items.len()).then(|| items.remove(index)).flatten()
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         lock(&self.items).len()
     }
 
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    pub(crate) fn clear(&self) {
+    pub fn clear(&self) {
         lock(&self.items).clear();
     }
 
-    pub(crate) fn text_messages(&self) -> Vec<String> {
+    pub fn text_messages(&self) -> Vec<String> {
         lock(&self.items)
             .iter()
             .filter(|item| item.visible_in_panel())
@@ -154,28 +121,26 @@ impl QueueSender {
             .collect()
     }
 
-    pub(crate) fn panel_len(&self) -> usize {
+    pub fn panel_len(&self) -> usize {
         lock(&self.items)
             .iter()
             .filter(|item| item.visible_in_panel())
             .count()
     }
 
-    pub(crate) fn panel_entries(&self) -> Vec<QueueEntry<'static>> {
-        lock(&self.items)
-            .iter()
-            .filter(|item| item.visible_in_panel())
-            .map(QueueItem::as_queue_entry)
-            .collect()
+    /// Lets the UI render queue rows (e.g. themed panel entries) by reading the
+    /// locked items in place without leaking the mutex guard.
+    pub fn with_items<R>(&self, f: impl FnOnce(&VecDeque<QueueItem>) -> R) -> R {
+        f(&lock(&self.items))
     }
 }
 
 impl QueueReceiver {
-    pub(crate) fn pop(&self) -> Option<QueueItem> {
+    pub fn pop(&self) -> Option<QueueItem> {
         lock(&self.items).pop_front()
     }
 
-    pub(crate) async fn recv_notify(&self) -> Result<(), flume::RecvError> {
+    pub async fn recv_notify(&self) -> Result<(), flume::RecvError> {
         self.notify_rx.recv_async().await
     }
 }
@@ -218,6 +183,9 @@ mod tests {
         tx.push(item);
         let expected = usize::from(visible);
         assert_eq!(tx.panel_len(), expected);
-        assert_eq!(tx.panel_entries().len(), expected);
+        assert_eq!(
+            tx.with_items(|items| items.iter().filter(|item| item.visible_in_panel()).count()),
+            expected
+        );
     }
 }

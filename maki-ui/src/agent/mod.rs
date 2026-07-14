@@ -1,7 +1,7 @@
 mod agent_loop;
 mod cancel_map;
 mod command_router;
-pub(crate) mod shared_queue;
+pub(crate) mod queue_view;
 
 use std::collections::HashMap;
 use std::mem;
@@ -27,7 +27,7 @@ use crate::app::App;
 
 use self::agent_loop::AgentLoop;
 use self::command_router::spawn_command_router;
-pub(crate) use self::shared_queue::{QueueSender, QueuedMessage};
+pub(crate) use maki_agent::{QueueSender, QueuedMessage};
 
 pub(crate) struct ModelSlot {
     pub(crate) model: Model,
@@ -197,7 +197,7 @@ fn spawn_agent_internal(
     let agent_tx_clone = agent_tx.clone();
     let (cmd_tx, cmd_rx) = flume::unbounded::<AgentCommand>();
     let (answer_tx, answer_rx) = flume::unbounded::<String>();
-    let (queue_tx, queue_rx) = shared_queue::queue();
+    let (queue_tx, queue_rx) = maki_agent::queue::queue();
     let queue_rx = Arc::new(queue_rx);
     let shared_history: Arc<ArcSwap<Vec<Message>>> =
         Arc::new(ArcSwap::from_pointee(initial_history.clone()));

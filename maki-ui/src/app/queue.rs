@@ -2,10 +2,9 @@
 
 use super::{App, format_with_images};
 
-use crate::agent::shared_queue::{QueueItem, QueueSender};
+use crate::agent::queue_view::queue_entry;
 use crate::components::queue_panel::QueueEntry;
-
-pub(crate) use crate::agent::shared_queue::QueuedMessage;
+use maki_agent::{QueueItem, QueueSender, QueuedMessage};
 
 #[derive(Default)]
 pub(crate) struct MessageQueue {
@@ -82,7 +81,15 @@ impl MessageQueue {
     }
 
     pub(crate) fn panel_entries(&self) -> Vec<QueueEntry<'static>> {
-        self.shared.as_ref().map_or(vec![], |s| s.panel_entries())
+        self.shared.as_ref().map_or(vec![], |s| {
+            s.with_items(|items| {
+                items
+                    .iter()
+                    .filter(|item| item.visible_in_panel())
+                    .map(queue_entry)
+                    .collect()
+            })
+        })
     }
 
     pub(crate) fn text_messages(&self) -> Vec<String> {
