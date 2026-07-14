@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+flume = { workspace = true }
 getrandom = { workspace = true }
 isahc = { workspace = true }
 serde = { workspace = true }
