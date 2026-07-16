@@ -78,6 +78,7 @@ impl App {
         self.chats.clear();
         let mut main = Chat::new("Main".into(), self.ui_config);
         main.set_restore_channel(self.lua_event_handle.clone(), self.restore_event_tx.clone());
+        main.set_renders(self.renders.clone());
         self.chats.push(main);
         self.active_chat = 0;
         self.chat_index.clear();
@@ -102,6 +103,7 @@ impl App {
             &self.ui_config.tool_output_lines,
         );
         self.main_chat().load_messages(display_msgs);
+        self.main_chat().queue_restore_items(restore_items);
         self.main_chat().token_usage = self.state.token_usage;
         self.main_chat().context_size = self.state.context_size;
         if let Some(draft) = self.state.session.meta.input_draft.take() {
@@ -117,13 +119,12 @@ impl App {
             self.queue_and_notify(msg);
         }
 
-        self.fire_restore_items(restore_items);
-
         for sa in std::mem::take(&mut self.state.session.meta.subagents) {
             let idx = self.chats.len();
             self.chat_index.insert(sa.tool_use_id.clone(), idx);
             let mut chat = Chat::new(sa.name, self.ui_config);
             chat.set_restore_channel(self.lua_event_handle.clone(), self.restore_event_tx.clone());
+            chat.set_renders(self.renders.clone());
             chat.model_id = sa.model;
             if let Some(messages) = self.state.session.subagent_messages.get(&sa.tool_use_id) {
                 let (display, items) = history_to_display(
@@ -132,8 +133,8 @@ impl App {
                     &self.ui_config.tool_output_lines,
                 );
                 chat.load_messages(display);
+                chat.queue_restore_items(items);
                 chat.mark_finished(DisplayRole::Done, DONE_TEXT);
-                self.fire_restore_items(items);
             }
             self.chats.push(chat);
         }
@@ -143,17 +144,6 @@ impl App {
         } else {
             self.restoring
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    fn fire_restore_items(&self, items: Vec<maki_lua::RestoreItem>) {
-        let (Some(eh), Some(tx)) = (&self.lua_event_handle, &self.restore_event_tx) else {
-            return;
-        };
-        let theme_gen = crate::theme::generation();
-        for mut item in items {
-            item.theme_gen = Some(theme_gen);
-            eh.request_restore(item, tx.clone());
         }
     }
 
