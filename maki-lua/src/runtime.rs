@@ -1182,10 +1182,9 @@ impl LuaRuntime {
     fn clear_plugin(&mut self, plugin: &str) {
         self.registry.clear_plugin(plugin);
         self.drop_plugin_keys(plugin);
-        if let Some(mut store) = self.lua.app_data_mut::<KeymapStore>() {
+        if let Some(store) = self.lua.app_data_ref::<KeymapStore>() {
             let keys = store.clear_plugin(plugin);
             let entries = store.snapshot_entries();
-            drop(store);
             for key in keys {
                 let _ = self.lua.remove_registry_value(key);
             }
@@ -2011,8 +2010,7 @@ pub fn spawn(
                         }
                         Request::RunKeybindCallback { id } => {
                             let func = rt.lua.app_data_ref::<KeymapStore>().and_then(|store| {
-                                let key = store.callback_for_id(id)?;
-                                rt.lua.registry_value::<Function>(key).ok()
+                                store.callback_for_id(&rt.lua, id)
                             });
                             if let Some(func) = func {
                                 let lua = rt.lua.clone();

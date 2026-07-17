@@ -1,9 +1,10 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use crossterm::event::{KeyCode, KeyModifiers};
-use mlua::{Lua, RegistryKey, Result as LuaResult, Table};
+use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table};
 
 static NEXT_KEYMAP_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -71,18 +72,22 @@ pub(crate) struct StoredKeymap {
 }
 
 pub(crate) struct KeymapStore {
-    bindings: Vec<StoredKeymap>,
+    bindings: Mutex<Vec<StoredKeymap>>,
 }
 
 impl KeymapStore {
     pub fn new() -> Self {
         Self {
-            bindings: Vec::new(),
+            bindings: Mutex::new(Vec::new()),
         }
     }
 
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<StoredKeymap>> {
+        self.bindings.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn set(
-        &mut self,
+        &self,
         key: KeyCode,
         modifiers: KeyModifiers,
         callback: RegistryKey,
@@ -90,12 +95,12 @@ impl KeymapStore {
         desc: String,
     ) -> (u64, Option<RegistryKey>) {
         let id = NEXT_KEYMAP_ID.fetch_add(1, Ordering::Relaxed);
-        let old = self
-            .bindings
+        let mut bindings = self.lock();
+        let old = bindings
             .iter()
             .position(|b| b.key == key && b.modifiers == modifiers)
-            .map(|pos| self.bindings.remove(pos).callback);
-        self.bindings.push(StoredKeymap {
+            .map(|pos| bindings.remove(pos).callback);
+        bindings.push(StoredKeymap {
             id,
             key,
             modifiers,
@@ -106,19 +111,21 @@ impl KeymapStore {
         (id, old)
     }
 
-    pub fn del(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Option<RegistryKey> {
-        self.bindings
+    pub fn del(&self, key: KeyCode, modifiers: KeyModifiers) -> Option<RegistryKey> {
+        let mut bindings = self.lock();
+        bindings
             .iter()
             .position(|b| b.key == key && b.modifiers == modifiers)
-            .map(|pos| self.bindings.remove(pos).callback)
+            .map(|pos| bindings.remove(pos).callback)
     }
 
-    pub fn clear_plugin(&mut self, plugin: &str) -> Vec<RegistryKey> {
+    pub fn clear_plugin(&self, plugin: &str) -> Vec<RegistryKey> {
+        let mut bindings = self.lock();
         let mut keys = Vec::new();
         let mut i = 0;
-        while i < self.bindings.len() {
-            if self.bindings[i].plugin.as_ref() == plugin {
-                keys.push(self.bindings.remove(i).callback);
+        while i < bindings.len() {
+            if bindings[i].plugin.as_ref() == plugin {
+                keys.push(bindings.remove(i).callback);
             } else {
                 i += 1;
             }
@@ -127,7 +134,8 @@ impl KeymapStore {
     }
 
     pub fn snapshot_entries(&self) -> Vec<KeymapEntry> {
-        self.bindings
+        let bindings = self.lock();
+        bindings
             .iter()
             .map(|b| KeymapEntry {
                 key: b.key,
@@ -139,11 +147,12 @@ impl KeymapStore {
             .collect()
     }
 
-    pub fn callback_for_id(&self, id: u64) -> Option<&RegistryKey> {
-        self.bindings
+    pub fn callback_for_id(&self, lua: &Lua, id: u64) -> Option<Function> {
+        let bindings = self.lock();
+        bindings
             .iter()
             .find(|b| b.id == id)
-            .map(|b| &b.callback)
+            .and_then(|b| lua.registry_value::<Function>(&b.callback).ok())
     }
 }
 
@@ -270,7 +279,7 @@ pub(crate) fn create_keymap_table(lua: &Lua, plugin: Arc<str>) -> LuaResult<Tabl
                     .unwrap_or_default();
                 let registry_key = lua.create_registry_value(callback)?;
                 let (_, old) = lua
-                    .app_data_mut::<KeymapStore>()
+                    .app_data_ref::<KeymapStore>()
                     .ok_or_else(|| mlua::Error::runtime("keymap store not initialized"))?
                     .set(key, modifiers, registry_key, Arc::clone(&p), desc);
                 if let Some(old_key) = old {
@@ -288,8 +297,8 @@ pub(crate) fn create_keymap_table(lua: &Lua, plugin: Arc<str>) -> LuaResult<Tabl
         lua.create_function(|lua, (_mode, key_str): (String, String)| {
             let (key, modifiers) = parse_key_notation(&key_str).map_err(mlua::Error::runtime)?;
             let old = lua
-                .app_data_mut::<KeymapStore>()
-                .and_then(|mut store| store.del(key, modifiers));
+                .app_data_ref::<KeymapStore>()
+                .and_then(|store| store.del(key, modifiers));
             if let Some(old_key) = old {
                 let _ = lua.remove_registry_value(old_key);
             }
@@ -367,7 +376,7 @@ mod tests {
     #[test]
     fn keymap_store_set_and_shadow() {
         let lua = Lua::new();
-        let mut store = KeymapStore::new();
+        let store = KeymapStore::new();
 
         let f1 = lua.create_function(|_, ()| Ok(())).unwrap();
         let k1 = lua.create_registry_value(f1).unwrap();
@@ -391,13 +400,13 @@ mod tests {
         );
         assert!(old2.is_some());
         assert_ne!(id1, id2);
-        assert_eq!(store.bindings.len(), 1);
+        assert_eq!(store.bindings.lock().unwrap().len(), 1);
     }
 
     #[test]
     fn keymap_store_del() {
         let lua = Lua::new();
-        let mut store = KeymapStore::new();
+        let store = KeymapStore::new();
 
         let f = lua.create_function(|_, ()| Ok(())).unwrap();
         let k = lua.create_registry_value(f).unwrap();
@@ -408,11 +417,11 @@ mod tests {
             Arc::from("p"),
             String::new(),
         );
-        assert_eq!(store.bindings.len(), 1);
+        assert_eq!(store.bindings.lock().unwrap().len(), 1);
 
         let removed = store.del(KeyCode::Char('x'), KeyModifiers::ALT);
         assert!(removed.is_some());
-        assert!(store.bindings.is_empty());
+        assert!(store.bindings.lock().unwrap().is_empty());
 
         let missing = store.del(KeyCode::Char('x'), KeyModifiers::ALT);
         assert!(missing.is_none());
@@ -421,7 +430,7 @@ mod tests {
     #[test]
     fn keymap_store_clear_plugin() {
         let lua = Lua::new();
-        let mut store = KeymapStore::new();
+        let store = KeymapStore::new();
 
         let f1 = lua.create_function(|_, ()| Ok(())).unwrap();
         let f2 = lua.create_function(|_, ()| Ok(())).unwrap();
@@ -444,8 +453,9 @@ mod tests {
 
         let removed = store.clear_plugin("a");
         assert_eq!(removed.len(), 1);
-        assert_eq!(store.bindings.len(), 1);
-        assert_eq!(store.bindings[0].plugin.as_ref(), "b");
+        let bindings = store.bindings.lock().unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].plugin.as_ref(), "b");
     }
 
     #[test]
