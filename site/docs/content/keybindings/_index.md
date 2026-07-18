@@ -108,3 +108,15 @@ Display: the in-app `/help` modal reflects live overrides for matchable rows. Th
 Multi-key and non-key rows ( Alt+O / Alt+Enter newline, `Tab`, `/command`, word-left/right) are listed as multiple single-key binds; an override on any one of them shows on the shared row. Rows that are not a single keystroke (e.g. `Type` to filter) cannot be overridden because the override store keys on a single `KeyCode` + `KeyModifiers`.
 
 See the Permissions page for the `keymap` plugin permission and `--no-plugins` to boot with the full default keymap and no Lua at all.
+
+### Recovery
+
+If a bad keymap or a broken `init.lua` leaves Maki unusable (a rebound `Ctrl+C`, a stuck modal, a plugin that throws on load), boot with `--no-plugins`:
+
+```bash
+maki --no-plugins
+```
+
+This skips the Lua plugin host entirely and runs the full built-in default keymap from Rust, so quit, Esc, scroll, and suspend always work. It is the documented escape hatch for a keymap you cannot fix from inside the app.
+
+Note that the built-in defaults live in Rust, not in a Lua plugin, so `--no-plugins` never loses them. Third-party plugins need `keymap = true` (the default) in their `plugin.toml` to rebind; pin `keymap = false` to run a plugin with no keymap access.

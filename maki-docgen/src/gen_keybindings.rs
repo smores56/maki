@@ -166,6 +166,21 @@ fn write_overrides(out: &mut String) {
     );
     out.push_str(
         "See the Permissions page for the `keymap` plugin permission and `--no-plugins` to boot with \
-         the full default keymap and no Lua at all.\n",
+         the full default keymap and no Lua at all.\n\n",
+    );
+    out.push_str("### Recovery\n\n");
+    out.push_str(
+        "If a bad keymap or a broken `init.lua` leaves Maki unusable (a rebound `Ctrl+C`, a stuck \
+         modal, a plugin that throws on load), boot with `--no-plugins`:\n\n",
+    );
+    out.push_str(
+        "```bash\nmaki --no-plugins\n```\n\nThis skips the Lua plugin host entirely and runs the \
+         full built-in default keymap from Rust, so quit, Esc, scroll, and suspend always work. \
+         It is the documented escape hatch for a keymap you cannot fix from inside the app.\n\n",
+    );
+    out.push_str(
+        "Note that the built-in defaults live in Rust, not in a Lua plugin, so `--no-plugins` never \
+         loses them. Third-party plugins need `keymap = true` (the default) in their `plugin.toml` \
+         to rebind; pin `keymap = false` to run a plugin with no keymap access.\n",
     );
 }
