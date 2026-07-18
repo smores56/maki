@@ -394,6 +394,7 @@ mod tests {
     use crate::api::util::command::{LuaCommandInfo, LuaCommandWriter};
     use maki_agent::prompt::{PromptId, ResolvedSlots, Slot};
     use maki_agent::tools::ToolRegistry;
+    use std::time::Instant;
     use test_case::test_case;
 
     /// Load `src` as one plugin, collect resolved slots.
@@ -506,6 +507,94 @@ mod tests {
         assert_eq!(reader.load().generation, 0);
         writer.publish(vec![]);
         assert!(reader.load().generation > 0);
+    }
+
+    /// End-to-end: a plugin registers a keymap override, the override is published
+    /// to the snapshot, EventHandle::run_keybind_callback dispatches the request,
+    /// the runtime resolves the Function by id from the registry, and the callback
+    /// executes with an observable side effect. This is the load-bearing path the
+    /// dispatch reorder (PR3) and the store hardening (PR1) rest on; unit tests only
+    /// cover the layers in isolation.
+    #[test]
+    fn keybind_callback_runs_end_to_end() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.load_source(
+            "kb",
+            r#"
+            maki.keymap.set("n", "<C-g>", function()
+                maki.api.register_command({
+                    name = "/fired",
+                    description = "callback ran",
+                    handler = function() end,
+                })
+            end, { desc = "test override" })
+            "#,
+        )
+        .unwrap();
+
+        let snap = host.keymap_reader().load();
+        assert_eq!(snap.entries.len(), 1, "override published to snapshot");
+        let entry = &snap.entries[0];
+        assert_eq!(entry.desc, "test override");
+        assert!(
+            host.command_reader().load().commands.is_empty(),
+            "callback has not fired yet"
+        );
+
+        let handle = host.event_handle().expect("host is live");
+        handle.run_keybind_callback(entry.id);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let cmds = &host.command_reader().load().commands;
+            if cmds.iter().any(|c| c.name.as_ref() == "/fired") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "keybind callback did not register /fired within 2s"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// End-to-end permission gate: a plugin loaded with denied permissions cannot
+    /// call maki.keymap.set — the guard returns a runtime error that surfaces
+    /// through load_source. This is the PR2 security path; the guard helper itself
+    /// is unit-tested, but this confirms the wiring through create_maki_global.
+    #[test]
+    fn keymap_permission_denied_blocks_set() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        let err = host
+            .load_source_with_permissions(
+                "untrusted",
+                r#"maki.keymap.set("n", "<C-x>", function() end)"#,
+                PluginPermissions::denied(),
+            )
+            .expect_err("denied permissions must block keymap.set");
+        let msg = err.to_string();
+        assert!(msg.contains("permission denied"), "got: {msg}");
+        assert!(msg.contains("keymap"), "got: {msg}");
+        assert!(
+            host.keymap_reader().load().entries.is_empty(),
+            "no binding should be stored when denied"
+        );
+    }
+
+    /// Trusted init posture (PR2): a plugin loaded with trusted permissions can
+    /// rebind keys. Confirms the default posture matches the migration's intent.
+    #[test]
+    fn keymap_permission_trusted_allows_set() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.load_source_with_permissions(
+            "init",
+            r#"maki.keymap.set("n", "<C-y>", function() end, { desc = "trusted" })"#,
+            PluginPermissions::trusted(),
+        )
+        .expect("trusted permissions must allow keymap.set");
+        let snap = host.keymap_reader().load();
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(snap.entries[0].desc, "trusted");
     }
 
     #[test]
