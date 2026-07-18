@@ -29,7 +29,10 @@ return function(U)
   --   "foo"     -> { kind = "string",     text = "foo",       quoted = true }
   --   FOO       -> { kind = "identifier", text = "FOO",       quoted = false }
   --   any expr  -> { kind = "other",      text = "<compact>", quoted = false }
+  -- Drop expression/primary_expression wrappers arborium adds around call
+  -- arguments so the concrete kind (string/identifier/list/...) is visible.
   local function new_value_record(node, source)
+    node = ast.unwrap(node)
     local t = node:type()
 
     if t == "identifier" then
@@ -43,8 +46,6 @@ return function(U)
       return { kind = "other", text = ast.compact_list(node, source), quoted = false }
     end
 
-    -- Default: anything else (and malformed string literals that fail to
-    -- parse) renders as compact source text.
     return { kind = "other", text = ast.compact_ws_node(node, source), quoted = false }
   end
 
@@ -70,8 +71,6 @@ return function(U)
           entry = { kind = "keyword", name = name, value = new_value_record(value_node, source) }
           kwargs[name] = entry.value
         end
-
-        -- Malformed keyword arg (no name or no value) is silently dropped.
       elseif arg:type() == "dictionary_splat" then
         entry = { kind = "dictionary_splat", keys = ast.dictionary_splat_keys(arg, source) }
       else
@@ -162,45 +161,35 @@ return function(U)
     return CallRecord.new(call, source)
   end
 
-  -- The first arg is the module path; subsequent args are imported names.
+  -- load() is its own statement form (load_statement) in arborium, not a call.
+  -- The first string child of a load_statement is the module path; subsequent
+  -- string children are positional imports and aliased_load children are
+  -- aliased imports (`alias = "name"`), where the displayed name is the alias.
   -- `module_quoted` is true iff the module came from a string literal, so
   -- extractors can render accordingly: BUILD keeps both shapes, .bzl drops
-  -- non-quoted modules. For a keyword-form import (`alias = "real"`) the
-  -- displayed name is the alias.
+  -- non-quoted modules.
   local function load_record(node, source)
-    local call = ast.unwrap_to(node, "call")
-    if not call then
+    if node:type() ~= "load_statement" then
       return nil
     end
 
-    if ast.call_target(call, source) ~= "load" then
+    local module_text, names = ast.load_pieces(node, source)
+    if not module_text or #names == 0 then
       return nil
     end
 
-    local _, _, args = extract_call_args(call, source)
-    if #args == 0 then
-      return nil
+    local s, e = ast.node_lines(node)
+
+    local rendered_names = {}
+    for i = 1, #names do
+      rendered_names[i] = names[i].alias or names[i].name
     end
-
-    local module_vrec = args[1].value
-    local names = {}
-
-    for i = 2, #args do
-      local entry = args[i]
-      if entry.kind == "keyword" then
-        names[#names + 1] = entry.name
-      else
-        names[#names + 1] = entry.value.text
-      end
-    end
-
-    local s, e = ast.node_lines(call)
 
     return {
       kind = "load",
-      module = module_vrec.text,
-      module_quoted = module_vrec.quoted,
-      names = names,
+      module = module_text,
+      module_quoted = true,
+      names = rendered_names,
       line_start = s,
       line_end = e,
     }
@@ -234,9 +223,10 @@ return function(U)
 
     -- value_call is a full CallRecord (metatabled) so module.lua's
     -- handle_extension_assignment can ask :positional_or_kwarg / :kwarg_bool
-    -- on the RHS call directly.
-    if value_node:type() == "call" then
-      rec.value_call = CallRecord.new(value_node, source)
+    -- on the RHS call directly. The RHS is wrapped in expression/primary_expression.
+    local value_call = ast.unwrap_to(value_node, "call")
+    if value_call then
+      rec.value_call = CallRecord.new(value_call, source)
     end
 
     return rec

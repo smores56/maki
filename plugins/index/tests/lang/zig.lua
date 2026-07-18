@@ -95,9 +95,9 @@ pub fn add(a: i32, b: i32) i32 {
   has(out, {
     "module doc: [1-2]",
     "types:",
-    "struct Point",
+    "struct Point [4-7]",
     "fns:",
-    "add(a: i32, b: i32) i32",
+    "add(a: i32, b: i32) i32 [9-10]",
   })
 end)
 

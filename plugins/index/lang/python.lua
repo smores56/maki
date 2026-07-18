@@ -11,7 +11,15 @@ return function(U)
   local ranged = U.ranged
   local SECTION = U.SECTION
 
+  local function is_triple_quoted(node, source)
+    local prefix = get_text(node, source):sub(1, 3)
+    return prefix == '"""' or prefix == "'''"
+  end
+
   local function is_module_doc(node, source)
+    if node:type() == "string" then
+      return is_triple_quoted(node, source)
+    end
     if node:type() ~= "expression_statement" then
       return false
     end
@@ -19,7 +27,7 @@ return function(U)
     if not first then
       return false
     end
-    return first:type() == "string" and get_text(first, source):sub(1, 3) == '"""'
+    return first:type() == "string" and is_triple_quoted(first, source)
   end
 
   local function extract_import(node, source)
@@ -164,6 +172,9 @@ return function(U)
         return e and { e } or {}
       end
       return {}
+    elseif kind == "assignment" then
+      local e = extract_assignment(node, source)
+      return e and { e } or {}
     elseif kind == "expression_statement" then
       local first = node:child(0)
       if first and first:type() == "assignment" then

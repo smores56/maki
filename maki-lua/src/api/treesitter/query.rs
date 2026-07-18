@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use arborium::tree_sitter::{
+    Node, Point, Query, QueryCapture, QueryCursor, QueryPredicateArg, StreamingIterator, Tree,
+};
 use maki_lua_macro::{lua_class, lua_fn, lua_table};
 use mlua::{Lua, MultiValue, Value as LuaValue};
 use regex::Regex;
-use tree_sitter::{Node, Query, QueryCursor, QueryPredicateArg, StreamingIterator, Tree};
 
 use crate::docs::{FnDoc, ParamDoc};
 use crate::language::Language;
@@ -272,7 +274,7 @@ fn new_cursor(start_row: Option<usize>, stop_row: Option<usize>) -> QueryCursor 
     let mut cursor = QueryCursor::new();
     if let Some(start) = start_row {
         let end = stop_row.unwrap_or(usize::MAX);
-        cursor.set_point_range(tree_sitter::Point::new(start, 0)..tree_sitter::Point::new(end, 0));
+        cursor.set_point_range(Point::new(start, 0)..Point::new(end, 0));
     }
     cursor
 }
@@ -362,7 +364,7 @@ fn parse_predicate_op(op: &str) -> (PredicateModifiers, &str) {
 fn evaluate_predicates(
     query: &Query,
     pattern_index: usize,
-    captures: &[tree_sitter::QueryCapture<'_>],
+    captures: &[QueryCapture<'_>],
     source: &[u8],
     metadata: &mut HashMap<String, String>,
     regex_cache: &mut HashMap<String, Option<Regex>>,
@@ -407,11 +409,7 @@ fn evaluate_predicates(
     true
 }
 
-fn capture_text<'a>(
-    captures: &[tree_sitter::QueryCapture<'_>],
-    source: &'a [u8],
-    idx: u32,
-) -> Option<&'a str> {
+fn capture_text<'a>(captures: &[QueryCapture<'_>], source: &'a [u8], idx: u32) -> Option<&'a str> {
     captures
         .iter()
         .find(|c| c.index == idx)
@@ -419,7 +417,7 @@ fn capture_text<'a>(
 }
 
 fn resolve_arg<'a>(
-    captures: &[tree_sitter::QueryCapture<'_>],
+    captures: &[QueryCapture<'_>],
     source: &'a [u8],
     arg: &'a QueryPredicateArg,
 ) -> Option<&'a str> {
@@ -430,7 +428,7 @@ fn resolve_arg<'a>(
 }
 
 fn eval_eq(
-    captures: &[tree_sitter::QueryCapture<'_>],
+    captures: &[QueryCapture<'_>],
     source: &[u8],
     args: &[QueryPredicateArg],
     any: bool,
@@ -449,7 +447,7 @@ fn eval_eq(
 }
 
 fn eval_match(
-    captures: &[tree_sitter::QueryCapture<'_>],
+    captures: &[QueryCapture<'_>],
     source: &[u8],
     args: &[QueryPredicateArg],
     any: bool,
@@ -475,7 +473,7 @@ fn eval_match(
 }
 
 fn eval_contains(
-    captures: &[tree_sitter::QueryCapture<'_>],
+    captures: &[QueryCapture<'_>],
     source: &[u8],
     args: &[QueryPredicateArg],
     any: bool,
@@ -493,11 +491,7 @@ fn eval_contains(
     }
 }
 
-fn eval_any_of(
-    captures: &[tree_sitter::QueryCapture<'_>],
-    source: &[u8],
-    args: &[QueryPredicateArg],
-) -> bool {
+fn eval_any_of(captures: &[QueryCapture<'_>], source: &[u8], args: &[QueryPredicateArg]) -> bool {
     let Some(QueryPredicateArg::Capture(idx)) = args.first() else {
         return false;
     };
@@ -512,10 +506,7 @@ fn eval_any_of(
     })
 }
 
-fn eval_has_ancestor(
-    captures: &[tree_sitter::QueryCapture<'_>],
-    args: &[QueryPredicateArg],
-) -> bool {
+fn eval_has_ancestor(captures: &[QueryCapture<'_>], args: &[QueryPredicateArg]) -> bool {
     let Some(QueryPredicateArg::Capture(idx)) = args.first() else {
         return false;
     };
@@ -535,7 +526,7 @@ fn eval_has_ancestor(
     false
 }
 
-fn eval_has_parent(captures: &[tree_sitter::QueryCapture<'_>], args: &[QueryPredicateArg]) -> bool {
+fn eval_has_parent(captures: &[QueryCapture<'_>], args: &[QueryPredicateArg]) -> bool {
     let Some(QueryPredicateArg::Capture(idx)) = args.first() else {
         return false;
     };

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::language::Language;
+use arborium::tree_sitter::{Parser, Tree};
 use maki_lua_macro::{lua_class, lua_fn};
 use mlua::{Function, Lua, Result as LuaResult, Table, Value as LuaValue};
-use tree_sitter::{Parser, Tree};
 
 use super::tree::LuaTree;
 

@@ -66,3 +66,15 @@ class Account(val id: Int) {
   local text, meta = idx_with_meta(src, "kotlin")
   helpers.assert_ranged_meta(text, meta, { "deposit", "withdraw" })
 end)
+
+case("kotlin_typealias_function_type_rhs", function()
+  local src = [==[
+typealias Handler = (Int) -> String
+]==]
+  local out = idx(src, "kotlin")
+  has(out, {
+    "types:",
+    "typealias Handler",
+  })
+  helpers.lacks(out, { "typealias String", "Unit" })
+end)

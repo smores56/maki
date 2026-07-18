@@ -54,3 +54,15 @@ case("ts_class_members_have_ranged_meta", function()
   local text, meta = idx_with_meta(src, "typescript")
   helpers.assert_ranged_meta(text, meta, { "add(", "match(" })
 end)
+
+case("tsx_routes_to_tsx_grammar", function()
+  local src = [==[export const Card = (props: { title: string }) => (
+  <div className="card">{props.title}</div>
+);
+]==]
+  local out = idx(src, "tsx")
+  has(out, {
+    "consts:",
+    "Card",
+  })
+end)

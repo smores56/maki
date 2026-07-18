@@ -7,7 +7,7 @@ local EXT_TO_LANG = {
   py = "python",
   pyi = "python",
   ts = "typescript",
-  tsx = "typescript",
+  tsx = "tsx",
   js = "javascript",
   jsx = "javascript",
   mjs = "javascript",
@@ -479,14 +479,26 @@ local function collect_preceding_attrs(node, is_attr_fn)
   if not is_attr_fn then
     return {}
   end
+  local seen = {}
   local attrs = {}
   local prev = node:prev_sibling()
   while prev do
     if is_attr_fn(prev) then
-      attrs[#attrs + 1] = prev
+      if not seen[prev:id()] then
+        attrs[#attrs + 1] = prev
+        seen[prev:id()] = true
+      end
       prev = prev:prev_sibling()
     else
       break
+    end
+  end
+  for _, container in ipairs(node:field("attributes")) do
+    for _, attr in ipairs(container:children()) do
+      if is_attr_fn(attr) and not seen[attr:id()] then
+        attrs[#attrs + 1] = attr
+        seen[attr:id()] = true
+      end
     end
   end
   local n = #attrs
@@ -772,6 +784,7 @@ local U = {
   extract_fields_truncated = extract_fields_truncated,
   extract_body_members = extract_body_members,
   format_skeleton = format_skeleton,
+  doc_comment_start_line = doc_comment_start_line,
 }
 
 local function default_extract(lang, source, root)
@@ -823,6 +836,7 @@ end
 
 local LANG_ALIASES = {
   javascript = "typescript",
+  tsx = "typescript",
 }
 
 local function unique_langs()
