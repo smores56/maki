@@ -2681,14 +2681,26 @@ local q = maki.treesitter.query.parse("lua", "(identifier) @id")
 maki.treesitter.query.get({lang}, {name})
 ```
 
-Looks up a named built-in query for {lang} (not yet implemented, always returns nil).
+Looks up a named built-in query for {lang}.
+
+Only the `"skeleton"` query is shipped, sourced from
+`plugins/index/queries/<lang>.scm`. Returns nil with no error when the
+language has no shipped query, and nil with an error when the grammar
+itself is unknown or the query name is unsupported.
 
 **Parameters:**
 
-- `{lang}` (`string`) Language name.
-- `{name}` (`string`) Query name, e.g. `"highlights"`.
+- `{lang}` (`string`) Language name, e.g. `"julia"`.
+- `{name}` (`string`) Query name; only `"skeleton"` is supported.
 
-**Returns:** ([`Query|nil`](#maki-treesitter-Query)) Query object, or nil if not found.
+**Returns:** ([`Query|nil`](#maki-treesitter-Query), `string|nil`) Compiled query, or nil and an error message.
+
+**Example:**
+
+```lua
+local q, err = maki.treesitter.query.get("julia", "skeleton")
+if err then print(err) end
+```
 
 
 ## maki.treesitter.Query {#maki-treesitter-Query}

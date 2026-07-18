@@ -1,0 +1,10 @@
+(module_definition) @definition.module
+(function_definition) @definition.function
+(macro_definition) @definition.macro
+(struct_definition) @definition.type
+(abstract_definition) @definition.type
+(primitive_definition) @definition.type
+(const_statement) @definition.constant
+(import_statement) @string.import
+(using_statement) @string.import
+(export_statement) @string.import

@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use arborium::tree_sitter::{
     Node, Point, Query, QueryCapture, QueryCursor, QueryPredicateArg, StreamingIterator, Tree,
 };
+use include_dir::{Dir, include_dir};
 use maki_lua_macro::{lua_class, lua_fn, lua_table};
 use mlua::{Lua, MultiValue, Value as LuaValue};
 use regex::Regex;
@@ -13,6 +14,13 @@ use crate::docs::{FnDoc, ParamDoc};
 use crate::language::from_name as language_from_name;
 
 use super::node::LuaNode;
+
+/// Bundled tree-sitter queries shipped under `plugins/index/queries/`.
+/// Served by `get(lang, name)` so the index plugin can fall back to a
+/// declarative `.scm` per language when no hand-tuned Lua extractor exists.
+static QUERIES_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../plugins/index/queries");
+
+const QUERY_KIND: &str = "skeleton";
 
 #[allow(non_upper_case_globals)]
 const iter_captures__doc: FnDoc = FnDoc {
@@ -138,15 +146,42 @@ fn parse(_lua: &Lua, lang: String, query: String) -> mlua::Result<LuaQuery> {
     Ok(LuaQuery { inner: Arc::new(q) })
 }
 
-/// Looks up a named built-in query for {lang} (not yet implemented, always returns nil).
+/// Looks up a named built-in query for {lang}.
 ///
-/// @param lang string Language name.
-/// @param name string Query name, e.g. `"highlights"`.
-/// @return (Query|nil) Query object, or nil if not found.
+/// Only the `"skeleton"` query is shipped, sourced from
+/// `plugins/index/queries/<lang>.scm`. Returns nil with no error when the
+/// language has no shipped query, and nil with an error when the grammar
+/// itself is unknown or the query name is unsupported.
+///
+/// @param lang string Language name, e.g. `"julia"`.
+/// @param name string Query name; only `"skeleton"` is supported.
+/// @return (Query|nil, string|nil) Compiled query, or nil and an error message.
+/// @example
+/// local q, err = maki.treesitter.query.get("julia", "skeleton")
+/// if err then print(err) end
 #[lua_fn]
-fn get(_lua: &Lua, lang: String, name: String) -> mlua::Result<Option<LuaQuery>> {
-    let _ = (lang, name);
-    Ok(None)
+fn get(_lua: &Lua, lang: String, name: String) -> mlua::Result<(Option<LuaQuery>, Option<String>)> {
+    if name != QUERY_KIND {
+        return Ok((
+            None,
+            Some(format!(
+                "unsupported query name '{name}'; only '{QUERY_KIND}' is supported"
+            )),
+        ));
+    }
+    let Some(ts_lang) = language_from_name(&lang) else {
+        return Ok((None, Some(format!("unknown language: {lang}"))));
+    };
+    let path = format!("{lang}.scm");
+    let Some(file) = QUERIES_DIR.get_file(&path) else {
+        return Ok((None, None));
+    };
+    let Some(source) = file.contents_utf8() else {
+        return Ok((None, Some(format!("query '{path}' is not valid utf-8"))));
+    };
+    let q = Query::new(&ts_lang, source)
+        .map_err(|e| mlua::Error::runtime(format!("query '{path}' parse error: {e}")))?;
+    Ok((Some(LuaQuery { inner: Arc::new(q) }), None))
 }
 
 lua_table! {

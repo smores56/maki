@@ -48,6 +48,7 @@ local EXT_TO_LANG = {
   zig = "zig",
   nix = "nix",
   dart = "dart",
+  jl = "julia",
 }
 
 local FILENAME_TO_LANG = {
@@ -869,8 +870,12 @@ for _, sub in ipairs({ "build", "module", "bzl" }) do
   EXTRACTORS[lang_name] = lang.extract
 end
 
+local QUERY_LANGS = {
+  julia = true,
+}
+
 for _, name in ipairs(unique_langs()) do
-  if not EXTRACTORS[name] then
+  if not EXTRACTORS[name] and not QUERY_LANGS[name] then
     local factory = require("lang." .. name)
     local lang = factory(U)
     validate_lang(name, lang)
@@ -889,15 +894,71 @@ for alias, target in pairs(LANG_ALIASES) do
   EXTRACTORS[alias] = EXTRACTORS[target]
 end
 
+local QUERY_ENTRY_TRUNCATE = 80
+
+local CAPTURE_TO_SECTION = {
+  ["definition.module"] = SECTION.Module,
+  ["definition.function"] = SECTION.Function,
+  ["definition.method"] = SECTION.Function,
+  ["definition.macro"] = SECTION.Macro,
+  ["definition.class"] = SECTION.Class,
+  ["definition.type"] = SECTION.Type,
+  ["definition.struct"] = SECTION.Type,
+  ["definition.interface"] = SECTION.Type,
+  ["definition.enum"] = SECTION.Type,
+  ["definition.trait"] = SECTION.Trait,
+  ["definition.constant"] = SECTION.Constant,
+  ["definition.impl"] = SECTION.Impl,
+  ["string.import"] = SECTION.Import,
+  ["imports.import"] = SECTION.Import,
+}
+
+local function query_entry_text(node, source)
+  local raw = get_text(node, source)
+  local first_line = raw:match("^([^\n]*)")
+  return truncate(compact_ws(first_line), QUERY_ENTRY_TRUNCATE)
+end
+
+local function query_import_paths(text)
+  local stripped = text:match("^%s*%a+%s+(.*)$") or text
+  stripped = stripped:gsub("^%s+", ""):gsub("%s+$", "")
+  local path = {}
+  for seg in stripped:gmatch("[^.%s:]+") do
+    path[#path + 1] = seg
+  end
+  return #path > 0 and { path } or { { stripped } }
+end
+
+local function query_extract(source, root, lang_name)
+  local pname = parser_name(lang_name)
+  local q, err = maki.treesitter.query.get(pname, "skeleton")
+  if not q then
+    return nil, err or ("no skeleton query for " .. lang_name)
+  end
+  local capture_names = q.captures
+  local entries = {}
+  for capture_index, node in q:iter_captures(root, source) do
+    local cap_name = capture_names[capture_index]
+    local section = CAPTURE_TO_SECTION[cap_name]
+    if section == SECTION.Import then
+      entries[#entries + 1] =
+        new_import_entry(node, query_import_paths(get_text(node, source)), "import")
+    elseif section then
+      entries[#entries + 1] = new_entry(section, node, query_entry_text(node, source))
+    end
+  end
+  return format_skeleton(entries, {}, nil, ".")
+end
+
 local function index_source(source, lang_name)
   local extractor = EXTRACTORS[lang_name]
-  if not extractor then
-    return nil, "unsupported language: " .. tostring(lang_name)
-  end
   local pname = parser_name(lang_name)
   local parser = maki.treesitter.get_parser(source, pname)
   local root = parser:parse()[1]:root()
-  return extractor(source, root)
+  if extractor then
+    return extractor(source, root)
+  end
+  return query_extract(source, root, lang_name)
 end
 
 local LANG_TO_EXT = {}
@@ -914,3 +975,4 @@ return {
   FILENAME_TO_LANG = FILENAME_TO_LANG,
   TRUNCATED_SUFFIX = TRUNCATED_SUFFIX,
 }
+
