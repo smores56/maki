@@ -172,3 +172,49 @@ Some constructs are too complex to analyze statically, so they always trigger a 
 ## Session Persistence
 
 When you save a session, its permission rules are saved too. Loading the session restores them.
+
+## Plugin Permissions
+
+Plugins (bundled or third-party) run Lua inside Maki and can touch the filesystem, network, shell, and keymap. Each plugin carries a permission set that gates these capabilities, separate from the tool-call rules above.
+
+A plugin declares its permissions in a `plugin.toml` beside its `init.lua`:
+
+```toml
+[package]
+name = "my-plugin"
+
+[permissions]
+fs_read = true
+fs_write = false
+net = false
+run = false
+env = false
+keymap = true
+```
+
+All six default to `true` when omitted. A plugin that omits `[permissions]` entirely is granted everything.
+
+| Permission | Gates |
+|------------|-------|
+| `fs_read` | `maki.fs.read` and read access |
+| `fs_write` | `maki.fs.write` and write access |
+| `net` | `maki.net.*` |
+| `run` | `maki.fn.*` and shell spawning |
+| `env` | `maki.env.*` |
+| `keymap` | `maki.keymap.set` and `maki.keymap.del` |
+
+A plugin denied `keymap` gets a runtime error when it tries to rebind a key. A plugin can only `del` its own bindings, never another plugin's.
+
+### Trust tiers
+
+- **Bundled plugins** (shipped with Maki) and your init files (`~/.config/maki/init.lua`, `.maki/init.lua`) always run fully trusted. They are your config, the same way your shell rc files are.
+- **Third-party plugins** load from the `[permissions]` table in their `plugin.toml`. To run an untrusted plugin with no keymap access, pin it:
+
+```toml
+[permissions]
+keymap = false
+```
+
+Because init files run trusted, a committed `.maki/init.lua` can rebind any key including `<C-c>` or `<Esc>`. That is the cost of making keymaps user-configurable: the init file is already trusted to run arbitrary Lua via `maki.fn` and `maki.fs`, so keymap access adds no new power to an init file. Audit project init files the same way you audit any project script before running Maki in that project.
+
+To boot with the full default keymap and no Lua at all, use `--no-plugins`.

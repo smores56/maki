@@ -65,7 +65,7 @@ pub(crate) fn create_maki_global(
     agent::register(lua, &maki)?;
     maki.set(
         "keymap",
-        keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
+        keymap::create_keymap_table(lua, Arc::clone(&plugin), permissions)?,
     )?;
 
     Ok(maki)

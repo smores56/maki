@@ -6,6 +6,8 @@ use arc_swap::ArcSwap;
 use crossterm::event::{KeyCode, KeyModifiers};
 use mlua::{Function, Lua, RegistryKey, Result as LuaResult, Table};
 
+use crate::plugin_permissions::{Permission, PluginPermissions};
+
 static NEXT_KEYMAP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
@@ -111,11 +113,11 @@ impl KeymapStore {
         (id, old)
     }
 
-    pub fn del(&self, key: KeyCode, modifiers: KeyModifiers) -> Option<RegistryKey> {
+    pub fn del(&self, key: KeyCode, modifiers: KeyModifiers, plugin: &str) -> Option<RegistryKey> {
         let mut bindings = self.lock();
         bindings
             .iter()
-            .position(|b| b.key == key && b.modifiers == modifiers)
+            .position(|b| b.key == key && b.modifiers == modifiers && b.plugin.as_ref() == plugin)
             .map(|pos| bindings.remove(pos).callback)
     }
 
@@ -252,13 +254,18 @@ fn parse_key_name(name: &str) -> Result<KeyCode, String> {
     }
 }
 
-pub(crate) fn create_keymap_table(lua: &Lua, plugin: Arc<str>) -> LuaResult<Table> {
+pub(crate) fn create_keymap_table(
+    lua: &Lua,
+    plugin: Arc<str>,
+    perms: &PluginPermissions,
+) -> LuaResult<Table> {
     let t = lua.create_table()?;
 
     let p = Arc::clone(&plugin);
-    t.set(
-        "set",
-        lua.create_function(
+    let set_fn =
+        perms.guard(
+            Permission::Keymap,
+            lua,
             move |lua,
                   (mode, key_str, callback, opts): (
                 String,
@@ -289,23 +296,26 @@ pub(crate) fn create_keymap_table(lua: &Lua, plugin: Arc<str>) -> LuaResult<Tabl
                 publish_keymap_snapshot(lua);
                 Ok(())
             },
-        )?,
-    )?;
+        )?;
+    t.set("set", set_fn)?;
 
-    t.set(
-        "del",
-        lua.create_function(|lua, (_mode, key_str): (String, String)| {
+    let p = Arc::clone(&plugin);
+    let del_fn = perms.guard(
+        Permission::Keymap,
+        lua,
+        move |lua, (_mode, key_str): (String, String)| {
             let (key, modifiers) = parse_key_notation(&key_str).map_err(mlua::Error::runtime)?;
             let old = lua
                 .app_data_ref::<KeymapStore>()
-                .and_then(|store| store.del(key, modifiers));
+                .and_then(|store| store.del(key, modifiers, &p));
             if let Some(old_key) = old {
                 let _ = lua.remove_registry_value(old_key);
             }
             publish_keymap_snapshot(lua);
             Ok(())
-        })?,
+        },
     )?;
+    t.set("del", del_fn)?;
 
     Ok(t)
 }
@@ -419,11 +429,15 @@ mod tests {
         );
         assert_eq!(store.bindings.lock().unwrap().len(), 1);
 
-        let removed = store.del(KeyCode::Char('x'), KeyModifiers::ALT);
+        let wrong = store.del(KeyCode::Char('x'), KeyModifiers::ALT, "other");
+        assert!(wrong.is_none());
+        assert_eq!(store.bindings.lock().unwrap().len(), 1);
+
+        let removed = store.del(KeyCode::Char('x'), KeyModifiers::ALT, "p");
         assert!(removed.is_some());
         assert!(store.bindings.lock().unwrap().is_empty());
 
-        let missing = store.del(KeyCode::Char('x'), KeyModifiers::ALT);
+        let missing = store.del(KeyCode::Char('x'), KeyModifiers::ALT, "p");
         assert!(missing.is_none());
     }
 
