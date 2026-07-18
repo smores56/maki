@@ -259,7 +259,8 @@ impl App {
         if r.width > 0 {
             overlay_rect = r;
         }
-        let r = self.help_modal.view(frame, full);
+        let snap = self.keymap_reader.load();
+        let r = self.help_modal.view(frame, full, &snap.entries);
         if r.width > 0 {
             overlay_rect = r;
         }

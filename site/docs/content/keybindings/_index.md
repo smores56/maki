@@ -105,9 +105,9 @@ Precedence, high to low:
 3. **Lua overrides** from `maki.keymap.set`. Last set wins; binding the same key twice warns.
 4. **Built-in defaults.** An override on the same key shadows them; `maki.keymap.del` lifts the override so the default returns. Suspend is the only binding outside this layer, so every key is remappable except `Ctrl+Z`.
 
-Only single-key bindings can be overridden. Multi-key combinations and non-key rows (like `Type` to filter) cannot.
+Only single-key bindings can be overridden. Multi-key combinations and non-key rows (like `Type` to filter) cannot. Rows that list several alternative keys show an override on any of them on the shared row.
 
-The `/help` modal and the splash show default labels, not live overrides, but pressing the key still runs the override.
+The `/help` modal shows an override on the matching default row, or under a Plugin bindings section when the key has no default row. The startup splash shows key labels, not live overrides. Generated docs like this page show built-in defaults, since build time does not run Lua.
 
 ### Recovering from a bad keymap
 

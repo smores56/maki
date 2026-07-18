@@ -34,6 +34,14 @@ impl KeymapReader {
     pub fn load(&self) -> arc_swap::Guard<Arc<KeymapSnapshot>> {
         self.0.load()
     }
+
+    /// Drop every published override. Callers use this when the Lua host is
+    /// shutting down: dispatch falls back to the built-in defaults once the
+    /// priority channel is severed, and the `/help` modal must reflect that
+    /// instead of advertising overrides that no longer fire.
+    pub fn clear(&self) {
+        self.0.store(Arc::new(KeymapSnapshot::default()));
+    }
 }
 
 pub(crate) struct KeymapWriter {

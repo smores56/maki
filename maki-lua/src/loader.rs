@@ -174,6 +174,9 @@ impl PluginHost {
             let _ = inner.prio_tx.send(Request::Shutdown);
             inner.tx = flume::unbounded().0;
             inner.prio_tx = flume::unbounded().0;
+            // Drop published overrides so the UI stops advertising them;
+            // dispatch already rejects new callbacks via the severed senders.
+            inner.keymap_reader.clear();
         }
     }
 
@@ -744,6 +747,25 @@ mod tests {
     /// executes with an observable side effect. This is the load-bearing path the
     /// dispatch reorder and the dead-host fallback rest on; unit tests only cover
     /// the layers in isolation.
+    #[test]
+    fn begin_shutdown_clears_keymap_snapshot() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.load_source(
+            "kb",
+            r#"maki.keymap.set("n", "<C-g>", function() end, { desc = "live" })"#,
+        )
+        .unwrap();
+        assert_eq!(host.keymap_reader().load().entries.len(), 1);
+
+        let mut host = host;
+        host.begin_shutdown();
+        let snap = host.keymap_reader().load();
+        assert!(
+            snap.entries.is_empty(),
+            "snapshot must clear on shutdown so the help modal stops advertising dead overrides"
+        );
+    }
+
     #[test]
     fn keybind_callback_runs_end_to_end() {
         let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();

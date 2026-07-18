@@ -166,11 +166,16 @@ fn write_overrides(out: &mut String) {
     );
     out.push_str(
         "Only single-key bindings can be overridden. Multi-key combinations \
-         and non-key rows (like `Type` to filter) cannot.\n\n",
+         and non-key rows (like `Type` to filter) cannot. Rows that list \
+         several alternative keys show an override on any of them on the \
+         shared row.\n\n",
     );
     out.push_str(
-        "The `/help` modal and the splash show default labels, not live \
-         overrides, but pressing the key still runs the override.\n\n",
+        "The `/help` modal shows an override on the matching default row, or \
+         under a Plugin bindings section when the key has no default row. \
+         The startup splash shows key labels, not live overrides. Generated \
+         docs like this page show built-in defaults, since build time does \
+         not run Lua.\n\n",
     );
     out.push_str("### Recovering from a bad keymap\n\n");
     out.push_str(
