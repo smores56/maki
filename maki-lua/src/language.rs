@@ -1,124 +1,99 @@
 use arborium::tree_sitter::Language as TsLanguage;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
-    Rust,
-    Python,
-    TypeScript,
-    Tsx,
-    JavaScript,
-    Gleam,
-    Go,
-    Html,
-    Java,
-    C,
-    Cpp,
-    CSharp,
-    Ruby,
-    Php,
-    Swift,
-    Kotlin,
-    Scala,
-    Bash,
-    Lua,
-    Elixir,
-    Markdown,
-    Starlark,
-    Zig,
-    Nix,
-    Dart,
+const NAME_ALIASES: &[(&str, &str)] = &[("c_sharp", "c-sharp")];
+
+fn canonical(name: &str) -> &str {
+    for &(alias, canonical) in NAME_ALIASES {
+        if name == alias {
+            return canonical;
+        }
+    }
+    name
 }
 
-impl Language {
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "rust" => Some(Self::Rust),
-            "python" => Some(Self::Python),
-            "typescript" => Some(Self::TypeScript),
-            "tsx" => Some(Self::Tsx),
-            "javascript" => Some(Self::JavaScript),
-            "gleam" => Some(Self::Gleam),
-            "go" => Some(Self::Go),
-            "html" => Some(Self::Html),
-            "java" => Some(Self::Java),
-            "c" => Some(Self::C),
-            "cpp" => Some(Self::Cpp),
-            "c_sharp" => Some(Self::CSharp),
-            "ruby" => Some(Self::Ruby),
-            "php" => Some(Self::Php),
-            "swift" => Some(Self::Swift),
-            "kotlin" => Some(Self::Kotlin),
-            "scala" => Some(Self::Scala),
-            "bash" => Some(Self::Bash),
-            "lua" => Some(Self::Lua),
-            "elixir" => Some(Self::Elixir),
-            "markdown" => Some(Self::Markdown),
-            "starlark" => Some(Self::Starlark),
-            "zig" => Some(Self::Zig),
-            "nix" => Some(Self::Nix),
-            "dart" => Some(Self::Dart),
-            _ => None,
+pub(crate) fn from_name(name: &str) -> Option<TsLanguage> {
+    arborium::get_language(canonical(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_c_sharp_via_underscore_alias() {
+        assert!(from_name("c_sharp").is_some());
+    }
+
+    #[test]
+    fn resolves_c_sharp_via_hyphen_canonical() {
+        assert!(from_name("c-sharp").is_some());
+    }
+
+    #[test]
+    fn resolves_all_previously_supported_names() {
+        for name in [
+            "rust",
+            "python",
+            "typescript",
+            "tsx",
+            "javascript",
+            "gleam",
+            "go",
+            "html",
+            "java",
+            "c",
+            "cpp",
+            "c_sharp",
+            "ruby",
+            "php",
+            "swift",
+            "kotlin",
+            "scala",
+            "bash",
+            "lua",
+            "elixir",
+            "markdown",
+            "starlark",
+            "zig",
+            "nix",
+            "dart",
+        ] {
+            assert!(from_name(name).is_some(), "language not found: {name}");
         }
     }
 
-    pub fn from_extension(ext: &str) -> Option<Self> {
-        match ext {
-            "rs" => Some(Self::Rust),
-            "py" | "pyi" => Some(Self::Python),
-            "ts" => Some(Self::TypeScript),
-            "tsx" => Some(Self::Tsx),
-            "js" | "jsx" | "mjs" | "cjs" => Some(Self::JavaScript),
-            "gleam" => Some(Self::Gleam),
-            "go" => Some(Self::Go),
-            "html" | "htm" => Some(Self::Html),
-            "java" => Some(Self::Java),
-            "c" | "h" => Some(Self::C),
-            "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" | "ixx" => Some(Self::Cpp),
-            "cs" => Some(Self::CSharp),
-            "rb" | "rake" | "gemspec" => Some(Self::Ruby),
-            "php" => Some(Self::Php),
-            "swift" => Some(Self::Swift),
-            "kt" | "kts" => Some(Self::Kotlin),
-            "scala" | "sc" => Some(Self::Scala),
-            "sh" | "bash" | "zsh" => Some(Self::Bash),
-            "lua" => Some(Self::Lua),
-            "ex" | "exs" => Some(Self::Elixir),
-            "md" | "markdown" => Some(Self::Markdown),
-            "bzl" => Some(Self::Starlark),
-            "zig" => Some(Self::Zig),
-            "nix" => Some(Self::Nix),
-            "dart" => Some(Self::Dart),
-            _ => None,
+    #[test]
+    fn resolves_newly_supported_names() {
+        for name in [
+            "haskell",
+            "ocaml",
+            "julia",
+            "r",
+            "perl",
+            "clojure",
+            "commonlisp",
+            "fsharp",
+            "erlang",
+            "elm",
+            "groovy",
+            "sql",
+            "json",
+            "yaml",
+            "toml",
+            "dockerfile",
+            "css",
+            "scss",
+            "vim",
+            "uiua",
+            "proto",
+            "thrift",
+        ] {
+            assert!(from_name(name).is_some(), "language not found: {name}");
         }
     }
 
-    pub fn ts_language(&self) -> TsLanguage {
-        match self {
-            Self::Rust => arborium::lang_rust::language().into(),
-            Self::Python => arborium::lang_python::language().into(),
-            Self::TypeScript => arborium::lang_typescript::language().into(),
-            Self::Tsx => arborium::lang_tsx::language().into(),
-            Self::JavaScript => arborium::lang_javascript::language().into(),
-            Self::Gleam => arborium::lang_gleam::language().into(),
-            Self::Go => arborium::lang_go::language().into(),
-            Self::Html => arborium::lang_html::language().into(),
-            Self::Java => arborium::lang_java::language().into(),
-            Self::C => arborium::lang_c::language().into(),
-            Self::Cpp => arborium::lang_cpp::language().into(),
-            Self::CSharp => arborium::lang_c_sharp::language().into(),
-            Self::Ruby => arborium::lang_ruby::language().into(),
-            Self::Php => arborium::lang_php::language().into(),
-            Self::Swift => arborium::lang_swift::language().into(),
-            Self::Kotlin => arborium::lang_kotlin::language().into(),
-            Self::Scala => arborium::lang_scala::language().into(),
-            Self::Bash => arborium::lang_bash::language().into(),
-            Self::Lua => arborium::lang_lua::language().into(),
-            Self::Elixir => arborium::lang_elixir::language().into(),
-            Self::Markdown => arborium::lang_markdown::language().into(),
-            Self::Starlark => arborium::lang_starlark::language().into(),
-            Self::Zig => arborium::lang_zig::language().into(),
-            Self::Nix => arborium::lang_nix::language().into(),
-            Self::Dart => arborium::lang_dart::language().into(),
-        }
+    #[test]
+    fn returns_none_for_unknown_name() {
+        assert!(from_name("definitely-not-a-language").is_none());
     }
 }
