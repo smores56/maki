@@ -129,6 +129,41 @@ pub fn generate() -> String {
 
     write_context_specific(&mut out);
     write_inheritance(&mut out);
+    write_overrides(&mut out);
 
     out
+}
+
+fn write_overrides(out: &mut String) {
+    out.push_str("\n## Overriding Keybindings\n\n");
+    out.push_str(
+        "Plugins and your init files can rebind keys at runtime through `maki.keymap.set` and \
+         `maki.keymap.del` in Lua. The tables above show the built-in defaults; an override on the \
+         same key takes precedence when no overlay or modal (help modal, plan form, permission \
+         prompt) is open.\n\n",
+    );
+    out.push_str("Precedence, from highest to lowest:\n\n");
+    out.push_str(
+        "1. **Suspend** (`Ctrl+Z` on Unix): non-remappable, always wins.\n\
+         2. **Overlay and modal focus keys**: help modal, plan form, permission prompt, and pickers \
+         consume their keys before overrides run, so those modal keys cannot be shadowed while the \
+         modal is open. This includes `Esc` cancel inside a non-main chat and `Tab` mode-toggle.\n\
+         3. **Lua overrides**: bindings registered via `maki.keymap.set`. Last set wins; binding the \
+         same key warns.\n\
+         4. **Built-in defaults**: the keys listed in the tables above. `maki.keymap.del` restores \
+         the default for a calling plugin's own binding by fallthrough on the next keypress.\n\n",
+    );
+    out.push_str(
+        "Display caveat: the in-app `/help` modal and the startup splash currently show built-in \
+         default labels, not live overrides. An override is effective for dispatch even when the \
+         label shown still reflects the default.\n\n",
+    );
+    out.push_str(
+        "Multi-key and non-key rows ( Alt+O / Alt+Enter newline, `Tab`, `/command`, word-left/right) \
+         cannot be overridden because the override store keys on a single `KeyCode` + `KeyModifiers`.\n\n",
+    );
+    out.push_str(
+        "See the Permissions page for the `keymap` plugin permission and `--no-plugins` to boot with \
+         the full default keymap and no Lua at all.\n",
+    );
 }

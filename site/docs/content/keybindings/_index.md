@@ -91,3 +91,20 @@ Some pickers add extra bindings on top of the defaults:
 Child contexts inherit their parent's bindings and add their own.
 
 - **Pickers** is the base for: Task Picker, Session Picker, Rewind Picker, Theme Picker, Model Picker, Queue, Commands, Search, File Picker
+
+## Overriding Keybindings
+
+Plugins and your init files can rebind keys at runtime through `maki.keymap.set` and `maki.keymap.del` in Lua. The tables above show the built-in defaults; an override on the same key takes precedence when no overlay or modal (help modal, plan form, permission prompt) is open.
+
+Precedence, from highest to lowest:
+
+1. **Suspend** (`Ctrl+Z` on Unix): non-remappable, always wins.
+2. **Overlay and modal focus keys**: help modal, plan form, permission prompt, and pickers consume their keys before overrides run, so those modal keys cannot be shadowed while the modal is open. This includes `Esc` cancel inside a non-main chat and `Tab` mode-toggle.
+3. **Lua overrides**: bindings registered via `maki.keymap.set`. Last set wins; binding the same key warns.
+4. **Built-in defaults**: the keys listed in the tables above. `maki.keymap.del` restores the default for a calling plugin's own binding by fallthrough on the next keypress.
+
+Display caveat: the in-app `/help` modal and the startup splash currently show built-in default labels, not live overrides. An override is effective for dispatch even when the label shown still reflects the default.
+
+Multi-key and non-key rows ( Alt+O / Alt+Enter newline, `Tab`, `/command`, word-left/right) cannot be overridden because the override store keys on a single `KeyCode` + `KeyModifiers`.
+
+See the Permissions page for the `keymap` plugin permission and `--no-plugins` to boot with the full default keymap and no Lua at all.

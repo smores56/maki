@@ -11,17 +11,13 @@ use ratatui::text::{Line, Span};
 
 const FORM_LABEL: &str = " Plan complete ";
 
-const DISMISS_KEYS: &str = if cfg!(target_os = "macos") {
-    "⌃T/Esc"
-} else {
-    "Ctrl+T/Esc"
-};
 const HINT_PAIRS: &[(&str, &str)] = &[
     ("↑↓", "select"),
     ("Space", "toggle parallel"),
     ("Enter", "confirm"),
     (key::OPEN_EDITOR.label, "edit plan"),
-    (DISMISS_KEYS, "dismiss"),
+    (key::PLAN_TOGGLE.label, "dismiss"),
+    ("Esc", "dismiss"),
 ];
 
 struct MenuItem {
