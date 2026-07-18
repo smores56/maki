@@ -100,6 +100,16 @@ macro_rules! ctrl_bind {
     };
 }
 
+macro_rules! bind {
+    ($code:expr, $mods:expr, $label:expr) => {
+        Bind {
+            code: $code,
+            modifiers: $mods,
+            label: $label,
+        }
+    };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bind {
     pub code: KeyCode,
@@ -159,107 +169,27 @@ pub mod key {
     /// Plain (unmodified) key binds used by rows whose label is a literal string
     /// rather than a `key::X` const. Grouped here so the `binds` field on each
     /// `Keybind` row can match overrides on those keys too.
-    pub const ENTER: Bind = Bind {
-        code: KeyCode::Enter,
-        modifiers: KeyModifiers::NONE,
-        label: "Enter",
-    };
-    pub const TAB: Bind = Bind {
-        code: KeyCode::Tab,
-        modifiers: KeyModifiers::NONE,
-        label: "Tab",
-    };
-    pub const ESC: Bind = Bind {
-        code: KeyCode::Esc,
-        modifiers: KeyModifiers::NONE,
-        label: "Esc",
-    };
-    pub const SLASH: Bind = Bind {
-        code: KeyCode::Char('/'),
-        modifiers: KeyModifiers::NONE,
-        label: "/",
-    };
-    pub const UP: Bind = Bind {
-        code: KeyCode::Up,
-        modifiers: KeyModifiers::NONE,
-        label: "↑",
-    };
-    pub const DOWN: Bind = Bind {
-        code: KeyCode::Down,
-        modifiers: KeyModifiers::NONE,
-        label: "↓",
-    };
-    pub const HOME: Bind = Bind {
-        code: KeyCode::Home,
-        modifiers: KeyModifiers::NONE,
-        label: "Home",
-    };
-    pub const END: Bind = Bind {
-        code: KeyCode::End,
-        modifiers: KeyModifiers::NONE,
-        label: "End",
-    };
-    pub const PAGE_UP: Bind = Bind {
-        code: KeyCode::PageUp,
-        modifiers: KeyModifiers::NONE,
-        label: "PageUp",
-    };
-    pub const PAGE_DOWN: Bind = Bind {
-        code: KeyCode::PageDown,
-        modifiers: KeyModifiers::NONE,
-        label: "PageDown",
-    };
-    pub const ONE: Bind = Bind {
-        code: KeyCode::Char('1'),
-        modifiers: KeyModifiers::NONE,
-        label: "1",
-    };
-    pub const TWO: Bind = Bind {
-        code: KeyCode::Char('2'),
-        modifiers: KeyModifiers::NONE,
-        label: "2",
-    };
-    pub const THREE: Bind = Bind {
-        code: KeyCode::Char('3'),
-        modifiers: KeyModifiers::NONE,
-        label: "3",
-    };
-    pub const FOUR: Bind = Bind {
-        code: KeyCode::Char('4'),
-        modifiers: KeyModifiers::NONE,
-        label: "4",
-    };
-    pub const ALT_BACKSPACE: Bind = Bind {
-        code: KeyCode::Backspace,
-        modifiers: KeyModifiers::ALT,
-        label: "Alt+Bs",
-    };
-    pub const ALT_DELETE: Bind = Bind {
-        code: KeyCode::Delete,
-        modifiers: KeyModifiers::ALT,
-        label: "Alt+Del",
-    };
-    pub const ALT_LEFT: Bind = Bind {
-        code: KeyCode::Left,
-        modifiers: KeyModifiers::ALT,
-        label: "Alt+←",
-    };
-    pub const ALT_RIGHT: Bind = Bind {
-        code: KeyCode::Right,
-        modifiers: KeyModifiers::ALT,
-        label: "Alt+→",
-    };
-    pub const SHIFT_ENTER: Bind = Bind {
-        code: KeyCode::Enter,
-        modifiers: KeyModifiers::SHIFT,
-        label: "Shift+Enter",
-    };
+    pub const ENTER: Bind = bind!(KeyCode::Enter, KeyModifiers::NONE, "Enter");
+    pub const TAB: Bind = bind!(KeyCode::Tab, KeyModifiers::NONE, "Tab");
+    pub const ESC: Bind = bind!(KeyCode::Esc, KeyModifiers::NONE, "Esc");
+    pub const SLASH: Bind = bind!(KeyCode::Char('/'), KeyModifiers::NONE, "/");
+    pub const UP: Bind = bind!(KeyCode::Up, KeyModifiers::NONE, "↑");
+    pub const DOWN: Bind = bind!(KeyCode::Down, KeyModifiers::NONE, "↓");
+    pub const HOME: Bind = bind!(KeyCode::Home, KeyModifiers::NONE, "Home");
+    pub const END: Bind = bind!(KeyCode::End, KeyModifiers::NONE, "End");
+    pub const PAGE_UP: Bind = bind!(KeyCode::PageUp, KeyModifiers::NONE, "PageUp");
+    pub const PAGE_DOWN: Bind = bind!(KeyCode::PageDown, KeyModifiers::NONE, "PageDown");
+    pub const ONE: Bind = bind!(KeyCode::Char('1'), KeyModifiers::NONE, "1");
+    pub const TWO: Bind = bind!(KeyCode::Char('2'), KeyModifiers::NONE, "2");
+    pub const THREE: Bind = bind!(KeyCode::Char('3'), KeyModifiers::NONE, "3");
+    pub const FOUR: Bind = bind!(KeyCode::Char('4'), KeyModifiers::NONE, "4");
+    pub const ALT_BACKSPACE: Bind = bind!(KeyCode::Backspace, KeyModifiers::ALT, "Alt+Bs");
+    pub const ALT_DELETE: Bind = bind!(KeyCode::Delete, KeyModifiers::ALT, "Alt+Del");
+    pub const ALT_LEFT: Bind = bind!(KeyCode::Left, KeyModifiers::ALT, "Alt+←");
+    pub const ALT_RIGHT: Bind = bind!(KeyCode::Right, KeyModifiers::ALT, "Alt+→");
+    pub const SHIFT_ENTER: Bind = bind!(KeyCode::Enter, KeyModifiers::SHIFT, "Shift+Enter");
     pub const CTRL_J: Bind = ctrl_bind!('j');
-    pub const ALT_ENTER: Bind = Bind {
-        code: KeyCode::Enter,
-        modifiers: KeyModifiers::ALT,
-        label: "Alt+Enter",
-    };
+    pub const ALT_ENTER: Bind = bind!(KeyCode::Enter, KeyModifiers::ALT, "Alt+Enter");
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]

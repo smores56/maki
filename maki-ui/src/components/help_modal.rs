@@ -117,8 +117,7 @@ fn sanitize_desc(desc: &str) -> String {
 }
 
 fn format_key(code: KeyCode, modifiers: KeyModifiers) -> String {
-    use crossterm::event::KeyCode as C;
-    let is_char = matches!(code, C::Char(_));
+    let is_char = matches!(code, KeyCode::Char(_));
     let mut s = String::new();
     if modifiers.contains(KeyModifiers::CONTROL) {
         s.push_str("Ctrl+");
@@ -130,34 +129,34 @@ fn format_key(code: KeyCode, modifiers: KeyModifiers) -> String {
         s.push_str("Shift+");
     }
     match code {
-        C::Char(' ') => s.push_str("Space"),
-        C::Char(c) => s.push(c.to_ascii_uppercase()),
-        C::Enter => s.push_str("Enter"),
-        C::Esc => s.push_str("Esc"),
-        C::Tab => s.push_str("Tab"),
-        C::Backspace => s.push_str("Bs"),
-        C::Delete => s.push_str("Del"),
-        C::Up => s.push('↑'),
-        C::Down => s.push('↓'),
-        C::Left => s.push('←'),
-        C::Right => s.push('→'),
-        C::Home => s.push_str("Home"),
-        C::End => s.push_str("End"),
-        C::PageUp => s.push_str("PageUp"),
-        C::PageDown => s.push_str("PageDown"),
-        C::Insert => s.push_str("Insert"),
-        C::F(n) => s.push_str(&format!("F{n}")),
-        C::Null => s.push_str("Null"),
-        C::CapsLock => s.push_str("CapsLock"),
-        C::ScrollLock => s.push_str("ScrollLock"),
-        C::NumLock => s.push_str("NumLock"),
-        C::PrintScreen => s.push_str("PrintScreen"),
-        C::Pause => s.push_str("Pause"),
-        C::Menu => s.push_str("Menu"),
-        C::KeypadBegin => s.push_str("Keypad"),
-        C::Media(_) => s.push_str("Media"),
-        C::Modifier(_) => s.push_str("Modifier"),
-        C::BackTab => s.push_str("BackTab"),
+        KeyCode::Char(' ') => s.push_str("Space"),
+        KeyCode::Char(c) => s.push(c.to_ascii_uppercase()),
+        KeyCode::Enter => s.push_str("Enter"),
+        KeyCode::Esc => s.push_str("Esc"),
+        KeyCode::Tab => s.push_str("Tab"),
+        KeyCode::Backspace => s.push_str("Bs"),
+        KeyCode::Delete => s.push_str("Del"),
+        KeyCode::Up => s.push('↑'),
+        KeyCode::Down => s.push('↓'),
+        KeyCode::Left => s.push('←'),
+        KeyCode::Right => s.push('→'),
+        KeyCode::Home => s.push_str("Home"),
+        KeyCode::End => s.push_str("End"),
+        KeyCode::PageUp => s.push_str("PageUp"),
+        KeyCode::PageDown => s.push_str("PageDown"),
+        KeyCode::Insert => s.push_str("Insert"),
+        KeyCode::F(n) => s.push_str(&format!("F{n}")),
+        KeyCode::Null => s.push_str("Null"),
+        KeyCode::CapsLock => s.push_str("CapsLock"),
+        KeyCode::ScrollLock => s.push_str("ScrollLock"),
+        KeyCode::NumLock => s.push_str("NumLock"),
+        KeyCode::PrintScreen => s.push_str("PrintScreen"),
+        KeyCode::Pause => s.push_str("Pause"),
+        KeyCode::Menu => s.push_str("Menu"),
+        KeyCode::KeypadBegin => s.push_str("Keypad"),
+        KeyCode::Media(_) => s.push_str("Media"),
+        KeyCode::Modifier(_) => s.push_str("Modifier"),
+        KeyCode::BackTab => s.push_str("BackTab"),
     }
     s
 }
@@ -207,12 +206,6 @@ impl HelpModal {
 
         let mut lines: Vec<Line> = Vec::new();
         let theme = theme::current();
-
-        let visible_binds: Vec<&'static [Bind]> = KEYBINDS
-            .iter()
-            .filter(|kb| kb.platform.is_visible())
-            .map(|kb| kb.binds)
-            .collect();
 
         let key_col_width = KEYBINDS
             .iter()
@@ -295,7 +288,12 @@ impl HelpModal {
 
         let unmatched: Vec<&KeymapEntry> = overrides
             .iter()
-            .filter(|e| visible_binds.iter().all(|b| !binds_contain(b, e)))
+            .filter(|e| {
+                !KEYBINDS
+                    .iter()
+                    .filter(|kb| kb.platform.is_visible())
+                    .any(|kb| binds_contain(kb.binds, e))
+            })
             .collect();
         if !unmatched.is_empty() {
             lines.push(Line::default());

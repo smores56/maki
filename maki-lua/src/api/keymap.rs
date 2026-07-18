@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
@@ -84,7 +85,7 @@ impl KeymapStore {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<StoredKeymap>> {
+    fn lock(&self) -> MutexGuard<'_, Vec<StoredKeymap>> {
         self.bindings.lock().unwrap_or_else(|e| e.into_inner())
     }
 
