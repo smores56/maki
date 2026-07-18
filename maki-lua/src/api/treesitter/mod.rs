@@ -7,7 +7,7 @@ pub(crate) mod tree;
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{AnyUserData, Lua, Result as LuaResult, Table};
 
-use crate::language::Language;
+use crate::language::from_name as language_from_name;
 use language_tree::LuaLanguageTree;
 use node::LuaNode;
 
@@ -16,7 +16,7 @@ fn parse_impl(
     source: String,
     lang_name: String,
 ) -> LuaResult<(mlua::Value, mlua::Value)> {
-    let Some(lang) = Language::from_name(&lang_name) else {
+    let Some(lang) = language_from_name(&lang_name) else {
         return Ok((
             mlua::Value::Nil,
             mlua::Value::String(lua.create_string(format!("no language registered: {lang_name}"))?),

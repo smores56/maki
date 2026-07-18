@@ -10,7 +10,7 @@ use mlua::{Lua, MultiValue, Value as LuaValue};
 use regex::Regex;
 
 use crate::docs::{FnDoc, ParamDoc};
-use crate::language::Language;
+use crate::language::from_name as language_from_name;
 
 use super::node::LuaNode;
 
@@ -131,9 +131,8 @@ lua_class! {
 /// local q = maki.treesitter.query.parse("lua", "(identifier) @id")
 #[lua_fn]
 fn parse(_lua: &Lua, lang: String, query: String) -> mlua::Result<LuaQuery> {
-    let ts_lang = Language::from_name(&lang)
-        .ok_or_else(|| mlua::Error::runtime(format!("unknown language: {lang}")))?
-        .ts_language();
+    let ts_lang = language_from_name(&lang)
+        .ok_or_else(|| mlua::Error::runtime(format!("unknown language: {lang}")))?;
     let q = Query::new(&ts_lang, &query)
         .map_err(|e| mlua::Error::runtime(format!("query parse error: {e}")))?;
     Ok(LuaQuery { inner: Arc::new(q) })

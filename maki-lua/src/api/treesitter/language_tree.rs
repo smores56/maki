@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use crate::language::Language;
-use arborium::tree_sitter::{Parser, Tree};
+use arborium::tree_sitter::{Language as TsLanguage, Parser, Tree};
 use maki_lua_macro::{lua_class, lua_fn};
 use mlua::{Function, Lua, Result as LuaResult, Table, Value as LuaValue};
 
@@ -11,11 +10,11 @@ pub(crate) struct LuaLanguageTree {
     tree: Option<Arc<Tree>>,
     source: Arc<str>,
     lang_name: Arc<str>,
-    lang: Language,
+    lang: TsLanguage,
 }
 
 impl LuaLanguageTree {
-    pub(crate) fn new(source: Arc<str>, lang_name: Arc<str>, lang: Language) -> Self {
+    pub(crate) fn new(source: Arc<str>, lang_name: Arc<str>, lang: TsLanguage) -> Self {
         Self {
             tree: None,
             source,
@@ -30,7 +29,7 @@ impl LuaLanguageTree {
         }
         let mut parser = Parser::new();
         parser
-            .set_language(&self.lang.ts_language())
+            .set_language(&self.lang)
             .map_err(|e| mlua::Error::runtime(format!("failed to set language: {e}")))?;
         let tree = parser
             .parse(self.source.as_bytes(), None)

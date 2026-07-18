@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Lua, Table, Value as LuaValue};
 
-use crate::language::Language;
+use crate::language::from_name as language_from_name;
 
 struct LangRegistry {
     lang_to_filetypes: HashMap<String, Vec<String>>,
@@ -28,7 +28,7 @@ fn add(_lua: &Lua, lang: String, opts: Option<Table>) -> mlua::Result<()> {
             "custom grammar paths not supported yet",
         ));
     }
-    if Language::from_name(&lang).is_none() {
+    if language_from_name(&lang).is_none() {
         return Err(mlua::Error::runtime(format!("language not found: {lang}")));
     }
     Ok(())
@@ -101,7 +101,7 @@ fn get_lang(
         return Ok(Some(lang.clone()));
     }
     drop(guard);
-    if Language::from_name(&filetype).is_some() {
+    if language_from_name(&filetype).is_some() {
         return Ok(Some(filetype));
     }
     Ok(None)
@@ -143,9 +143,8 @@ fn get_filetypes(
 /// for _, nt in ipairs(info.node_types) do print(nt) end
 #[lua_fn]
 fn inspect(lua: &Lua, lang: String) -> mlua::Result<Table> {
-    let language = Language::from_name(&lang)
-        .ok_or_else(|| mlua::Error::runtime(format!("language not found: {lang}")))?
-        .ts_language();
+    let language = language_from_name(&lang)
+        .ok_or_else(|| mlua::Error::runtime(format!("language not found: {lang}")))?;
 
     let tbl = lua.create_table()?;
     tbl.raw_set("abi_version", language.abi_version())?;
