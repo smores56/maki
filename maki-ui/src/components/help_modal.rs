@@ -1,13 +1,14 @@
 use crate::components::ModalScroll;
 use crate::components::Overlay;
 use crate::components::keybindings::{
-    ALT_SEP, KEYBINDS, KeybindContext, ResolvedLabel, all_contexts, key,
+    ALT_SEP, Bind, KEYBINDS, Keybind, KeybindContext, ResolvedLabel, all_contexts, key,
 };
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
 use crate::theme;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use maki_lua::KeymapEntry;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -18,6 +19,8 @@ const TITLE: &str = " Keybindings ";
 const KEY_COL_GAP: usize = 2;
 const PREFIX_TOP: &str = "  ";
 const PREFIX_CHILD: &str = "    ";
+/// Maximum rendered width of a plugin-supplied override description.
+const MAX_DESC_WIDTH: usize = 40;
 
 const INPUT_PREFIXES: &[(&str, &str)] = &[
     ("!", "Run shell command (visible to agent)"),
@@ -77,6 +80,88 @@ fn multi_key_spans(
     spans
 }
 
+fn binds_contain(binds: &[Bind], entry: &KeymapEntry) -> bool {
+    binds
+        .iter()
+        .any(|b| b.code == entry.key && b.modifiers == entry.modifiers)
+}
+
+fn row_description(kb: &Keybind, overrides: &[KeymapEntry]) -> String {
+    let matched = overrides
+        .iter()
+        .find(|e| binds_contain(kb.binds, e) && !e.desc.is_empty());
+    match matched {
+        Some(e) => sanitize_desc(&e.desc),
+        None => kb.description.to_string(),
+    }
+}
+
+fn sanitize_desc(desc: &str) -> String {
+    let mut out: String = desc.chars().filter(|&c| !c.is_control()).collect();
+    let width = UnicodeWidthStr::width(out.as_str());
+    if width > MAX_DESC_WIDTH {
+        let mut end = 0;
+        let mut w = 0;
+        for (i, c) in out.char_indices() {
+            let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if w + cw > MAX_DESC_WIDTH {
+                break;
+            }
+            w += cw;
+            end = i + c.len_utf8();
+        }
+        out.truncate(end);
+        out.push('…');
+    }
+    out
+}
+
+fn format_key(code: KeyCode, modifiers: KeyModifiers) -> String {
+    use crossterm::event::KeyCode as C;
+    let is_char = matches!(code, C::Char(_));
+    let mut s = String::new();
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        s.push_str("Ctrl+");
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        s.push_str("Alt+");
+    }
+    if modifiers.contains(KeyModifiers::SHIFT) && !is_char {
+        s.push_str("Shift+");
+    }
+    match code {
+        C::Char(' ') => s.push_str("Space"),
+        C::Char(c) => s.push(c.to_ascii_uppercase()),
+        C::Enter => s.push_str("Enter"),
+        C::Esc => s.push_str("Esc"),
+        C::Tab => s.push_str("Tab"),
+        C::Backspace => s.push_str("Bs"),
+        C::Delete => s.push_str("Del"),
+        C::Up => s.push('↑'),
+        C::Down => s.push('↓'),
+        C::Left => s.push('←'),
+        C::Right => s.push('→'),
+        C::Home => s.push_str("Home"),
+        C::End => s.push_str("End"),
+        C::PageUp => s.push_str("PageUp"),
+        C::PageDown => s.push_str("PageDown"),
+        C::Insert => s.push_str("Insert"),
+        C::F(n) => s.push_str(&format!("F{n}")),
+        C::Null => s.push_str("Null"),
+        C::CapsLock => s.push_str("CapsLock"),
+        C::ScrollLock => s.push_str("ScrollLock"),
+        C::NumLock => s.push_str("NumLock"),
+        C::PrintScreen => s.push_str("PrintScreen"),
+        C::Pause => s.push_str("Pause"),
+        C::Menu => s.push_str("Menu"),
+        C::KeypadBegin => s.push_str("Keypad"),
+        C::Media(_) => s.push_str("Media"),
+        C::Modifier(_) => s.push_str("Modifier"),
+        C::BackTab => s.push_str("BackTab"),
+    }
+    s
+}
+
 impl HelpModal {
     pub fn new() -> Self {
         Self {
@@ -115,13 +200,19 @@ impl HelpModal {
         true
     }
 
-    pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
+    pub fn view(&mut self, frame: &mut Frame, area: Rect, overrides: &[KeymapEntry]) -> Rect {
         if !self.open {
             return Rect::default();
         }
 
         let mut lines: Vec<Line> = Vec::new();
         let theme = theme::current();
+
+        let visible_binds: Vec<&'static [Bind]> = KEYBINDS
+            .iter()
+            .filter(|kb| kb.platform.is_visible())
+            .map(|kb| kb.binds)
+            .collect();
 
         let key_col_width = KEYBINDS
             .iter()
@@ -150,8 +241,9 @@ impl HelpModal {
                 .iter()
                 .filter(|kb| kb.context == ctx && kb.platform.is_visible())
             {
+                let desc = row_description(kb, overrides);
                 let mut spans = key_spans(kb.label.resolve(), key_col_width, PREFIX_TOP);
-                spans.push(Span::styled(kb.description, theme.keybind_desc));
+                spans.push(Span::styled(desc, theme.keybind_desc));
                 lines.push(Line::from(spans));
             }
 
@@ -172,12 +264,13 @@ impl HelpModal {
                     theme.keybind_section,
                 )));
                 for kb in child_binds {
+                    let desc = row_description(kb, overrides);
                     let mut spans = key_spans(
                         kb.label.resolve(),
                         key_col_width - KEY_COL_GAP,
                         PREFIX_CHILD,
                     );
-                    spans.push(Span::styled(kb.description, theme.keybind_desc));
+                    spans.push(Span::styled(desc, theme.keybind_desc));
                     lines.push(Line::from(spans));
                 }
             }
@@ -197,6 +290,27 @@ impl HelpModal {
                     spans.push(Span::styled(desc, theme.keybind_desc));
                     lines.push(Line::from(spans));
                 }
+            }
+        }
+
+        let unmatched: Vec<&KeymapEntry> = overrides
+            .iter()
+            .filter(|e| visible_binds.iter().all(|b| !binds_contain(b, e)))
+            .collect();
+        if !unmatched.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                "  Plugin bindings",
+                theme.keybind_section,
+            )));
+            for entry in &unmatched {
+                let key_str = format_key(entry.key, entry.modifiers);
+                let key_w = UnicodeWidthStr::width(key_str.as_str());
+                let trailing = key_col_width.saturating_sub(key_w);
+                let label = format!("{PREFIX_TOP}{key_str}{:trailing$}", "");
+                let mut spans = vec![Span::styled(label, theme.keybind_key)];
+                spans.push(Span::styled(sanitize_desc(&entry.desc), theme.keybind_desc));
+                lines.push(Line::from(spans));
             }
         }
 
@@ -255,5 +369,89 @@ mod tests {
         modal.toggle();
         assert!(modal.handle_key(key_ev(KeyCode::Char('a'))));
         assert!(modal.is_open());
+    }
+
+    fn render_modal(overrides: &[KeymapEntry]) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+        let mut modal = HelpModal::new();
+        modal.toggle();
+        let backend = ratatui::backend::TestBackend::new(140, 120);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                modal.view(f, f.area(), overrides);
+            })
+            .unwrap();
+        terminal
+    }
+
+    fn buffer_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        buf.content.iter().map(|c| c.symbol()).collect::<String>()
+    }
+
+    #[test]
+    fn override_desc_shown_on_matching_row() {
+        let entry = KeymapEntry {
+            key: key::HELP.code,
+            modifiers: key::HELP.modifiers,
+            desc: "plugin help override".into(),
+            plugin: std::sync::Arc::from("p"),
+            id: 1,
+        };
+        let terminal = render_modal(&[entry]);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("plugin help override"),
+            "override desc must appear in help"
+        );
+    }
+
+    #[test]
+    fn default_desc_shown_when_no_override() {
+        let terminal = render_modal(&[]);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Show keybindings"));
+    }
+
+    #[test]
+    fn plugin_binding_without_default_row() {
+        let entry = KeymapEntry {
+            key: KeyCode::F(7),
+            modifiers: KeyModifiers::NONE,
+            desc: "run my tool".into(),
+            plugin: std::sync::Arc::from("p"),
+            id: 2,
+        };
+        let terminal = render_modal(&[entry]);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("Plugin bindings"));
+        assert!(text.contains("run my tool"));
+        assert!(text.contains("F7"));
+    }
+
+    #[test]
+    fn override_on_alias_matches_shared_row() {
+        let entry = KeymapEntry {
+            key: key::NEXT_CHAT.code,
+            modifiers: key::NEXT_CHAT.modifiers,
+            desc: "alt chat override".into(),
+            plugin: std::sync::Arc::from("p"),
+            id: 3,
+        };
+        let terminal = render_modal(&[entry]);
+        let text = buffer_text(&terminal);
+        assert!(text.contains("alt chat override"));
+    }
+
+    #[test]
+    fn desc_sanitized_and_truncated() {
+        let long = format!("A\tB{}", "x".repeat(MAX_DESC_WIDTH + 20));
+        let out = sanitize_desc(&long);
+        assert!(!out.contains('\t'), "control chars stripped");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(out.as_str()) <= MAX_DESC_WIDTH + 1,
+            "desc truncated within bound + ellipsis"
+        );
+        assert!(out.ends_with('…'));
     }
 }

@@ -154,13 +154,15 @@ fn write_overrides(out: &mut String) {
          the default for a calling plugin's own binding by fallthrough on the next keypress.\n\n",
     );
     out.push_str(
-        "Display caveat: the in-app `/help` modal and the startup splash currently show built-in \
-         default labels, not live overrides. An override is effective for dispatch even when the \
-         label shown still reflects the default.\n\n",
+        "Display: the in-app `/help` modal reflects live overrides for matchable rows. The startup \
+         splash shows key labels, which are unchanged by same-key overrides. Generated docs \
+         (this page) show built-in defaults, since build-time cannot run a Lua plugin.\n\n",
     );
     out.push_str(
         "Multi-key and non-key rows ( Alt+O / Alt+Enter newline, `Tab`, `/command`, word-left/right) \
-         cannot be overridden because the override store keys on a single `KeyCode` + `KeyModifiers`.\n\n",
+         are listed as multiple single-key binds; an override on any one of them shows on the \
+         shared row. Rows that are not a single keystroke (e.g. `Type` to filter) cannot be \
+         overridden because the override store keys on a single `KeyCode` + `KeyModifiers`.\n\n",
     );
     out.push_str(
         "See the Permissions page for the `keymap` plugin permission and `--no-plugins` to boot with \
