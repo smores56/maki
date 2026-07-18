@@ -37,6 +37,10 @@ return function(U)
     return ds and (" : " .. get_text(ds, source)) or ""
   end
 
+  local function decl_name(node, bare_kind)
+    return node:field("name")[1] or find_child(node, bare_kind)
+  end
+
   local function extract_import(node, source)
     local qi = find_child(node, "qualified_identifier") or find_child(node, "identifier")
     if not qi then
@@ -46,7 +50,8 @@ return function(U)
     end
     local parts = {}
     for _, child in ipairs(qi:children()) do
-      if child:type() == "identifier" then
+      local ck = child:type()
+      if ck == "simple_identifier" or ck == "identifier" then
         parts[#parts + 1] = get_text(child, source)
       end
     end
@@ -77,14 +82,14 @@ return function(U)
   local function fn_sig(node, source)
     local mods = modifiers_text(node, source)
     local tparams = tparams_text(node, source)
-    local name_node = node:field("simple_identifier")[1] or node:field("name")[1] or find_child(node, "identifier")
+    local name_node = decl_name(node, "simple_identifier")
     if not name_node then
       return nil
     end
     local name = get_text(name_node, source)
     local params_node = find_child(node, "function_value_parameters")
     local params = params_node and get_text(params_node, source) or "()"
-    local ret_node = node:field("type")[1] or find_child(node, "type")
+    local ret_node = node:field("type")[1] or find_child(node, "user_type")
     local ret = ret_node and (" : " .. get_text(ret_node, source)) or ""
     local parts = {}
     if mods ~= "" then
@@ -165,7 +170,7 @@ return function(U)
 
   local function extract_class(node, source)
     local mods = modifiers_text(node, source)
-    local name_node = node:field("simple_identifier")[1] or node:field("name")[1] or find_child(node, "identifier")
+    local name_node = decl_name(node, "type_identifier")
     if not name_node then
       return nil
     end
@@ -213,7 +218,7 @@ return function(U)
 
   local function extract_object(node, source)
     local mods = modifiers_text(node, source)
-    local name_node = node:field("simple_identifier")[1] or node:field("name")[1] or find_child(node, "identifier")
+    local name_node = decl_name(node, "type_identifier")
     if not name_node then
       return nil
     end
@@ -231,21 +236,14 @@ return function(U)
   local function extract_type_alias(node, source)
     local vis_node = find_child(node, "modifiers")
     local vis = vis_node and get_text(vis_node, source) or ""
-    local name_node = node:field("type_alias_name")[1] or node:field("name")[1] or find_child(node, "identifier")
+    local name_node = node:field("type")[1] or find_child(node, "type_identifier") or find_child(node, "identifier")
     if not name_node then
       return nil
     end
     local name = get_text(name_node, source)
     local tparams = tparams_text(node, source)
-    local rhs = nil
-    for i = node:child_count() - 1, 0, -1 do
-      local c = node:child(i)
-      if c:type() ~= "simple_identifier" and c:type() ~= "=" and c:type() ~= "type_alias" then
-        rhs = get_text(c, source)
-        break
-      end
-    end
-    local rhs_str = rhs and (" = " .. rhs) or ""
+    local rhs_node = find_child(node, "user_type")
+    local rhs_str = rhs_node and (" = " .. get_text(rhs_node, source)) or ""
     local label = compact_ws((vis ~= "" and (vis .. " ") or "") .. "typealias " .. name .. tparams .. rhs_str)
     return new_entry(SECTION.Type, node, label)
   end

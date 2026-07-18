@@ -20,21 +20,61 @@ return function(U)
     operator_signature = true,
   }
 
+  local CONSTRUCTOR_KINDS = {
+    constructor_signature = true,
+    constant_constructor_signature = true,
+    factory_constructor_signature = true,
+    redirecting_factory_constructor_signature = true,
+  }
+
+  local RETURN_TYPE_KINDS = {
+    type_identifier = true,
+    void_type = true,
+    function_type = true,
+    record_type = true,
+    named_type = true,
+  }
+
   local function type_params(node, source)
-    local tp_node = node:field("type_parameters")[1]
+    local tp_node = find_child(node, "type_parameters")
     return tp_node and get_text(tp_node, source) or ""
   end
 
-  local function signature_name(sig_node, source)
-    local name_nodes = sig_node:field("name")
-    if #name_nodes == 0 then
+  local function qualified_name(sig_node, source)
+    local parts = {}
+    for _, child in ipairs(sig_node:children()) do
+      if child:type() == "identifier" then
+        parts[#parts + 1] = get_text(child, source)
+      end
+    end
+    if #parts == 0 then
       return nil
     end
+    return table.concat(parts, ".")
+  end
+
+  local function return_type_text(sig_node, source, name_index)
     local parts = {}
-    for _, n in ipairs(name_nodes) do
-      parts[#parts + 1] = get_text(n, source)
+    for i = 1, name_index - 1 do
+      local child = sig_node:child(i - 1)
+      if not child or not child:named() then
+        break
+      end
+      parts[#parts + 1] = get_text(child, source)
     end
-    return table.concat(parts)
+    if #parts == 0 then
+      return nil
+    end
+    return table.concat(parts, "")
+  end
+
+  local function name_index_of(sig_node)
+    for i, child in ipairs(sig_node:children()) do
+      if child:type() == "identifier" then
+        return i
+      end
+    end
+    return nil
   end
 
   local function signature_text(sig_node, source)
@@ -43,52 +83,40 @@ return function(U)
       return get_text(sig_node, source)
     end
 
-    local name = signature_name(sig_node, source)
+    local name = qualified_name(sig_node, source)
     if not name then
       return nil
     end
 
-    local params_node = find_child(sig_node, "formal_parameter_list")
-    local params = params_node and get_text(params_node, source) or "()"
-    local tp_node = find_child(sig_node, "type_parameters")
-    local tp = tp_node and get_text(tp_node, source) or ""
-
     if kind == "getter_signature" then
-      local ret_node = sig_node:field("return_type")[1]
-      local ret = ret_node and (" " .. get_text(ret_node, source)) or ""
-      return compact_ws("get " .. name .. ret)
+      local idx = name_index_of(sig_node)
+      local ret = idx and return_type_text(sig_node, source, idx)
+      local ret_s = ret and (" " .. ret) or ""
+      return compact_ws("get " .. name .. ret_s)
     end
+
+    local params_node = find_child(sig_node, "formal_parameter_list")
+    local params = params_node and get_text(params_node, source) or ""
 
     if kind == "setter_signature" then
       return compact_ws("set " .. name .. params)
     end
 
-    local ret_node = sig_node:field("return_type")[1]
-    local ret = ret_node and get_text(ret_node, source)
-    if ret == "set" then
-      return compact_ws("set " .. name .. params)
-    elseif ret == "get" and params == "()" then
-      return compact_ws("get " .. name)
+    if CONSTRUCTOR_KINDS[kind] then
+      return compact_ws(name .. params)
     end
+
+    local tp = type_params(sig_node, source)
+    local idx = name_index_of(sig_node)
+    local ret = idx and return_type_text(sig_node, source, idx)
     local ret_s = ret and (" " .. ret) or ""
     return compact_ws(name .. tp .. params .. ret_s)
   end
 
-  local function find_signature(node)
-    if node:type() == "method_declaration" then
-      local method_sig = node:field("signature")[1]
-      if method_sig then
-        for _, child in ipairs(method_sig:children()) do
-          if SIG_KINDS[child:type()] then
-            return child
-          end
-        end
-      end
-      return nil
-    end
-
+  local function inner_signature(node)
     for _, child in ipairs(node:children()) do
-      if SIG_KINDS[child:type()] then
+      local ckind = child:type()
+      if SIG_KINDS[ckind] then
         return child
       end
     end
@@ -101,33 +129,34 @@ return function(U)
     static_final_declaration_list = "static_final_declaration",
   }
 
-  local function field_text(id_node, source, type_node)
-    local name
+  local function field_name(id_node, source)
     if id_node:type() == "identifier" then
-      name = get_text(id_node, source)
-    else
-      local name_node = id_node:field("name")[1]
-      if not name_node then
-        return nil
-      end
-      name = get_text(name_node, source)
+      return get_text(id_node, source)
     end
-    if type_node then
-      return name .. " " .. get_text(type_node, source)
-    end
-    return name
+    return get_text(find_child(id_node, "identifier"), source)
   end
 
   local function add_field(out, id_node, source, type_node, range_node)
-    local text = field_text(id_node, source, type_node)
-    if text then
-      local lr = format_range(line_start(range_node), line_end(range_node))
-      out[#out + 1] = ranged(text, lr)
+    local name = field_name(id_node, source)
+    if not name then
+      return
     end
+    local text = type_node and (name .. " " .. get_text(type_node, source)) or name
+    local lr = format_range(line_start(range_node), line_end(range_node))
+    out[#out + 1] = ranged(text, lr)
+  end
+
+  local function type_node_of(node)
+    for _, child in ipairs(node:children()) do
+      if RETURN_TYPE_KINDS[child:type()] then
+        return child
+      end
+    end
+    return nil
   end
 
   local function extract_field_like(node, source, out)
-    local type_node = find_child(node, "type")
+    local type_node = type_node_of(node)
     for _, child in ipairs(node:children()) do
       local ckind = child:type()
       local list_kind = FIELD_LIST_KINDS[ckind]
@@ -143,37 +172,20 @@ return function(U)
     end
   end
 
-  local function unwrap_class_member(member)
-    if member:type() ~= "class_member" then
-      return member
-    end
-    for _, child in ipairs(member:children()) do
-      local ckind = child:type()
-      if ckind == "method_declaration" or ckind == "declaration" then
-        return child
-      end
-    end
-    return nil
-  end
-
   local function extract_member(member, source)
-    local actual = unwrap_class_member(member)
-    if not actual then
-      return {}
-    end
-    local kind = actual:type()
-    if kind == "method_declaration" or kind == "declaration" then
-      local sig = find_signature(actual)
+    local kind = member:type()
+    if kind == "method_signature" or kind == "declaration" then
+      local sig = inner_signature(member)
       if sig then
         local text = signature_text(sig, source)
         if text then
-          local lr = format_range(line_start(actual), line_end(actual))
+          local lr = format_range(line_start(member), line_end(member))
           return { ranged(text, lr) }
         end
       end
       if kind == "declaration" then
         local fields = {}
-        extract_field_like(actual, source, fields)
+        extract_field_like(member, source, fields)
         return fields
       end
     end
@@ -190,14 +202,22 @@ return function(U)
     return members
   end
 
+  local function class_name(node, source)
+    for _, child in ipairs(node:children()) do
+      if child:type() == "identifier" then
+        return get_text(child, source)
+      end
+    end
+    return nil
+  end
+
   local function extract_classlike(node, source, prefix)
-    local name_node = node:field("name")[1]
-    if not name_node then
+    local name = class_name(node, source)
+    if not name then
       return nil
     end
-    local name = get_text(name_node, source)
     local tp = type_params(node, source)
-    local body_node = node:field("body")[1]
+    local body_node = find_child(node, "class_body")
     local entry = new_entry(SECTION.Class, node, prefix .. " " .. name .. tp)
     if body_node then
       entry.children = extract_body_members(body_node, source)
@@ -205,16 +225,16 @@ return function(U)
     return entry
   end
 
-  local function extract_function(node, source)
-    local sig_node = node:field("signature")[1]
-    if not sig_node then
+  local function extract_signature_entry(node, source, section)
+    local sig = inner_signature(node) or node
+    if not SIG_KINDS[sig:type()] then
       return nil
     end
-    local text = signature_text(sig_node, source)
+    local text = signature_text(sig, source)
     if not text then
       return nil
     end
-    return new_entry(SECTION.Function, node, text)
+    return new_entry(section, node, text)
   end
 
   return {
@@ -226,7 +246,7 @@ return function(U)
     extract_nodes = function(node, source, _attrs)
       local kind = node:type()
 
-      if kind == "class_declaration" then
+      if kind == "class_definition" then
         local e = extract_classlike(node, source, "class")
         return e and { e } or {}
       elseif kind == "mixin_declaration" then
@@ -236,31 +256,23 @@ return function(U)
         local e = extract_classlike(node, source, "extension type")
         return e and { e } or {}
       elseif kind == "extension_declaration" then
-        local body_node = node:field("body")[1]
+        local body_node = find_child(node, "class_body") or node:field("body")[1]
         if body_node then
-          local name_node = node:field("name")[1]
-          local name = name_node and get_text(name_node, source) or "_"
+          local name = class_name(node, source) or "_"
           local entry = new_entry(SECTION.Type, node, "extension " .. name)
           entry.children = extract_body_members(body_node, source)
           return { entry }
         end
         return {}
       elseif kind == "enum_declaration" then
-        local name_node = node:field("name")[1]
-        if not name_node then
+        local name = class_name(node, source)
+        if not name then
           return {}
         end
-        local name = get_text(name_node, source)
         local tp = type_params(node, source)
         return { new_entry(SECTION.Type, node, "enum " .. name .. tp) }
-      elseif kind == "function_declaration" or kind == "external_function_declaration" then
-        local e = extract_function(node, source)
-        return e and { e } or {}
-      elseif kind == "getter_declaration" or kind == "external_getter_declaration" then
-        local e = extract_function(node, source)
-        return e and { e } or {}
-      elseif kind == "setter_declaration" or kind == "external_setter_declaration" then
-        local e = extract_function(node, source)
+      elseif SIG_KINDS[kind] then
+        local e = extract_signature_entry(node, source, SECTION.Function)
         return e and { e } or {}
       end
 

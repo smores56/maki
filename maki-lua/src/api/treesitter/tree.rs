@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use arborium::tree_sitter::Tree;
 use maki_lua_macro::{lua_class, lua_fn};
 use mlua::{Lua, Result as LuaResult};
-use tree_sitter::Tree;
 
 use super::node::LuaNode;
 

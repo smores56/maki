@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use arborium::tree_sitter::{Node, Point, Tree};
 use maki_lua_macro::{lua_class, lua_fn};
 use mlua::{AnyUserData, Function, Lua, MultiValue, Result as LuaResult, Value};
-use tree_sitter::{Node, Point, Tree};
 
 use super::tree::LuaTree;
 
