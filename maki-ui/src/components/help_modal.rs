@@ -1,7 +1,7 @@
 use crate::components::ModalScroll;
 use crate::components::Overlay;
 use crate::components::keybindings::{
-    ALT_SEP, Bind, KEYBINDS, Keybind, KeybindContext, ResolvedLabel, all_contexts, key,
+    ALT_SEP, Bind, KEYBINDS, Keybind, KeybindContext, MultiKeys, ResolvedLabel, all_contexts, key,
 };
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
@@ -38,7 +38,7 @@ pub struct HelpModal {
     scroll: ModalScroll,
 }
 
-fn key_spans(label: ResolvedLabel, pad: usize, prefix: &str) -> Vec<Span<'static>> {
+fn key_spans(label: ResolvedLabel<'_>, pad: usize, prefix: &str) -> Vec<Span<'static>> {
     let theme = theme::current();
     match label {
         ResolvedLabel::Single(s) => {
@@ -50,7 +50,7 @@ fn key_spans(label: ResolvedLabel, pad: usize, prefix: &str) -> Vec<Span<'static
             )]
         }
         ResolvedLabel::Alt(a, b) => multi_key_spans(&[a, b], pad, prefix, &theme),
-        ResolvedLabel::Multi(keys) => multi_key_spans(keys, pad, prefix, &theme),
+        ResolvedLabel::Multi(keys) => multi_key_spans_keys(keys, pad, prefix, &theme),
     }
 }
 
@@ -86,11 +86,22 @@ fn multi_key_spans(
     spans
 }
 
+fn multi_key_spans_keys(
+    keys: MultiKeys<'_>,
+    pad: usize,
+    prefix: &str,
+    theme: &crate::theme::Theme,
+) -> Vec<Span<'static>> {
+    let mut labels: Vec<&'static str> = Vec::with_capacity(keys.len());
+    keys.for_each(|_, k| labels.push(k));
+    multi_key_spans(&labels, pad, prefix, theme)
+}
+
 /// Returns the slice of `binds` that the row actually displays on this
 /// platform. `MacAlt` shows two labels on mac, one elsewhere; the trailing
 /// bind must not match an override the row does not display.
 fn visible_binds(kb: &Keybind) -> &[Bind] {
-    let n = kb.label.resolve().visible_count();
+    let n = kb.resolved_label().visible_count();
     &kb.binds[..n.min(kb.binds.len())]
 }
 
@@ -151,6 +162,25 @@ fn is_format_char(c: char) -> bool {
     )
 }
 
+/// US keyboard Shift+digit → shifted symbol. Used for auto-translation when
+/// kitty protocol reports Shift+digit as `Char(digit) + SHIFT`. Legacy
+/// terminals deliver the shifted symbol directly with no modifier.
+fn shift_symbol(c: char) -> Option<char> {
+    Some(match c {
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        _ => return None,
+    })
+}
+
 fn format_key(code: KeyCode, modifiers: KeyModifiers) -> String {
     let is_char = matches!(code, KeyCode::Char(_));
     let mut s = String::new();
@@ -169,7 +199,17 @@ fn format_key(code: KeyCode, modifiers: KeyModifiers) -> String {
     }
     match code {
         KeyCode::Char(' ') => s.push_str("Space"),
-        KeyCode::Char(c) => s.push(c.to_ascii_uppercase()),
+        KeyCode::Char(c) => {
+            if modifiers.contains(KeyModifiers::SHIFT) {
+                if let Some(shifted) = shift_symbol(c) {
+                    s.push(shifted);
+                } else {
+                    s.push(c.to_ascii_uppercase());
+                }
+            } else {
+                s.push(c.to_ascii_uppercase());
+            }
+        }
         KeyCode::Enter => s.push_str("Enter"),
         KeyCode::Esc => s.push_str("Esc"),
         KeyCode::Tab => s.push_str("Tab"),
@@ -249,7 +289,7 @@ impl HelpModal {
         let key_col_width = KEYBINDS
             .iter()
             .filter(|kb| kb.platform.is_visible())
-            .map(|kb| kb.label.resolve().display_width())
+            .map(|kb| kb.resolved_label().display_width())
             .chain(
                 overrides
                     .iter()
@@ -280,7 +320,7 @@ impl HelpModal {
                 .filter(|kb| kb.context == ctx && kb.platform.is_visible())
             {
                 let desc = row_description(kb, overrides);
-                let mut spans = key_spans(kb.label.resolve(), key_col_width, PREFIX_TOP);
+                let mut spans = key_spans(kb.resolved_label(), key_col_width, PREFIX_TOP);
                 spans.push(Span::styled(desc, theme.keybind_desc));
                 lines.push(Line::from(spans));
             }
@@ -304,7 +344,7 @@ impl HelpModal {
                 for kb in child_binds {
                     let desc = row_description(kb, overrides);
                     let mut spans = key_spans(
-                        kb.label.resolve(),
+                        kb.resolved_label(),
                         key_col_width - KEY_COL_GAP,
                         PREFIX_CHILD,
                     );
@@ -567,6 +607,11 @@ mod tests {
     #[test_case(KeyCode::BackTab, KeyModifiers::NONE, "Shift+Tab" ; "backtab_adds_shift")]
     #[test_case(KeyCode::Tab, KeyModifiers::SHIFT, "Shift+Tab" ; "shift_tab")]
     #[test_case(KeyCode::F(1), KeyModifiers::CONTROL | KeyModifiers::SHIFT, "Ctrl+Shift+F1" ; "ctrl_shift_f")]
+    #[test_case(KeyCode::Char('1'), KeyModifiers::SHIFT, "!" ; "shift_one_becomes_bang")]
+    #[test_case(KeyCode::Char('2'), KeyModifiers::SHIFT, "@" ; "shift_two_becomes_at")]
+    #[test_case(KeyCode::Char('3'), KeyModifiers::SHIFT, "#" ; "shift_three_becomes_hash")]
+    #[test_case(KeyCode::Char('4'), KeyModifiers::SHIFT, "$" ; "shift_four_becomes_dollar")]
+    #[test_case(KeyCode::Char('a'), KeyModifiers::SHIFT, "A" ; "shift_letter_uppercases")]
     fn format_key_cases(code: KeyCode, mods: KeyModifiers, expected: &str) {
         assert_eq!(format_key(code, mods), expected);
     }

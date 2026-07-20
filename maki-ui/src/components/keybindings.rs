@@ -3,12 +3,6 @@ use std::fmt::Write;
 use strum::EnumIter;
 use unicode_width::UnicodeWidthStr;
 
-macro_rules! mod_key {
-    ($suffix:expr) => {
-        concat!("Ctrl+", $suffix)
-    };
-}
-
 macro_rules! upper {
     ('a') => {
         "A"
@@ -95,18 +89,149 @@ macro_rules! ctrl_bind {
         Bind {
             code: KeyCode::Char($char),
             modifiers: KeyModifiers::CONTROL,
-            label: mod_key!(upper!($char)),
+            label: char_label!($char, CONTROL),
         }
     };
 }
 
+/// Maps a `(KeyCode, KeyModifiers)` pair to a display label at compile time.
+/// Mirrors `format_key` in `help_modal.rs` so `Bind` declarations stop
+/// hand-syncing the label against their code and modifiers.
 macro_rules! bind {
-    ($code:expr, $mods:expr, $label:expr) => {
+    (KeyCode::Char($c:tt), KeyModifiers :: $mods:ident) => {
         Bind {
-            code: $code,
-            modifiers: $mods,
-            label: $label,
+            code: KeyCode::Char($c),
+            modifiers: KeyModifiers::$mods,
+            label: char_label!($c, $mods),
         }
+    };
+    (KeyCode::$key:ident, KeyModifiers :: $mods:ident) => {
+        Bind {
+            code: KeyCode::$key,
+            modifiers: KeyModifiers::$mods,
+            label: named_label!($key, $mods),
+        }
+    };
+}
+
+macro_rules! char_label {
+    // Shift+digit → US keyboard shifted symbol (matches `shift_symbol`).
+    ('1', SHIFT) => {
+        "!"
+    };
+    ('2', SHIFT) => {
+        "@"
+    };
+    ('3', SHIFT) => {
+        "#"
+    };
+    ('4', SHIFT) => {
+        "$"
+    };
+    ('5', SHIFT) => {
+        "%"
+    };
+    ('6', SHIFT) => {
+        "^"
+    };
+    ('7', SHIFT) => {
+        "&"
+    };
+    ('8', SHIFT) => {
+        "*"
+    };
+    ('9', SHIFT) => {
+        "("
+    };
+    ('0', SHIFT) => {
+        ")"
+    };
+    // Shift+letter → uppercase letter (no modifier prefix).
+    ($c:tt, SHIFT) => {
+        upper!($c)
+    };
+    // Char with no modifiers: char-as-string. We enumerate the small set used
+    // since macro_rules can't stringify a char literal inline.
+    ('/', NONE) => {
+        "/"
+    };
+    ('1', NONE) => {
+        "1"
+    };
+    ('2', NONE) => {
+        "2"
+    };
+    ('3', NONE) => {
+        "3"
+    };
+    ('4', NONE) => {
+        "4"
+    };
+    ($c:tt, CONTROL) => {
+        concat!("Ctrl+", upper!($c))
+    };
+    ($c:tt, ALT) => {
+        concat!("Alt+", upper!($c))
+    };
+}
+
+macro_rules! named_label {
+    (Backspace, NONE) => {
+        "Bs"
+    };
+    (Backspace, ALT) => {
+        "Alt+Bs"
+    };
+    (Delete, NONE) => {
+        "Del"
+    };
+    (Delete, ALT) => {
+        "Alt+Del"
+    };
+    (Left, NONE) => {
+        "←"
+    };
+    (Left, ALT) => {
+        "Alt+←"
+    };
+    (Right, NONE) => {
+        "→"
+    };
+    (Right, ALT) => {
+        "Alt+→"
+    };
+    (Up, NONE) => {
+        "↑"
+    };
+    (Down, NONE) => {
+        "↓"
+    };
+    (Enter, NONE) => {
+        "Enter"
+    };
+    (Enter, SHIFT) => {
+        "Shift+Enter"
+    };
+    (Enter, ALT) => {
+        "Alt+Enter"
+    };
+    (Tab, NONE) => {
+        "Tab"
+    };
+    (Esc, NONE) => {
+        "Esc"
+    };
+    (Home, NONE) => {
+        "Home"
+    };
+    (End, NONE) => {
+        "End"
+    };
+    (PageUp, NONE) => {
+        "PageUp"
+    };
+    (PageDown, NONE) => {
+        "PageDown"
     };
 }
 
@@ -160,36 +285,39 @@ pub mod key {
     pub const KILL_LINE: Bind = ctrl_bind!('k');
     pub const LINE_START: Bind = ctrl_bind!('a');
     pub const LINE_END: Bind = ctrl_bind!('e');
-    pub const EDIT_INPUT: Bind = Bind {
-        code: KeyCode::Char('o'),
-        modifiers: KeyModifiers::ALT,
-        label: "Alt+O",
-    };
+    pub const EDIT_INPUT: Bind = bind!(KeyCode::Char('o'), KeyModifiers::ALT);
 
     /// Plain (unmodified) key binds used by rows whose label is a literal string
     /// rather than a `key::X` const. Grouped here so the `binds` field on each
     /// `Keybind` row can match overrides on those keys too.
-    pub const ENTER: Bind = bind!(KeyCode::Enter, KeyModifiers::NONE, "Enter");
-    pub const TAB: Bind = bind!(KeyCode::Tab, KeyModifiers::NONE, "Tab");
-    pub const ESC: Bind = bind!(KeyCode::Esc, KeyModifiers::NONE, "Esc");
-    pub const SLASH: Bind = bind!(KeyCode::Char('/'), KeyModifiers::NONE, "/");
-    pub const UP: Bind = bind!(KeyCode::Up, KeyModifiers::NONE, "↑");
-    pub const DOWN: Bind = bind!(KeyCode::Down, KeyModifiers::NONE, "↓");
-    pub const HOME: Bind = bind!(KeyCode::Home, KeyModifiers::NONE, "Home");
-    pub const END: Bind = bind!(KeyCode::End, KeyModifiers::NONE, "End");
-    pub const PAGE_UP: Bind = bind!(KeyCode::PageUp, KeyModifiers::NONE, "PageUp");
-    pub const PAGE_DOWN: Bind = bind!(KeyCode::PageDown, KeyModifiers::NONE, "PageDown");
-    pub const ONE: Bind = bind!(KeyCode::Char('1'), KeyModifiers::NONE, "1");
-    pub const TWO: Bind = bind!(KeyCode::Char('2'), KeyModifiers::NONE, "2");
-    pub const THREE: Bind = bind!(KeyCode::Char('3'), KeyModifiers::NONE, "3");
-    pub const FOUR: Bind = bind!(KeyCode::Char('4'), KeyModifiers::NONE, "4");
-    pub const ALT_BACKSPACE: Bind = bind!(KeyCode::Backspace, KeyModifiers::ALT, "Alt+Bs");
-    pub const ALT_DELETE: Bind = bind!(KeyCode::Delete, KeyModifiers::ALT, "Alt+Del");
-    pub const ALT_LEFT: Bind = bind!(KeyCode::Left, KeyModifiers::ALT, "Alt+←");
-    pub const ALT_RIGHT: Bind = bind!(KeyCode::Right, KeyModifiers::ALT, "Alt+→");
-    pub const SHIFT_ENTER: Bind = bind!(KeyCode::Enter, KeyModifiers::SHIFT, "Shift+Enter");
+    pub const ENTER: Bind = bind!(KeyCode::Enter, KeyModifiers::NONE);
+    pub const TAB: Bind = bind!(KeyCode::Tab, KeyModifiers::NONE);
+    pub const ESC: Bind = bind!(KeyCode::Esc, KeyModifiers::NONE);
+    pub const SLASH: Bind = bind!(KeyCode::Char('/'), KeyModifiers::NONE);
+    pub const UP: Bind = bind!(KeyCode::Up, KeyModifiers::NONE);
+    pub const DOWN: Bind = bind!(KeyCode::Down, KeyModifiers::NONE);
+    pub const HOME: Bind = bind!(KeyCode::Home, KeyModifiers::NONE);
+    pub const END: Bind = bind!(KeyCode::End, KeyModifiers::NONE);
+    pub const PAGE_UP: Bind = bind!(KeyCode::PageUp, KeyModifiers::NONE);
+    pub const PAGE_DOWN: Bind = bind!(KeyCode::PageDown, KeyModifiers::NONE);
+    pub const ONE: Bind = bind!(KeyCode::Char('1'), KeyModifiers::NONE);
+    pub const TWO: Bind = bind!(KeyCode::Char('2'), KeyModifiers::NONE);
+    pub const THREE: Bind = bind!(KeyCode::Char('3'), KeyModifiers::NONE);
+    pub const FOUR: Bind = bind!(KeyCode::Char('4'), KeyModifiers::NONE);
+    /// Tier shortcuts: kitty-protocol reports Shift+digit as the base digit + SHIFT.
+    /// Legacy terminals deliver the shifted symbol directly. The label derives
+    /// from `char_label!` and matches `format_key`'s shift+digit translation.
+    pub const SHIFT_ONE: Bind = bind!(KeyCode::Char('1'), KeyModifiers::SHIFT);
+    pub const SHIFT_TWO: Bind = bind!(KeyCode::Char('2'), KeyModifiers::SHIFT);
+    pub const SHIFT_THREE: Bind = bind!(KeyCode::Char('3'), KeyModifiers::SHIFT);
+    pub const SHIFT_FOUR: Bind = bind!(KeyCode::Char('4'), KeyModifiers::SHIFT);
+    pub const ALT_BACKSPACE: Bind = bind!(KeyCode::Backspace, KeyModifiers::ALT);
+    pub const ALT_DELETE: Bind = bind!(KeyCode::Delete, KeyModifiers::ALT);
+    pub const ALT_LEFT: Bind = bind!(KeyCode::Left, KeyModifiers::ALT);
+    pub const ALT_RIGHT: Bind = bind!(KeyCode::Right, KeyModifiers::ALT);
+    pub const SHIFT_ENTER: Bind = bind!(KeyCode::Enter, KeyModifiers::SHIFT);
     pub const CTRL_J: Bind = ctrl_bind!('j');
-    pub const ALT_ENTER: Bind = bind!(KeyCode::Enter, KeyModifiers::ALT, "Alt+Enter");
+    pub const ALT_ENTER: Bind = bind!(KeyCode::Enter, KeyModifiers::ALT);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
@@ -262,24 +390,69 @@ impl Platform {
 
 #[derive(Debug, Clone, Copy)]
 pub enum KeyLabel {
-    Single(&'static str),
-    Alt(&'static str, &'static str),
-    /// Alt on Mac, Single (first) on other platforms
-    MacAlt(&'static str, &'static str),
-    /// Multi on Mac, Multi (first slice) on other platforms
-    MacMulti(&'static [&'static str], &'static [&'static str]),
+    /// `binds[0].label`.
+    Single,
+    /// `binds[0].label / binds[1].label`.
+    Alt,
+    /// `binds[*].label` joined.
+    Multi,
+    /// Mac: `binds[0].label / mac`. Non-mac: `binds[0].label`.
+    MacAlt(&'static str),
+    /// Mac: `mac`. Non-mac: `binds[*].label`.
+    MacMulti(&'static [&'static str]),
+    /// Explicit label, no single-bind correspondence (e.g. "/command", "Esc Esc").
+    Display(&'static str),
 }
 
 pub const ALT_SEP: &str = " / ";
 
-#[derive(Debug, Clone, Copy)]
-pub enum ResolvedLabel {
-    Single(&'static str),
-    Alt(&'static str, &'static str),
-    Multi(&'static [&'static str]),
+/// Dual source for the multi-key case. Mac glyphs come from a static slice
+/// when they diverge from the underlying bind labels; non-mac derives labels
+/// straight from `binds`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultiKeys<'a> {
+    Static(&'static [&'static str]),
+    Binds(&'a [Bind]),
 }
 
-impl ResolvedLabel {
+impl<'a> MultiKeys<'a> {
+    pub fn len(self) -> usize {
+        match self {
+            Self::Static(s) => s.len(),
+            Self::Binds(b) => b.len(),
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn width_sum(self) -> usize {
+        match self {
+            Self::Static(s) => s.iter().map(|k| UnicodeWidthStr::width(*k)).sum::<usize>(),
+            Self::Binds(b) => b
+                .iter()
+                .map(|x| UnicodeWidthStr::width(x.label))
+                .sum::<usize>(),
+        }
+    }
+
+    pub fn for_each<F: FnMut(usize, &'static str)>(self, mut f: F) {
+        match self {
+            Self::Static(s) => s.iter().copied().enumerate().for_each(|(i, k)| f(i, k)),
+            Self::Binds(b) => b.iter().enumerate().for_each(|(i, x)| f(i, x.label)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedLabel<'a> {
+    Single(&'static str),
+    Alt(&'static str, &'static str),
+    Multi(MultiKeys<'a>),
+}
+
+impl ResolvedLabel<'_> {
     pub fn display_width(self) -> usize {
         match self {
             Self::Single(s) => UnicodeWidthStr::width(s),
@@ -289,10 +462,7 @@ impl ResolvedLabel {
             }
             Self::Multi(keys) => {
                 let sep_w = UnicodeWidthStr::width(ALT_SEP);
-                keys.iter()
-                    .map(|k| UnicodeWidthStr::width(*k))
-                    .sum::<usize>()
-                    + sep_w * keys.len().saturating_sub(1)
+                keys.width_sum() + sep_w * keys.len().saturating_sub(1)
             }
         }
     }
@@ -310,38 +480,6 @@ impl ResolvedLabel {
     }
 }
 
-impl KeyLabel {
-    pub fn resolve(self) -> ResolvedLabel {
-        match self {
-            Self::Single(s) => ResolvedLabel::Single(s),
-            Self::Alt(a, b) => ResolvedLabel::Alt(a, b),
-            Self::MacAlt(a, b) => {
-                if cfg!(target_os = "macos") {
-                    ResolvedLabel::Alt(a, b)
-                } else {
-                    ResolvedLabel::Single(a)
-                }
-            }
-            Self::MacMulti(normal, mac) => {
-                if cfg!(target_os = "macos") {
-                    ResolvedLabel::Multi(mac)
-                } else {
-                    ResolvedLabel::Multi(normal)
-                }
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn flat_str(&self) -> String {
-        match self.resolve() {
-            ResolvedLabel::Single(s) => s.to_string(),
-            ResolvedLabel::Alt(a, b) => format!("{a}/{b}"),
-            ResolvedLabel::Multi(keys) => keys.join("/"),
-        }
-    }
-}
-
 pub struct Keybind {
     pub label: KeyLabel,
     pub description: &'static str,
@@ -350,173 +488,220 @@ pub struct Keybind {
     /// Concrete single-key binds this row represents. Used to match live
     /// overrides for display in the help modal. Empty for rows that are not
     /// a single keystroke (e.g. "Type" to filter). Alias rows list every key.
+    /// Also the source of display labels for `Single`, `Alt`, and the non-mac
+    /// side of `MacAlt` / `MacMulti`.
     pub binds: &'static [Bind],
+}
+
+impl Keybind {
+    pub fn resolved_label(&self) -> ResolvedLabel<'_> {
+        match self.label {
+            KeyLabel::Single => ResolvedLabel::Single(self.binds[0].label),
+            KeyLabel::Alt => ResolvedLabel::Alt(self.binds[0].label, self.binds[1].label),
+            KeyLabel::Multi => ResolvedLabel::Multi(MultiKeys::Binds(self.binds)),
+            KeyLabel::MacAlt(mac) => {
+                if cfg!(target_os = "macos") {
+                    ResolvedLabel::Alt(self.binds[0].label, mac)
+                } else {
+                    ResolvedLabel::Single(self.binds[0].label)
+                }
+            }
+            KeyLabel::MacMulti(mac) => {
+                if cfg!(target_os = "macos") {
+                    ResolvedLabel::Multi(MultiKeys::Static(mac))
+                } else {
+                    ResolvedLabel::Multi(MultiKeys::Binds(self.binds))
+                }
+            }
+            KeyLabel::Display(s) => ResolvedLabel::Single(s),
+        }
+    }
+
+    #[cfg(test)]
+    fn flat_label_str(&self) -> String {
+        match self.resolved_label() {
+            ResolvedLabel::Single(s) => s.to_string(),
+            ResolvedLabel::Alt(a, b) => format!("{a}/{b}"),
+            ResolvedLabel::Multi(keys) => {
+                let mut out = String::new();
+                let mut first = true;
+                keys.for_each(|_, k| {
+                    if !first {
+                        out.push('/');
+                    }
+                    out.push_str(k);
+                    first = false;
+                });
+                out
+            }
+        }
+    }
 }
 
 pub const KEYBINDS: &[Keybind] = &[
     Keybind {
-        label: KeyLabel::Single(key::QUIT.label),
+        label: KeyLabel::Single,
         description: "Quit / clear input",
         context: KeybindContext::General,
         platform: Platform::All,
         binds: &[key::QUIT],
     },
     Keybind {
-        label: KeyLabel::Single(key::HELP.label),
+        label: KeyLabel::Single,
         description: "Show keybindings",
         context: KeybindContext::General,
         platform: Platform::All,
         binds: &[key::HELP],
     },
     Keybind {
-        label: KeyLabel::Alt(key::NEXT_CHAT.label, key::PREV_CHAT.label),
+        label: KeyLabel::Alt,
         description: "Next / previous task chat",
         context: KeybindContext::General,
         platform: Platform::All,
         binds: &[key::NEXT_CHAT, key::PREV_CHAT],
     },
     Keybind {
-        label: KeyLabel::Single(key::SEARCH.label),
+        label: KeyLabel::Single,
         description: "Search messages",
         context: KeybindContext::General,
         platform: Platform::All,
         binds: &[key::SEARCH],
     },
     Keybind {
-        label: KeyLabel::Single(key::FILE_PICKER.label),
+        label: KeyLabel::Single,
         description: "File picker",
         context: KeybindContext::General,
         platform: Platform::All,
         binds: &[key::FILE_PICKER],
     },
     Keybind {
-        label: KeyLabel::Single(key::OPEN_EDITOR.label),
+        label: KeyLabel::Single,
         description: "Open plan in editor",
         context: KeybindContext::General,
         platform: Platform::All,
         binds: &[key::OPEN_EDITOR],
     },
     Keybind {
-        label: KeyLabel::Single(key::PLAN_TOGGLE.label),
+        label: KeyLabel::Single,
         description: "Toggle plan panel",
         context: KeybindContext::General,
         platform: Platform::All,
         binds: &[key::PLAN_TOGGLE],
     },
     Keybind {
-        label: KeyLabel::Single(key::TASKS.label),
+        label: KeyLabel::Single,
         description: "Open tasks",
         context: KeybindContext::General,
         platform: Platform::All,
         binds: &[key::TASKS],
     },
     Keybind {
-        label: KeyLabel::Single(key::SUSPEND.label),
+        label: KeyLabel::Single,
         description: "Suspend process",
         context: KeybindContext::General,
         platform: Platform::UnixOnly,
         binds: &[key::SUSPEND],
     },
     Keybind {
-        label: KeyLabel::Single("Enter"),
+        label: KeyLabel::Single,
         description: "Submit prompt",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::ENTER],
     },
     Keybind {
-        label: KeyLabel::MacMulti(&["\\+Enter", "Ctrl+J", "Alt+Enter"], &["⇧↵", "⌃J", "⌥↵"]),
+        label: KeyLabel::MacMulti(&["⇧↵", "⌃J", "⌥↵"]),
         description: "Newline",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::SHIFT_ENTER, key::CTRL_J, key::ALT_ENTER],
     },
     Keybind {
-        label: KeyLabel::Single("Tab"),
+        label: KeyLabel::Single,
         description: "Toggle mode",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::TAB],
     },
     Keybind {
-        label: KeyLabel::Single("/command"),
+        label: KeyLabel::Display("/command"),
         description: "Open command palette",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::SLASH],
     },
     Keybind {
-        label: KeyLabel::MacAlt(key::DELETE_WORD.label, "⌥⌫"),
+        label: KeyLabel::MacAlt("⌥⌫"),
         description: "Delete word backward",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::DELETE_WORD, key::ALT_BACKSPACE],
     },
     Keybind {
-        label: KeyLabel::MacMulti(&["Alt+←", "Alt+→"], &["⌥←", "⌥→"]),
+        label: KeyLabel::MacMulti(&["⌥←", "⌥→"]),
         description: "Move word left / right",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::ALT_LEFT, key::ALT_RIGHT],
     },
     Keybind {
-        label: KeyLabel::Alt(mod_key!("Del"), "⌥Del"),
+        label: KeyLabel::Single,
         description: "Delete word forward",
         context: KeybindContext::Editing,
         platform: Platform::MacOnly,
         binds: &[key::ALT_DELETE],
     },
     Keybind {
-        label: KeyLabel::Single(key::KILL_LINE.label),
+        label: KeyLabel::Single,
         description: "Delete to end of line",
         context: KeybindContext::Editing,
         platform: Platform::MacOnly,
         binds: &[key::KILL_LINE],
     },
     Keybind {
-        label: KeyLabel::Single(key::LINE_START.label),
+        label: KeyLabel::Single,
         description: "Jump to start of line",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::LINE_START],
     },
     Keybind {
-        label: KeyLabel::Alt("Home", "End"),
+        label: KeyLabel::Alt,
         description: "Jump to start/end of line",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::HOME, key::END],
     },
     Keybind {
-        label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
+        label: KeyLabel::Alt,
         description: "Scroll half page up / down",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::SCROLL_HALF_UP, key::SCROLL_HALF_DOWN],
     },
     Keybind {
-        label: KeyLabel::Single(key::LINE_END.label),
+        label: KeyLabel::Single,
         description: "Jump to end of line",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::LINE_END],
     },
     Keybind {
-        label: KeyLabel::Single(key::SCROLL_TOP.label),
+        label: KeyLabel::Single,
         description: "Scroll to top",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::SCROLL_TOP],
     },
     Keybind {
-        label: KeyLabel::Single(key::SCROLL_BOTTOM.label),
+        label: KeyLabel::Single,
         description: "Scroll to bottom",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::SCROLL_BOTTOM],
     },
     Keybind {
-        label: KeyLabel::Single(key::POP_QUEUE.label),
+        label: KeyLabel::Single,
         description: "Pop queue",
         context: KeybindContext::Editing,
         platform: Platform::All,
@@ -524,116 +709,121 @@ pub const KEYBINDS: &[Keybind] = &[
     },
     // Double-Esc rows leave `binds` empty so a single-Esc override does not relabel them.
     Keybind {
-        label: KeyLabel::Single("Esc Esc"),
+        label: KeyLabel::Display("Esc Esc"),
         description: "Rewind",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[],
     },
     Keybind {
-        label: KeyLabel::Single(key::EDIT_INPUT.label),
+        label: KeyLabel::Single,
         description: "Edit input in external editor",
         context: KeybindContext::Editing,
         platform: Platform::All,
         binds: &[key::EDIT_INPUT],
     },
     Keybind {
-        label: KeyLabel::Alt("↑", "↓"),
+        label: KeyLabel::Alt,
         description: "Navigate input history",
         context: KeybindContext::Streaming,
         platform: Platform::All,
         binds: &[key::UP, key::DOWN],
     },
     Keybind {
-        label: KeyLabel::Single("Esc Esc"),
+        label: KeyLabel::Display("Esc Esc"),
         description: "Cancel agent",
         context: KeybindContext::Streaming,
         platform: Platform::All,
         binds: &[],
     },
     Keybind {
-        label: KeyLabel::Alt("↑", "↓"),
+        label: KeyLabel::Alt,
         description: "Navigate options",
         context: KeybindContext::FormInput,
         platform: Platform::All,
         binds: &[key::UP, key::DOWN],
     },
     Keybind {
-        label: KeyLabel::Single("Enter"),
+        label: KeyLabel::Single,
         description: "Select option",
         context: KeybindContext::FormInput,
         platform: Platform::All,
         binds: &[key::ENTER],
     },
     Keybind {
-        label: KeyLabel::Single("Esc"),
+        label: KeyLabel::Single,
         description: "Close",
         context: KeybindContext::FormInput,
         platform: Platform::All,
         binds: &[key::ESC],
     },
     Keybind {
-        label: KeyLabel::Alt("↑", "↓"),
+        label: KeyLabel::Alt,
         description: "Navigate",
         context: KeybindContext::Picker,
         platform: Platform::All,
         binds: &[key::UP, key::DOWN],
     },
     Keybind {
-        label: KeyLabel::Single("Enter"),
+        label: KeyLabel::Single,
         description: "Select",
         context: KeybindContext::Picker,
         platform: Platform::All,
         binds: &[key::ENTER],
     },
     Keybind {
-        label: KeyLabel::Single("Esc"),
+        label: KeyLabel::Single,
         description: "Close",
         context: KeybindContext::Picker,
         platform: Platform::All,
         binds: &[key::ESC],
     },
     Keybind {
-        label: KeyLabel::Single("Type"),
+        label: KeyLabel::Display("Type"),
         description: "Filter",
         context: KeybindContext::Picker,
         platform: Platform::All,
         binds: &[],
     },
     Keybind {
-        label: KeyLabel::Alt("PageUp", "PageDown"),
+        label: KeyLabel::Alt,
         description: "Scroll page up / down",
         context: KeybindContext::Picker,
         platform: Platform::All,
         binds: &[key::PAGE_UP, key::PAGE_DOWN],
     },
     Keybind {
-        label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
+        label: KeyLabel::Alt,
         description: "Scroll page up / down",
         context: KeybindContext::Picker,
         platform: Platform::All,
         binds: &[key::SCROLL_HALF_UP, key::SCROLL_HALF_DOWN],
     },
     Keybind {
-        label: KeyLabel::Single("Enter"),
+        label: KeyLabel::Single,
         description: "Remove item",
         context: KeybindContext::QueueFocus,
         platform: Platform::All,
         binds: &[key::ENTER],
     },
     Keybind {
-        label: KeyLabel::Single("Tab"),
+        label: KeyLabel::Single,
         description: "Complete command",
         context: KeybindContext::CommandPalette,
         platform: Platform::All,
         binds: &[key::TAB],
     },
     Keybind {
-        label: KeyLabel::Single("!/@/#/$"),
+        label: KeyLabel::Multi,
         description: "Set tier (strong/medium/weak/compaction)",
         context: KeybindContext::ModelPicker,
         platform: Platform::All,
-        binds: &[key::ONE, key::TWO, key::THREE, key::FOUR],
+        binds: &[
+            key::SHIFT_ONE,
+            key::SHIFT_TWO,
+            key::SHIFT_THREE,
+            key::SHIFT_FOUR,
+        ],
     },
 ];
 
@@ -737,14 +927,86 @@ mod tests {
             for (j, b) in KEYBINDS.iter().enumerate() {
                 if i != j && a.context == b.context {
                     assert!(
-                        a.label.flat_str() != b.label.flat_str() || a.description != b.description,
+                        a.flat_label_str() != b.flat_label_str() || a.description != b.description,
                         "duplicate keybind: {} - {} in {:?}",
-                        a.label.flat_str(),
+                        a.flat_label_str(),
                         a.description,
                         a.context,
                     );
                 }
             }
         }
+    }
+
+    #[test]
+    fn single_label_derives_from_first_bind() {
+        let kb = KEYBINDS
+            .iter()
+            .find(|kb| matches!(kb.label, KeyLabel::Single))
+            .unwrap();
+        match kb.resolved_label() {
+            ResolvedLabel::Single(s) => assert_eq!(s, kb.binds[0].label),
+            other => panic!("expected Single, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alt_label_derives_from_both_binds() {
+        let kb = KEYBINDS
+            .iter()
+            .find(|kb| matches!(kb.label, KeyLabel::Alt))
+            .unwrap();
+        match kb.resolved_label() {
+            ResolvedLabel::Alt(a, b) => {
+                assert_eq!(a, kb.binds[0].label);
+                assert_eq!(b, kb.binds[1].label);
+            }
+            other => panic!("expected Alt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn display_label_keeps_explicit_string() {
+        let kb = KEYBINDS
+            .iter()
+            .find(|kb| kb.description == "Filter")
+            .unwrap();
+        let ResolvedLabel::Single(s) = kb.resolved_label() else {
+            panic!("expected Single");
+        };
+        assert_eq!(s, "Type");
+    }
+
+    #[test]
+    fn mac_multi_derives_labels_from_binds_off_mac() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let kb = KEYBINDS
+            .iter()
+            .find(|kb| matches!(kb.label, KeyLabel::MacMulti(_)))
+            .unwrap();
+        let mut labels: Vec<&'static str> = Vec::new();
+        if let ResolvedLabel::Multi(keys) = kb.resolved_label() {
+            keys.for_each(|_, k| labels.push(k));
+        }
+        let binds: Vec<&'static str> = kb.binds.iter().map(|b| b.label).collect();
+        assert_eq!(labels, binds);
+    }
+
+    #[test]
+    fn multi_label_derives_from_all_binds() {
+        let kb = KEYBINDS
+            .iter()
+            .find(|kb| matches!(kb.label, KeyLabel::Multi))
+            .unwrap();
+        let mut labels: Vec<&'static str> = Vec::new();
+        if let ResolvedLabel::Multi(keys) = kb.resolved_label() {
+            keys.for_each(|_, k| labels.push(k));
+        }
+        let binds: Vec<&'static str> = kb.binds.iter().map(|b| b.label).collect();
+        assert_eq!(labels, binds);
+        // The tier-shortcut row must display the shifted symbols, not the digits.
+        assert_eq!(labels, vec!["!", "@", "#", "$"]);
     }
 }

@@ -1,4 +1,6 @@
-use maki_ui::keybindings::{ALT_SEP, KEYBINDS, KeyLabel, KeybindContext, Platform, all_contexts};
+use maki_ui::keybindings::{
+    ALT_SEP, KEYBINDS, KeyLabel, Keybind, KeybindContext, Platform, all_contexts,
+};
 
 const FRONTMATTER: &str = "\
 +++
@@ -22,16 +24,24 @@ const MAIN_CONTEXTS: &[KeybindContext] = &[
     KeybindContext::Picker,
 ];
 
-fn label_str(label: KeyLabel) -> String {
-    match label {
-        KeyLabel::Single(s) => format!("`{s}`"),
-        KeyLabel::Alt(a, b) => format!("`{a}`{ALT_SEP}`{b}`"),
-        KeyLabel::MacAlt(a, _) => format!("`{a}`"),
-        KeyLabel::MacMulti(normal, _) => normal
+fn label_str(kb: &Keybind) -> String {
+    match kb.label {
+        KeyLabel::Single => format!("`{}`", kb.binds[0].label),
+        KeyLabel::Alt => format!("`{}`{ALT_SEP}`{}`", kb.binds[0].label, kb.binds[1].label),
+        KeyLabel::Multi => kb
+            .binds
             .iter()
-            .map(|s| format!("`{s}`"))
+            .map(|b| format!("`{}`", b.label))
             .collect::<Vec<_>>()
             .join(ALT_SEP),
+        KeyLabel::MacAlt(_) => format!("`{}`", kb.binds[0].label),
+        KeyLabel::MacMulti(_) => kb
+            .binds
+            .iter()
+            .map(|b| format!("`{}`", b.label))
+            .collect::<Vec<_>>()
+            .join(ALT_SEP),
+        KeyLabel::Display(s) => format!("`{s}`"),
     }
 }
 
@@ -50,7 +60,7 @@ fn write_section(out: &mut String, ctx: KeybindContext) {
     let normal: Vec<_> = all_rows
         .iter()
         .filter(|kb| kb.platform == Platform::All)
-        .map(|kb| (label_str(kb.label), kb.description))
+        .map(|kb| (label_str(kb), kb.description))
         .collect();
 
     if !normal.is_empty() {
@@ -60,7 +70,7 @@ fn write_section(out: &mut String, ctx: KeybindContext) {
     let mac_only: Vec<_> = all_rows
         .iter()
         .filter(|kb| kb.platform == Platform::MacOnly)
-        .map(|kb| (label_str(kb.label), kb.description))
+        .map(|kb| (label_str(kb), kb.description))
         .collect();
 
     if !mac_only.is_empty() {
@@ -84,7 +94,7 @@ fn write_context_specific(out: &mut String) {
     out.push_str("| Context | Key | Action |\n|---------|-----|--------|\n");
 
     for kb in &child_binds {
-        let key = label_str(kb.label);
+        let key = label_str(kb);
         out.push_str(&format!(
             "| {} | {key} | {} |\n",
             kb.context.label(),

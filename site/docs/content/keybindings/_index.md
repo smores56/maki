@@ -27,7 +27,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | Key | Action |
 |-----|--------|
 | `Enter` | Submit prompt |
-| `\+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
+| `Shift+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
 | `Tab` | Toggle mode |
 | `/command` | Open command palette |
 | `Ctrl+W` | Delete word backward |
@@ -46,7 +46,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+Del` / `⌥Del` | Delete word forward |
+| `Alt+Del` | Delete word forward |
 | `Ctrl+K` | Delete to end of line |
 
 ## While Streaming
@@ -83,7 +83,7 @@ Some pickers add extra bindings on top of the defaults:
 |---------|-----|--------|
 | Queue | `Enter` | Remove item |
 | Commands | `Tab` | Complete command |
-| Model Picker | `!/@/#/$` | Set tier (strong/medium/weak/compaction) |
+| Model Picker | `!` / `@` / `#` / `$` | Set tier (strong/medium/weak/compaction) |
 | Session Picker | `Ctrl+N` | New session |
 | Session Picker | `Ctrl+R` | Rename session |
 | Session Picker | `Ctrl+D` | Delete session (press twice) |
