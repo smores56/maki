@@ -594,4 +594,33 @@ mod tests {
             "sanitizes-to-empty override does not surface as a Plugin binding"
         );
     }
+
+    #[test]
+    fn trailing_macalt_bind_override_does_not_relabel_off_mac() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        // Delete word backward is MacAlt with binds [DELETE_WORD, ALT_BACKSPACE].
+        // Off mac only DELETE_WORD is displayed, so an override on the trailing
+        // ALT_BACKSPACE must not relabel the row; it should appear in Plugin
+        // bindings instead.
+        let entry = KeymapEntry {
+            key: key::ALT_BACKSPACE.code,
+            modifiers: key::ALT_BACKSPACE.modifiers,
+            desc: "alt-bs plugin".into(),
+            plugin: std::sync::Arc::from("p"),
+            id: 6,
+        };
+        let terminal = render_modal(&[entry]);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Delete word backward"),
+            "default row desc survives an override on the non-displayed trailing bind"
+        );
+        assert!(
+            text.contains("Plugin bindings"),
+            "trailing-bind override surfaces in Plugin bindings"
+        );
+        assert!(text.contains("alt-bs plugin"));
+    }
 }
