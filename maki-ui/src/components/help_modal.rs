@@ -26,6 +26,11 @@ const MAX_DESC_WIDTH: usize = 40;
 /// or combining marks cannot grow the render path. Width truncation is the
 /// primary bound; this is the safety net.
 const MAX_DESC_CHARS: usize = 80;
+/// Caps the upstream iterator so a desc of all control/format chars (which
+/// `filter` strips, yielding zero items) cannot force `take(MAX_DESC_CHARS)`
+/// to scan the whole input. 4x lets a benign desc keep its full 80-char output
+/// while bounding the worst-case per-call scan to MAX_DESC_SCAN chars.
+const MAX_DESC_SCAN: usize = MAX_DESC_CHARS * 4;
 
 const INPUT_PREFIXES: &[(&str, &str)] = &[
     ("!", "Run shell command (visible to agent)"),
@@ -127,6 +132,7 @@ fn row_description<'a>(
 fn sanitize_desc(desc: &str) -> String {
     let mut out: String = desc
         .chars()
+        .take(MAX_DESC_SCAN)
         .filter(|&c| !c.is_control() && !is_format_char(c))
         .take(MAX_DESC_CHARS)
         .collect();
@@ -149,11 +155,13 @@ fn sanitize_desc(desc: &str) -> String {
 }
 
 /// Bidi overrides, joiners, and other formatting characters slip past
-/// `is_control` but still reorder or hide text. Strip them so an untrusted
-/// plugin cannot spoof or invert its description.
+/// `is_control` but still reorder or hide text. Strip them so a plugin
+/// cannot spoof or invert its description.
 fn is_format_char(c: char) -> bool {
     matches!(c,
         '\u{00AD}' // soft hyphen
+        | '\u{061C}' // arabic letter mark (bidi)
+        | '\u{115F}' | '\u{1160}' // hangul fillers
         | '\u{200B}' // zero-width space
         | '\u{200C}' // zero-width non-joiner
         | '\u{200D}' // zero-width joiner
@@ -161,7 +169,13 @@ fn is_format_char(c: char) -> bool {
         | '\u{202A}'..='\u{202E}' // bidi embedding/override
         | '\u{2060}' | '\u{2061}' | '\u{2062}' | '\u{2063}' | '\u{2064}' // word/func joiners
         | '\u{2066}'..='\u{2069}' // bidi isolate
+        | '\u{3164}' // hangul filler
+        | '\u{FE00}'..='\u{FE0F}' // variation selectors
         | '\u{FEFF}' // zero-width no-break space
+        | '\u{FFF9}' | '\u{FFFA}' | '\u{FFFB}' // interlinear annotation
+        | '\u{FFA0}' // halfwidth hangul filler
+        | '\u{E0001}' | '\u{E0020}'..='\u{E007F}' // tag chars
+        | '\u{E0100}'..='\u{E01EF}' // variation selectors supplement
     )
 }
 
@@ -554,6 +568,30 @@ mod tests {
         assert!(
             !text.contains("Plugin bindings"),
             "empty-desc override does not appear in Plugin bindings"
+        );
+    }
+
+    #[test]
+    fn sanitized_to_empty_override_falls_back_to_default() {
+        // A desc made only of bidi/format chars is non-empty raw but sanitizes
+        // to empty. The row must keep its default description instead of going
+        // blank, and the override must not surface in Plugin bindings.
+        let entry = KeymapEntry {
+            key: key::HELP.code,
+            modifiers: key::HELP.modifiers,
+            desc: "\u{202E}\u{200B}\u{FEFF}".into(),
+            plugin: std::sync::Arc::from("p"),
+            id: 5,
+        };
+        let terminal = render_modal(&[entry]);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Show keybindings"),
+            "sanitizes-to-empty override falls back to default on the matching row"
+        );
+        assert!(
+            !text.contains("Plugin bindings"),
+            "sanitizes-to-empty override does not surface as a Plugin binding"
         );
     }
 

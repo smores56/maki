@@ -250,10 +250,23 @@ impl Keybind {
     pub fn resolved_label(&self) -> ResolvedLabel {
         let label_of = |b: &Bind| format_key(b.code, b.modifiers);
         match self.label {
-            KeyLabel::Single => ResolvedLabel::Single(label_of(&self.binds[0])),
-            KeyLabel::Alt => ResolvedLabel::Alt(label_of(&self.binds[0]), label_of(&self.binds[1])),
-            KeyLabel::Multi => ResolvedLabel::Multi(self.binds.iter().map(label_of).collect()),
+            KeyLabel::Single => {
+                debug_assert!(!self.binds.is_empty(), "Single requires >=1 bind");
+                ResolvedLabel::Single(label_of(&self.binds[0]))
+            }
+            KeyLabel::Alt => {
+                debug_assert!(self.binds.len() >= 2, "Alt requires >=2 binds");
+                ResolvedLabel::Alt(label_of(&self.binds[0]), label_of(&self.binds[1]))
+            }
+            KeyLabel::Multi => {
+                debug_assert!(!self.binds.is_empty(), "Multi requires >=1 bind");
+                ResolvedLabel::Multi(self.binds.iter().map(label_of).collect())
+            }
             KeyLabel::MacAlt(mac) => {
+                debug_assert!(
+                    self.binds.len() >= 2,
+                    "MacAlt requires >=2 binds so the trailing mac glyph has a bind to match"
+                );
                 if cfg!(target_os = "macos") {
                     ResolvedLabel::Alt(label_of(&self.binds[0]), mac.to_string())
                 } else {
@@ -261,6 +274,10 @@ impl Keybind {
                 }
             }
             KeyLabel::MacMulti(mac) => {
+                debug_assert!(
+                    self.binds.len() == mac.len(),
+                    "MacMulti binds must match mac labels so override matching aligns"
+                );
                 if cfg!(target_os = "macos") {
                     ResolvedLabel::Multi(mac.iter().map(|s| s.to_string()).collect())
                 } else {
