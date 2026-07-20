@@ -1,6 +1,7 @@
 pub(crate) mod agent;
 pub(crate) mod r#async;
 pub(crate) mod autocmd;
+pub(crate) mod action;
 pub(crate) mod base64;
 pub(crate) mod env;
 pub(crate) mod r#fn;
@@ -63,7 +64,7 @@ pub(crate) fn create_maki_global(
     )?;
     maki.set(
         "ui",
-        ui::create_ui_table(lua, ui_action_tx, Arc::clone(&plugin))?,
+        ui::create_ui_table(lua, ui_action_tx.clone(), Arc::clone(&plugin))?,
     )?;
     maki.set("fn", r#fn::create_fn_table(lua, permissions)?)?;
     split::split__register(&maki, lua)?;
@@ -77,6 +78,7 @@ pub(crate) fn create_maki_global(
         "keymap",
         keymap::create_keymap_table(lua, Arc::clone(&plugin))?,
     )?;
+    maki.set("action", action::create_action_table(lua, ui_action_tx.clone())?)?;
 
     Ok(maki)
 }

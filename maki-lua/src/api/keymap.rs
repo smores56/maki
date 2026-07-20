@@ -6,7 +6,17 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Lua, RegistryKey, Result as LuaResult, Table};
 
+use crate::api::util::command::BuiltinAction;
+
 static NEXT_KEYMAP_ID: AtomicU64 = AtomicU64::new(1);
+
+pub const BUILTIN_PLUGIN: &str = "maki.builtin";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Handler {
+    Lua(u64),
+    Builtin(BuiltinAction),
+}
 
 #[derive(Clone, Debug)]
 pub struct KeymapEntry {
@@ -14,7 +24,7 @@ pub struct KeymapEntry {
     pub modifiers: KeyModifiers,
     pub desc: String,
     pub plugin: Arc<str>,
-    pub id: u64,
+    pub handler: Handler,
 }
 
 #[derive(Clone, Default)]
@@ -63,12 +73,16 @@ impl KeymapWriter {
 }
 
 pub(crate) struct StoredKeymap {
-    pub id: u64,
     pub key: KeyCode,
     pub modifiers: KeyModifiers,
-    pub callback: RegistryKey,
     pub plugin: Arc<str>,
     pub desc: String,
+    pub handler: StoredHandler,
+}
+
+pub(crate) enum StoredHandler {
+    Lua { id: u64, callback: RegistryKey },
+    Builtin(BuiltinAction),
 }
 
 pub(crate) struct KeymapStore {
@@ -82,7 +96,7 @@ impl KeymapStore {
         }
     }
 
-    pub fn set(
+    pub fn set_lua(
         &mut self,
         key: KeyCode,
         modifiers: KeyModifiers,
@@ -91,35 +105,77 @@ impl KeymapStore {
         desc: String,
     ) -> (u64, Option<RegistryKey>) {
         let id = NEXT_KEYMAP_ID.fetch_add(1, Ordering::Relaxed);
-        let old = self
-            .bindings
-            .iter()
-            .position(|b| b.key == key && b.modifiers == modifiers)
-            .map(|pos| self.bindings.remove(pos).callback);
+        let old = self.remove_at(key, modifiers);
         self.bindings.push(StoredKeymap {
-            id,
             key,
             modifiers,
-            callback,
             plugin,
             desc,
+            handler: StoredHandler::Lua { id, callback },
         });
         (id, old)
+    }
+
+    pub fn set_builtin(
+        &mut self,
+        key: KeyCode,
+        modifiers: KeyModifiers,
+        action: BuiltinAction,
+        plugin: Arc<str>,
+        desc: String,
+    ) -> Vec<RegistryKey> {
+        let mut dropped = self.remove_at(key, modifiers).into_iter().collect::<Vec<_>>();
+        let mut i = 0;
+        while i < self.bindings.len() {
+            if let StoredHandler::Builtin(existing) = &self.bindings[i].handler
+                && *existing == action
+            {
+                dropped.extend(self.bindings.remove(i).callback_if_lua());
+            } else {
+                i += 1;
+            }
+        }
+        self.bindings.push(StoredKeymap {
+            key,
+            modifiers,
+            plugin,
+            desc,
+            handler: StoredHandler::Builtin(action),
+        });
+        dropped
     }
 
     pub fn del(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Option<RegistryKey> {
         self.bindings
             .iter()
             .position(|b| b.key == key && b.modifiers == modifiers)
-            .map(|pos| self.bindings.remove(pos).callback)
+            .and_then(|pos| self.bindings.remove(pos).callback_if_lua())
+    }
+
+    pub fn del_action(&mut self, action: BuiltinAction) -> Vec<RegistryKey> {
+        let mut dropped = Vec::new();
+        let mut i = 0;
+        while i < self.bindings.len() {
+            if let StoredHandler::Builtin(existing) = &self.bindings[i].handler
+                && *existing == action
+            {
+                dropped.extend(self.bindings.remove(i).callback_if_lua());
+            } else {
+                i += 1;
+            }
+        }
+        dropped
     }
 
     pub fn clear_plugin(&mut self, plugin: &str) -> Vec<RegistryKey> {
+        if plugin == BUILTIN_PLUGIN {
+            return Vec::new();
+        }
         let mut keys = Vec::new();
         let mut i = 0;
         while i < self.bindings.len() {
             if self.bindings[i].plugin.as_ref() == plugin {
-                keys.push(self.bindings.remove(i).callback);
+                keys.extend(self.bindings.remove(i).callback_if_lua());
             } else {
                 i += 1;
             }
@@ -135,7 +191,10 @@ impl KeymapStore {
                 modifiers: b.modifiers,
                 desc: b.desc.clone(),
                 plugin: Arc::clone(&b.plugin),
-                id: b.id,
+                handler: match &b.handler {
+                    StoredHandler::Lua { id, .. } => Handler::Lua(*id),
+                    StoredHandler::Builtin(action) => Handler::Builtin(*action),
+                },
             })
             .collect()
     }
@@ -143,8 +202,26 @@ impl KeymapStore {
     pub fn callback_for_id(&self, id: u64) -> Option<&RegistryKey> {
         self.bindings
             .iter()
-            .find(|b| b.id == id)
-            .map(|b| &b.callback)
+            .find_map(|b| match &b.handler {
+                StoredHandler::Lua { id: lid, callback } if *lid == id => Some(callback),
+                _ => None,
+            })
+    }
+
+    fn remove_at(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Option<RegistryKey> {
+        self.bindings
+            .iter()
+            .position(|b| b.key == key && b.modifiers == modifiers)
+            .and_then(|pos| self.bindings.remove(pos).callback_if_lua())
+    }
+}
+
+impl StoredKeymap {
+    fn callback_if_lua(self) -> Option<RegistryKey> {
+        match self.handler {
+            StoredHandler::Lua { callback, .. } => Some(callback),
+            StoredHandler::Builtin(_) => None,
+        }
     }
 }
 
@@ -253,16 +330,20 @@ fn publish_keymap_snapshot(lua: &Lua) {
     }
 }
 
-/// Bind a key to a Lua function, just like `vim.keymap.set`. Only
-/// normal mode (`"n"`) is supported right now. If {lhs} is already
-/// mapped, the old binding is replaced and a warning is logged.
+/// Bind {lhs} to {rhs} in {mode}. Only normal mode (`"n"`) is
+/// supported right now. {rhs} is either a Lua function (called when
+/// the key is pressed) or a string naming a built-in UI action such
+/// as `"FilePicker"`, `"EditInputInEditor"`, or `"OpenEditor"`. A
+/// built-in rhs moves the binding: any existing binding for the same
+/// built-in action at another key is removed.
 ///
 /// @param mode string Mode letter. Currently only `"n"` is accepted.
 /// @param lhs string Key in Vim notation, e.g. `"<C-t>"`, `"<Space>"`, `"a"`.
-/// @param rhs function Called when the key is pressed.
+/// @param rhs function|string Lua callback or built-in action name.
 /// @param opts table? Options:
 ///   `desc` (string) short description shown in the keymap list.
 /// @example
+/// maki.keymap.set("n", "<A-y>", "FilePicker")
 /// maki.keymap.set("n", "<C-t>", function()
 ///   print("toggle!")
 /// end, { desc = "Toggle panel" })
@@ -272,7 +353,7 @@ fn set(
     #[ctx] plugin: Arc<str>,
     mode: String,
     lhs: String,
-    rhs: mlua::Function,
+    rhs: mlua::Value,
     opts: Option<Table>,
 ) -> LuaResult<()> {
     if mode != "n" {
@@ -285,21 +366,41 @@ fn set(
         .as_ref()
         .and_then(|o| o.get::<String>("desc").ok())
         .unwrap_or_default();
-    let registry_key = lua.create_registry_value(rhs)?;
-    let (_, old) = lua
-        .app_data_mut::<KeymapStore>()
-        .ok_or_else(|| mlua::Error::runtime("keymap store not initialized"))?
-        .set(key, modifiers, registry_key, Arc::clone(&plugin), desc);
-    if let Some(old_key) = old {
+    let dropped: Vec<RegistryKey> = match rhs {
+        mlua::Value::Function(func) => {
+            let registry_key = lua.create_registry_value(func)?;
+            let (_, old) = lua
+                .app_data_mut::<KeymapStore>()
+                .ok_or_else(|| mlua::Error::runtime("keymap store not initialized"))?
+                .set_lua(key, modifiers, registry_key, Arc::clone(&plugin), desc);
+            old.into_iter().collect()
+        }
+        mlua::Value::String(s) => {
+            let name = s.to_string_lossy();
+            let action = BuiltinAction::parse(&name).map_err(mlua::Error::runtime)?;
+            lua.app_data_mut::<KeymapStore>()
+                .ok_or_else(|| mlua::Error::runtime("keymap store not initialized"))?
+                .set_builtin(key, modifiers, action, Arc::clone(&plugin), desc)
+        }
+        other => {
+            return Err(mlua::Error::runtime(format!(
+                "rhs must be a function or a built-in action name (string), got {}",
+                other.type_name()
+            )));
+        }
+    };
+    if !dropped.is_empty() {
         tracing::warn!(key = %lhs, plugin = %plugin, "keymap shadowed by plugin");
-        let _ = lua.remove_registry_value(old_key);
+        for old_key in dropped {
+            let _ = lua.remove_registry_value(old_key);
+        }
     }
     publish_keymap_snapshot(lua);
     Ok(())
 }
 
 /// Remove the mapping for {lhs} in {mode}. Does nothing if no mapping
-/// exists for that key.
+/// exists for that key. Does not restore a default binding.
 ///
 /// @param mode string Mode letter (reserved for future modes).
 /// @param lhs string Key to unmap, in Vim notation.
@@ -319,6 +420,29 @@ fn del(lua: &Lua, #[ctx] plugin: Arc<str>, mode: String, lhs: String) -> LuaResu
     Ok(())
 }
 
+/// Disable a built-in UI action by name, regardless of which key it
+/// is currently bound to. Useful when another plugin has moved the
+/// binding and you want to disable it without tracking its current key.
+///
+/// @param mode string Mode letter (reserved for future modes).
+/// @param name string Built-in action name, e.g. `"FilePicker"`.
+/// @example
+/// maki.keymap.del_action("n", "FilePicker")
+#[lua_fn]
+fn del_action(lua: &Lua, mode: String, name: String) -> LuaResult<()> {
+    let _ = mode;
+    let action = BuiltinAction::parse(&name).map_err(mlua::Error::runtime)?;
+    let dropped = lua
+        .app_data_mut::<KeymapStore>()
+        .map(|mut store| store.del_action(action))
+        .unwrap_or_default();
+    for old_key in dropped {
+        let _ = lua.remove_registry_value(old_key);
+    }
+    publish_keymap_snapshot(lua);
+    Ok(())
+}
+
 lua_table! {
     /// Key mappings, modeled after `vim.keymap`. If you have written a
     /// Neovim keymap plugin before, this will feel familiar.
@@ -329,7 +453,7 @@ lua_table! {
     /// end, { desc = "Say hello" })
     /// ```
     "maki.keymap" => pub(crate) fn create_keymap_table(plugin: Arc<str>), DOCS [
-        set(plugin), del(plugin),
+        set(plugin), del(plugin), del_action,
     ]
 }
 
@@ -394,7 +518,7 @@ mod tests {
 
         let f1 = lua.create_function(|_, ()| Ok(())).unwrap();
         let k1 = lua.create_registry_value(f1).unwrap();
-        let (id1, old1) = store.set(
+        let (id1, old1) = store.set_lua(
             KeyCode::Char('t'),
             KeyModifiers::CONTROL,
             k1,
@@ -405,7 +529,7 @@ mod tests {
 
         let f2 = lua.create_function(|_, ()| Ok(())).unwrap();
         let k2 = lua.create_registry_value(f2).unwrap();
-        let (id2, old2) = store.set(
+        let (id2, old2) = store.set_lua(
             KeyCode::Char('t'),
             KeyModifiers::CONTROL,
             k2,
@@ -424,7 +548,7 @@ mod tests {
 
         let f = lua.create_function(|_, ()| Ok(())).unwrap();
         let k = lua.create_registry_value(f).unwrap();
-        store.set(
+        store.set_lua(
             KeyCode::Char('x'),
             KeyModifiers::ALT,
             k,
@@ -450,14 +574,14 @@ mod tests {
         let f2 = lua.create_function(|_, ()| Ok(())).unwrap();
         let k1 = lua.create_registry_value(f1).unwrap();
         let k2 = lua.create_registry_value(f2).unwrap();
-        store.set(
+        store.set_lua(
             KeyCode::Char('t'),
             KeyModifiers::CONTROL,
             k1,
             Arc::from("a"),
             String::new(),
         );
-        store.set(
+        store.set_lua(
             KeyCode::Char('x'),
             KeyModifiers::CONTROL,
             k2,
@@ -472,6 +596,126 @@ mod tests {
     }
 
     #[test]
+    fn set_builtin_moves_binding_no_duplicate_variant() {
+        let mut store = KeymapStore::new();
+        store.set_builtin(
+            KeyCode::Char('o'),
+            KeyModifiers::ALT,
+            BuiltinAction::EditInputInEditor,
+            Arc::from(BUILTIN_PLUGIN),
+            String::new(),
+        );
+        store.set_builtin(
+            KeyCode::Char('e'),
+            KeyModifiers::ALT,
+            BuiltinAction::EditInputInEditor,
+            Arc::from("user"),
+            String::new(),
+        );
+
+        let entries = store.snapshot_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, KeyCode::Char('e'));
+        assert_eq!(entries[0].handler, Handler::Builtin(BuiltinAction::EditInputInEditor));
+    }
+
+    #[test]
+    fn set_builtin_replaces_lua_at_same_key() {
+        let lua = Lua::new();
+        let mut store = KeymapStore::new();
+        let f = lua.create_function(|_, ()| Ok(())).unwrap();
+        let k = lua.create_registry_value(f).unwrap();
+        store.set_lua(
+            KeyCode::Char('e'),
+            KeyModifiers::ALT,
+            k,
+            Arc::from("user"),
+            String::new(),
+        );
+
+        let dropped = store.set_builtin(
+            KeyCode::Char('e'),
+            KeyModifiers::ALT,
+            BuiltinAction::OpenEditor,
+            Arc::from("user"),
+            String::new(),
+        );
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(store.bindings.len(), 1);
+        assert_eq!(
+            store.snapshot_entries()[0].handler,
+            Handler::Builtin(BuiltinAction::OpenEditor)
+        );
+    }
+
+    #[test]
+    fn set_lua_does_not_move_builtin_at_other_key() {
+        let lua = Lua::new();
+        let mut store = KeymapStore::new();
+        store.set_builtin(
+            KeyCode::Char('e'),
+            KeyModifiers::ALT,
+            BuiltinAction::EditInputInEditor,
+            Arc::from(BUILTIN_PLUGIN),
+            String::new(),
+        );
+        let f = lua.create_function(|_, ()| Ok(())).unwrap();
+        let k = lua.create_registry_value(f).unwrap();
+        store.set_lua(
+            KeyCode::Char('q'),
+            KeyModifiers::ALT,
+            k,
+            Arc::from("user"),
+            String::new(),
+        );
+
+        let entries = store.snapshot_entries();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|e| e.handler
+            == Handler::Builtin(BuiltinAction::EditInputInEditor)
+            && e.key == KeyCode::Char('e')));
+    }
+
+    #[test]
+    fn del_action_removes_builtin_at_any_key() {
+        let mut store = KeymapStore::new();
+        store.set_builtin(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+            BuiltinAction::FilePicker,
+            Arc::from(BUILTIN_PLUGIN),
+            String::new(),
+        );
+        store.set_builtin(
+            KeyCode::Char('y'),
+            KeyModifiers::ALT,
+            BuiltinAction::FilePicker,
+            Arc::from("user"),
+            String::new(),
+        );
+
+        let cleared = store.del_action(BuiltinAction::FilePicker);
+        assert!(cleared.is_empty());
+        assert!(store.bindings.is_empty());
+    }
+
+    #[test]
+    fn clear_plugin_skips_builtin_defaults() {
+        let mut store = KeymapStore::new();
+        store.set_builtin(
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+            BuiltinAction::FilePicker,
+            Arc::from(BUILTIN_PLUGIN),
+            String::new(),
+        );
+
+        let removed = store.clear_plugin(BUILTIN_PLUGIN);
+        assert!(removed.is_empty());
+        assert_eq!(store.bindings.len(), 1);
+    }
+
+    #[test]
     fn snapshot_reader_writer() {
         let (writer, reader) = KeymapWriter::new();
         assert!(reader.load().entries.is_empty());
@@ -481,7 +725,7 @@ mod tests {
             modifiers: KeyModifiers::CONTROL,
             desc: "test".into(),
             plugin: Arc::from("p"),
-            id: 1,
+            handler: Handler::Lua(1),
         }]);
 
         let snap = reader.load();

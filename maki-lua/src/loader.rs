@@ -765,13 +765,17 @@ mod tests {
         assert_eq!(snap.entries.len(), 1, "override published to snapshot");
         let entry = &snap.entries[0];
         assert_eq!(entry.desc, "test override");
+        let id = match entry.handler {
+            crate::api::keymap::Handler::Lua(id) => id,
+            _ => panic!("expected Lua handler"),
+        };
         assert!(
             host.command_reader().load().commands.is_empty(),
             "callback has not fired yet"
         );
 
         let handle = host.event_handle().expect("host is live");
-        handle.run_keybind_callback(entry.id);
+        handle.run_keybind_callback(id);
 
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {

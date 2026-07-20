@@ -56,7 +56,7 @@ pub fn api_docs() -> Vec<&'static ModuleDoc> {
         &api::agent::SESSION_DOCS,
         &api::r#async::DOCS,
         &api::r#async::SEMAPHORE_DOCS,
-        &api::r#async::PERMIT_DOCS,
+        &api::action::DOCS,
         &api::base64::DOCS,
         &api::env::DOCS,
         &api::r#fn::DOCS,

@@ -720,8 +720,9 @@ impl App {
         for entry in &snap.entries {
             if entry.key == key.code
                 && entry.modifiers == key.modifiers
+                && let maki_lua::Handler::Lua(id) = entry.handler
                 && let Some(ref handle) = self.lua_event_handle
-                && handle.run_keybind_callback(entry.id)
+                && handle.run_keybind_callback(id)
             {
                 return true;
             }
