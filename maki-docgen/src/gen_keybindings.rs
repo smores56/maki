@@ -39,7 +39,7 @@ fn label_str(kb: &Keybind) -> String {
             .map(|b| format!("`{}`", label_of(b)))
             .collect::<Vec<_>>()
             .join(ALT_SEP),
-        KeyLabel::MacAlt(_) => format!("`{}`", label_of(&kb.binds[0])),
+        KeyLabel::MacAlt(mac) => format!("`{}`{ALT_SEP}`{mac}`", label_of(&kb.binds[0])),
         KeyLabel::MacMulti(_) => kb
             .binds
             .iter()

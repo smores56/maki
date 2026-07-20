@@ -104,6 +104,7 @@ pub mod key {
     pub const SHIFT_FOUR: Bind = bind!(KeyCode::Char('4'), KeyModifiers::SHIFT);
     pub const ALT_BACKSPACE: Bind = bind!(KeyCode::Backspace, KeyModifiers::ALT);
     pub const ALT_DELETE: Bind = bind!(KeyCode::Delete, KeyModifiers::ALT);
+    pub const CTRL_DELETE: Bind = bind!(KeyCode::Delete, KeyModifiers::CONTROL);
     pub const ALT_LEFT: Bind = bind!(KeyCode::Left, KeyModifiers::ALT);
     pub const ALT_RIGHT: Bind = bind!(KeyCode::Right, KeyModifiers::ALT);
     pub const SHIFT_ENTER: Bind = bind!(KeyCode::Enter, KeyModifiers::SHIFT);
@@ -501,11 +502,11 @@ pub const KEYBINDS: &[Keybind] = &[
         binds: &[key::ALT_LEFT, key::ALT_RIGHT],
     },
     Keybind {
-        label: KeyLabel::Single,
+        label: KeyLabel::MacAlt("⌥Del"),
         description: "Delete word forward",
         context: KeybindContext::Editing,
         platform: Platform::MacOnly,
-        binds: &[key::ALT_DELETE],
+        binds: &[key::CTRL_DELETE, key::ALT_DELETE],
     },
     Keybind {
         label: KeyLabel::Single,

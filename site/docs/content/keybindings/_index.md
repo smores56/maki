@@ -30,7 +30,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Shift+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
 | `Tab` | Toggle mode |
 | `/command` | Open command palette |
-| `Ctrl+W` | Delete word backward |
+| `Ctrl+W` / `⌥⌫` | Delete word backward |
 | `Alt+←` / `Alt+→` | Move word left / right |
 | `Ctrl+A` | Jump to start of line |
 | `Home` / `End` | Jump to start/end of line |
@@ -46,7 +46,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 
 | Key | Action |
 |-----|--------|
-| `Alt+Del` | Delete word forward |
+| `Ctrl+Del` / `⌥Del` | Delete word forward |
 | `Ctrl+K` | Delete to end of line |
 
 ## While Streaming
