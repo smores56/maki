@@ -400,6 +400,36 @@ pub enum SessionRequest {
 
 pub type SessionReply = Result<serde_json::Value, String>;
 
+/// Names a built-in UI action that can be remapped from `init.lua`
+/// via `maki.keymap.set(mode, lhs, "<BuiltinAction>")` or fired
+/// fire-and-forget via `maki.action.run(name)`. Adding a variant is
+/// additive: missing names parse to an error at the Lua boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinAction {
+    EditInputInEditor,
+    FilePicker,
+    OpenEditor,
+}
+
+impl BuiltinAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            BuiltinAction::EditInputInEditor => "EditInputInEditor",
+            BuiltinAction::FilePicker => "FilePicker",
+            BuiltinAction::OpenEditor => "OpenEditor",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "EditInputInEditor" => Ok(BuiltinAction::EditInputInEditor),
+            "FilePicker" => Ok(BuiltinAction::FilePicker),
+            "OpenEditor" => Ok(BuiltinAction::OpenEditor),
+            other => Err(format!("unknown action: {other}")),
+        }
+    }
+}
+
 pub enum UiAction {
     OpenWin {
         buf: Arc<SharedBuf>,
@@ -416,6 +446,9 @@ pub enum UiAction {
     Session {
         req: SessionRequest,
         reply_tx: flume::Sender<SessionReply>,
+    },
+    InvokeBuiltin {
+        action: BuiltinAction,
     },
 }
 
@@ -621,5 +654,25 @@ mod tests {
         let snap = reader.load();
         assert_eq!(snap.entries.len(), 1);
         assert_eq!(snap.generation, 1);
+    }
+
+    const UNKNOWN_ACTION_NAME: &str = "Bogus";
+    const UNKNOWN_ACTION_ERR: &str = "unknown action: Bogus";
+
+    #[test_case(BuiltinAction::EditInputInEditor ; "edit_input_in_editor")]
+    #[test_case(BuiltinAction::FilePicker ; "file_picker")]
+    #[test_case(BuiltinAction::OpenEditor ; "open_editor")]
+    fn builtin_action_round_trips_through_its_label(action: BuiltinAction) {
+        let label = action.label();
+        let parsed = BuiltinAction::parse(label).expect("label should parse");
+        assert_eq!(parsed, action);
+    }
+
+    #[test]
+    fn builtin_action_parse_unknown_name_errors() {
+        assert_eq!(
+            BuiltinAction::parse(UNKNOWN_ACTION_NAME).unwrap_err(),
+            UNKNOWN_ACTION_ERR
+        );
     }
 }
