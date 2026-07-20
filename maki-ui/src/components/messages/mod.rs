@@ -16,7 +16,7 @@ use super::{
     DisplayMessage, DisplayRole, ToolRole, ToolStatus, apply_scroll_delta, code_view::SectionFlags,
 };
 use crate::animation::spinner_str;
-use crate::components::keybindings::key;
+use crate::components::keybindings::{format_key, key};
 use crate::markdown::{hr_line, plain_lines, text_to_lines, truncate_output};
 use crate::render_worker::RenderWorker;
 use crate::selection::Selection;
@@ -1278,7 +1278,7 @@ impl MessagesPanel {
                     lines.push(Line::from(Span::styled(
                         format!(
                             "{} to open in editor ($VISUAL / $EDITOR)",
-                            key::OPEN_EDITOR.label
+                            format_key(key::OPEN_EDITOR.code, key::OPEN_EDITOR.modifiers)
                         ),
                         theme::current().tool_dim,
                     )));

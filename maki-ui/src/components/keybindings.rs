@@ -3,235 +3,27 @@ use std::fmt::Write;
 use strum::EnumIter;
 use unicode_width::UnicodeWidthStr;
 
-macro_rules! upper {
-    ('a') => {
-        "A"
-    };
-    ('b') => {
-        "B"
-    };
-    ('c') => {
-        "C"
-    };
-    ('d') => {
-        "D"
-    };
-    ('e') => {
-        "E"
-    };
-    ('f') => {
-        "F"
-    };
-    ('g') => {
-        "G"
-    };
-    ('h') => {
-        "H"
-    };
-    ('i') => {
-        "I"
-    };
-    ('j') => {
-        "J"
-    };
-    ('k') => {
-        "K"
-    };
-    ('l') => {
-        "L"
-    };
-    ('m') => {
-        "M"
-    };
-    ('n') => {
-        "N"
-    };
-    ('o') => {
-        "O"
-    };
-    ('p') => {
-        "P"
-    };
-    ('q') => {
-        "Q"
-    };
-    ('r') => {
-        "R"
-    };
-    ('s') => {
-        "S"
-    };
-    ('t') => {
-        "T"
-    };
-    ('u') => {
-        "U"
-    };
-    ('v') => {
-        "V"
-    };
-    ('w') => {
-        "W"
-    };
-    ('x') => {
-        "X"
-    };
-    ('y') => {
-        "Y"
-    };
-    ('z') => {
-        "Z"
-    };
-}
-
 macro_rules! ctrl_bind {
     ($char:tt) => {
         Bind {
             code: KeyCode::Char($char),
             modifiers: KeyModifiers::CONTROL,
-            label: char_label!($char, CONTROL),
         }
     };
 }
 
-/// Maps a `(KeyCode, KeyModifiers)` pair to a display label at compile time.
-/// Mirrors `format_key` in `help_modal.rs` so `Bind` declarations stop
-/// hand-syncing the label against their code and modifiers.
 macro_rules! bind {
     (KeyCode::Char($c:tt), KeyModifiers :: $mods:ident) => {
         Bind {
             code: KeyCode::Char($c),
             modifiers: KeyModifiers::$mods,
-            label: char_label!($c, $mods),
         }
     };
     (KeyCode::$key:ident, KeyModifiers :: $mods:ident) => {
         Bind {
             code: KeyCode::$key,
             modifiers: KeyModifiers::$mods,
-            label: named_label!($key, $mods),
         }
-    };
-}
-
-macro_rules! char_label {
-    // Shift+digit → US keyboard shifted symbol (matches `shift_symbol`).
-    ('1', SHIFT) => {
-        "!"
-    };
-    ('2', SHIFT) => {
-        "@"
-    };
-    ('3', SHIFT) => {
-        "#"
-    };
-    ('4', SHIFT) => {
-        "$"
-    };
-    ('5', SHIFT) => {
-        "%"
-    };
-    ('6', SHIFT) => {
-        "^"
-    };
-    ('7', SHIFT) => {
-        "&"
-    };
-    ('8', SHIFT) => {
-        "*"
-    };
-    ('9', SHIFT) => {
-        "("
-    };
-    ('0', SHIFT) => {
-        ")"
-    };
-    // Shift+letter → uppercase letter (no modifier prefix).
-    ($c:tt, SHIFT) => {
-        upper!($c)
-    };
-    // Char with no modifiers: char-as-string. We enumerate the small set used
-    // since macro_rules can't stringify a char literal inline.
-    ('/', NONE) => {
-        "/"
-    };
-    ('1', NONE) => {
-        "1"
-    };
-    ('2', NONE) => {
-        "2"
-    };
-    ('3', NONE) => {
-        "3"
-    };
-    ('4', NONE) => {
-        "4"
-    };
-    ($c:tt, CONTROL) => {
-        concat!("Ctrl+", upper!($c))
-    };
-    ($c:tt, ALT) => {
-        concat!("Alt+", upper!($c))
-    };
-}
-
-macro_rules! named_label {
-    (Backspace, NONE) => {
-        "Bs"
-    };
-    (Backspace, ALT) => {
-        "Alt+Bs"
-    };
-    (Delete, NONE) => {
-        "Del"
-    };
-    (Delete, ALT) => {
-        "Alt+Del"
-    };
-    (Left, NONE) => {
-        "←"
-    };
-    (Left, ALT) => {
-        "Alt+←"
-    };
-    (Right, NONE) => {
-        "→"
-    };
-    (Right, ALT) => {
-        "Alt+→"
-    };
-    (Up, NONE) => {
-        "↑"
-    };
-    (Down, NONE) => {
-        "↓"
-    };
-    (Enter, NONE) => {
-        "Enter"
-    };
-    (Enter, SHIFT) => {
-        "Shift+Enter"
-    };
-    (Enter, ALT) => {
-        "Alt+Enter"
-    };
-    (Tab, NONE) => {
-        "Tab"
-    };
-    (Esc, NONE) => {
-        "Esc"
-    };
-    (Home, NONE) => {
-        "Home"
-    };
-    (End, NONE) => {
-        "End"
-    };
-    (PageUp, NONE) => {
-        "PageUp"
-    };
-    (PageDown, NONE) => {
-        "PageDown"
     };
 }
 
@@ -239,7 +31,6 @@ macro_rules! named_label {
 pub struct Bind {
     pub code: KeyCode,
     pub modifiers: KeyModifiers,
-    pub label: &'static str,
 }
 
 impl Bind {
@@ -305,8 +96,8 @@ pub mod key {
     pub const THREE: Bind = bind!(KeyCode::Char('3'), KeyModifiers::NONE);
     pub const FOUR: Bind = bind!(KeyCode::Char('4'), KeyModifiers::NONE);
     /// Tier shortcuts: kitty-protocol reports Shift+digit as the base digit + SHIFT.
-    /// Legacy terminals deliver the shifted symbol directly. The label derives
-    /// from `char_label!` and matches `format_key`'s shift+digit translation.
+    /// Legacy terminals deliver the shifted symbol directly. `format_key`
+    /// translates Shift+digit to the US keyboard shifted symbol.
     pub const SHIFT_ONE: Bind = bind!(KeyCode::Char('1'), KeyModifiers::SHIFT);
     pub const SHIFT_TWO: Bind = bind!(KeyCode::Char('2'), KeyModifiers::SHIFT);
     pub const SHIFT_THREE: Bind = bind!(KeyCode::Char('3'), KeyModifiers::SHIFT);
@@ -390,15 +181,15 @@ impl Platform {
 
 #[derive(Debug, Clone, Copy)]
 pub enum KeyLabel {
-    /// `binds[0].label`.
+    /// `format_key(binds[0])`.
     Single,
-    /// `binds[0].label / binds[1].label`.
+    /// `format_key(binds[0]) / format_key(binds[1])`.
     Alt,
-    /// `binds[*].label` joined.
+    /// `format_key(binds[*])` joined.
     Multi,
-    /// Mac: `binds[0].label / mac`. Non-mac: `binds[0].label`.
+    /// Mac: `format_key(binds[0]) / mac`. Non-mac: `format_key(binds[0])`.
     MacAlt(&'static str),
-    /// Mac: `mac`. Non-mac: `binds[*].label`.
+    /// Mac: `mac`. Non-mac: `format_key(binds[*])`.
     MacMulti(&'static [&'static str]),
     /// Explicit label, no single-bind correspondence (e.g. "/command", "Esc Esc").
     Display(&'static str),
@@ -406,63 +197,27 @@ pub enum KeyLabel {
 
 pub const ALT_SEP: &str = " / ";
 
-/// Dual source for the multi-key case. Mac glyphs come from a static slice
-/// when they diverge from the underlying bind labels; non-mac derives labels
-/// straight from `binds`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MultiKeys<'a> {
-    Static(&'static [&'static str]),
-    Binds(&'a [Bind]),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedLabel {
+    Single(String),
+    Alt(String, String),
+    Multi(Vec<String>),
 }
 
-impl<'a> MultiKeys<'a> {
-    pub fn len(self) -> usize {
+impl ResolvedLabel {
+    pub fn display_width(&self) -> usize {
         match self {
-            Self::Static(s) => s.len(),
-            Self::Binds(b) => b.len(),
-        }
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn width_sum(self) -> usize {
-        match self {
-            Self::Static(s) => s.iter().map(|k| UnicodeWidthStr::width(*k)).sum::<usize>(),
-            Self::Binds(b) => b
-                .iter()
-                .map(|x| UnicodeWidthStr::width(x.label))
-                .sum::<usize>(),
-        }
-    }
-
-    pub fn for_each<F: FnMut(usize, &'static str)>(self, mut f: F) {
-        match self {
-            Self::Static(s) => s.iter().copied().enumerate().for_each(|(i, k)| f(i, k)),
-            Self::Binds(b) => b.iter().enumerate().for_each(|(i, x)| f(i, x.label)),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolvedLabel<'a> {
-    Single(&'static str),
-    Alt(&'static str, &'static str),
-    Multi(MultiKeys<'a>),
-}
-
-impl ResolvedLabel<'_> {
-    pub fn display_width(self) -> usize {
-        match self {
-            Self::Single(s) => UnicodeWidthStr::width(s),
+            Self::Single(s) => UnicodeWidthStr::width(s.as_str()),
             Self::Alt(a, b) => {
                 let sep_w = UnicodeWidthStr::width(ALT_SEP);
-                UnicodeWidthStr::width(a) + sep_w + UnicodeWidthStr::width(b)
+                UnicodeWidthStr::width(a.as_str()) + sep_w + UnicodeWidthStr::width(b.as_str())
             }
             Self::Multi(keys) => {
                 let sep_w = UnicodeWidthStr::width(ALT_SEP);
-                keys.width_sum() + sep_w * keys.len().saturating_sub(1)
+                keys.iter()
+                    .map(|k| UnicodeWidthStr::width(k.as_str()))
+                    .sum::<usize>()
+                    + sep_w * keys.len().saturating_sub(1)
             }
         }
     }
@@ -471,7 +226,7 @@ impl ResolvedLabel<'_> {
     /// a row's `binds` to the binds that are actually visible on this platform:
     /// `MacAlt` shows two on mac, one elsewhere; the trailing bind must not
     /// match an override the row does not display.
-    pub fn visible_count(self) -> usize {
+    pub fn visible_count(&self) -> usize {
         match self {
             Self::Single(_) => 1,
             Self::Alt(_, _) => 2,
@@ -488,54 +243,121 @@ pub struct Keybind {
     /// Concrete single-key binds this row represents. Used to match live
     /// overrides for display in the help modal. Empty for rows that are not
     /// a single keystroke (e.g. "Type" to filter). Alias rows list every key.
-    /// Also the source of display labels for `Single`, `Alt`, and the non-mac
-    /// side of `MacAlt` / `MacMulti`.
     pub binds: &'static [Bind],
 }
 
 impl Keybind {
-    pub fn resolved_label(&self) -> ResolvedLabel<'_> {
+    pub fn resolved_label(&self) -> ResolvedLabel {
+        let label_of = |b: &Bind| format_key(b.code, b.modifiers);
         match self.label {
-            KeyLabel::Single => ResolvedLabel::Single(self.binds[0].label),
-            KeyLabel::Alt => ResolvedLabel::Alt(self.binds[0].label, self.binds[1].label),
-            KeyLabel::Multi => ResolvedLabel::Multi(MultiKeys::Binds(self.binds)),
+            KeyLabel::Single => ResolvedLabel::Single(label_of(&self.binds[0])),
+            KeyLabel::Alt => ResolvedLabel::Alt(label_of(&self.binds[0]), label_of(&self.binds[1])),
+            KeyLabel::Multi => ResolvedLabel::Multi(self.binds.iter().map(label_of).collect()),
             KeyLabel::MacAlt(mac) => {
                 if cfg!(target_os = "macos") {
-                    ResolvedLabel::Alt(self.binds[0].label, mac)
+                    ResolvedLabel::Alt(label_of(&self.binds[0]), mac.to_string())
                 } else {
-                    ResolvedLabel::Single(self.binds[0].label)
+                    ResolvedLabel::Single(label_of(&self.binds[0]))
                 }
             }
             KeyLabel::MacMulti(mac) => {
                 if cfg!(target_os = "macos") {
-                    ResolvedLabel::Multi(MultiKeys::Static(mac))
+                    ResolvedLabel::Multi(mac.iter().map(|s| s.to_string()).collect())
                 } else {
-                    ResolvedLabel::Multi(MultiKeys::Binds(self.binds))
+                    ResolvedLabel::Multi(self.binds.iter().map(label_of).collect())
                 }
             }
-            KeyLabel::Display(s) => ResolvedLabel::Single(s),
+            KeyLabel::Display(s) => ResolvedLabel::Single(s.to_string()),
         }
     }
 
     #[cfg(test)]
     fn flat_label_str(&self) -> String {
         match self.resolved_label() {
-            ResolvedLabel::Single(s) => s.to_string(),
+            ResolvedLabel::Single(s) => s,
             ResolvedLabel::Alt(a, b) => format!("{a}/{b}"),
-            ResolvedLabel::Multi(keys) => {
-                let mut out = String::new();
-                let mut first = true;
-                keys.for_each(|_, k| {
-                    if !first {
-                        out.push('/');
-                    }
-                    out.push_str(k);
-                    first = false;
-                });
-                out
-            }
+            ResolvedLabel::Multi(keys) => keys.join("/"),
         }
     }
+}
+
+/// Single source of truth for displaying a key combination. Used by the help
+/// modal for both built-in `Bind`s and plugin-set `KeymapEntry`s, so the two
+/// paths can never drift. Allocates per call; cheap relative to render.
+pub fn format_key(code: KeyCode, modifiers: KeyModifiers) -> String {
+    let is_char = matches!(code, KeyCode::Char(_));
+    let mut s = String::new();
+    let mut want_shift = modifiers.contains(KeyModifiers::SHIFT) && !is_char;
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        s.push_str("Ctrl+");
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        s.push_str("Alt+");
+    }
+    if matches!(code, KeyCode::BackTab) {
+        want_shift = true;
+    }
+    if want_shift {
+        s.push_str("Shift+");
+    }
+    match code {
+        KeyCode::Char(' ') => s.push_str("Space"),
+        KeyCode::Char(c) => {
+            if modifiers.contains(KeyModifiers::SHIFT) {
+                if let Some(shifted) = shift_symbol(c) {
+                    s.push(shifted);
+                } else {
+                    s.push(c.to_ascii_uppercase());
+                }
+            } else {
+                s.push(c.to_ascii_uppercase());
+            }
+        }
+        KeyCode::Enter => s.push_str("Enter"),
+        KeyCode::Esc => s.push_str("Esc"),
+        KeyCode::Tab => s.push_str("Tab"),
+        KeyCode::Backspace => s.push_str("Bs"),
+        KeyCode::Delete => s.push_str("Del"),
+        KeyCode::Up => s.push('↑'),
+        KeyCode::Down => s.push('↓'),
+        KeyCode::Left => s.push('←'),
+        KeyCode::Right => s.push('→'),
+        KeyCode::Home => s.push_str("Home"),
+        KeyCode::End => s.push_str("End"),
+        KeyCode::PageUp => s.push_str("PageUp"),
+        KeyCode::PageDown => s.push_str("PageDown"),
+        KeyCode::Insert => s.push_str("Insert"),
+        KeyCode::F(n) => write!(s, "F{n}").unwrap(),
+        KeyCode::Null => s.push_str("Null"),
+        KeyCode::CapsLock => s.push_str("CapsLock"),
+        KeyCode::ScrollLock => s.push_str("ScrollLock"),
+        KeyCode::NumLock => s.push_str("NumLock"),
+        KeyCode::PrintScreen => s.push_str("PrintScreen"),
+        KeyCode::Pause => s.push_str("Pause"),
+        KeyCode::Menu => s.push_str("Menu"),
+        KeyCode::KeypadBegin => s.push_str("Keypad"),
+        KeyCode::Media(_) => s.push_str("Media"),
+        KeyCode::Modifier(_) => s.push_str("Modifier"),
+        KeyCode::BackTab => s.push_str("Tab"),
+    }
+    s
+}
+
+/// US keyboard Shift+digit → shifted symbol.
+fn shift_symbol(c: char) -> Option<char> {
+    Some(match c {
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        _ => return None,
+    })
 }
 
 pub const KEYBINDS: &[Keybind] = &[
@@ -944,10 +766,11 @@ mod tests {
             .iter()
             .find(|kb| matches!(kb.label, KeyLabel::Single))
             .unwrap();
-        match kb.resolved_label() {
-            ResolvedLabel::Single(s) => assert_eq!(s, kb.binds[0].label),
-            other => panic!("expected Single, got {other:?}"),
-        }
+        let b = kb.binds[0];
+        let ResolvedLabel::Single(s) = kb.resolved_label() else {
+            panic!("expected Single");
+        };
+        assert_eq!(s, format_key(b.code, b.modifiers));
     }
 
     #[test]
@@ -956,13 +779,13 @@ mod tests {
             .iter()
             .find(|kb| matches!(kb.label, KeyLabel::Alt))
             .unwrap();
-        match kb.resolved_label() {
-            ResolvedLabel::Alt(a, b) => {
-                assert_eq!(a, kb.binds[0].label);
-                assert_eq!(b, kb.binds[1].label);
-            }
-            other => panic!("expected Alt, got {other:?}"),
-        }
+        let a = kb.binds[0];
+        let b = kb.binds[1];
+        let ResolvedLabel::Alt(la, lb) = kb.resolved_label() else {
+            panic!("expected Alt");
+        };
+        assert_eq!(la, format_key(a.code, a.modifiers));
+        assert_eq!(lb, format_key(b.code, b.modifiers));
     }
 
     #[test]
@@ -986,12 +809,15 @@ mod tests {
             .iter()
             .find(|kb| matches!(kb.label, KeyLabel::MacMulti(_)))
             .unwrap();
-        let mut labels: Vec<&'static str> = Vec::new();
-        if let ResolvedLabel::Multi(keys) = kb.resolved_label() {
-            keys.for_each(|_, k| labels.push(k));
-        }
-        let binds: Vec<&'static str> = kb.binds.iter().map(|b| b.label).collect();
-        assert_eq!(labels, binds);
+        let ResolvedLabel::Multi(keys) = kb.resolved_label() else {
+            panic!("expected Multi");
+        };
+        let binds: Vec<String> = kb
+            .binds
+            .iter()
+            .map(|b| format_key(b.code, b.modifiers))
+            .collect();
+        assert_eq!(keys, binds);
     }
 
     #[test]
@@ -1000,13 +826,25 @@ mod tests {
             .iter()
             .find(|kb| matches!(kb.label, KeyLabel::Multi))
             .unwrap();
-        let mut labels: Vec<&'static str> = Vec::new();
-        if let ResolvedLabel::Multi(keys) = kb.resolved_label() {
-            keys.for_each(|_, k| labels.push(k));
-        }
-        let binds: Vec<&'static str> = kb.binds.iter().map(|b| b.label).collect();
-        assert_eq!(labels, binds);
+        let ResolvedLabel::Multi(keys) = kb.resolved_label() else {
+            panic!("expected Multi");
+        };
         // The tier-shortcut row must display the shifted symbols, not the digits.
-        assert_eq!(labels, vec!["!", "@", "#", "$"]);
+        assert_eq!(keys, vec!["!", "@", "#", "$"]);
+    }
+
+    #[test_case(KeyCode::F(7), KeyModifiers::NONE, "F7" ; "f_key_bare")]
+    #[test_case(KeyCode::Char('c'), KeyModifiers::CONTROL, "Ctrl+C" ; "ctrl_char")]
+    #[test_case(KeyCode::Char(' '), KeyModifiers::NONE, "Space" ; "space")]
+    #[test_case(KeyCode::BackTab, KeyModifiers::NONE, "Shift+Tab" ; "backtab_adds_shift")]
+    #[test_case(KeyCode::Tab, KeyModifiers::SHIFT, "Shift+Tab" ; "shift_tab")]
+    #[test_case(KeyCode::F(1), KeyModifiers::CONTROL | KeyModifiers::SHIFT, "Ctrl+Shift+F1" ; "ctrl_shift_f")]
+    #[test_case(KeyCode::Char('1'), KeyModifiers::SHIFT, "!" ; "shift_one_becomes_bang")]
+    #[test_case(KeyCode::Char('2'), KeyModifiers::SHIFT, "@" ; "shift_two_becomes_at")]
+    #[test_case(KeyCode::Char('3'), KeyModifiers::SHIFT, "#" ; "shift_three_becomes_hash")]
+    #[test_case(KeyCode::Char('4'), KeyModifiers::SHIFT, "$" ; "shift_four_becomes_dollar")]
+    #[test_case(KeyCode::Char('a'), KeyModifiers::SHIFT, "A" ; "shift_letter_uppercases")]
+    fn format_key_cases(code: KeyCode, mods: KeyModifiers, expected: &str) {
+        assert_eq!(format_key(code, mods), expected);
     }
 }

@@ -1,5 +1,5 @@
 use maki_ui::keybindings::{
-    ALT_SEP, KEYBINDS, KeyLabel, Keybind, KeybindContext, Platform, all_contexts,
+    ALT_SEP, KEYBINDS, KeyLabel, Keybind, KeybindContext, Platform, all_contexts, format_key,
 };
 
 const FRONTMATTER: &str = "\
@@ -25,20 +25,25 @@ const MAIN_CONTEXTS: &[KeybindContext] = &[
 ];
 
 fn label_str(kb: &Keybind) -> String {
+    let label_of = |b: &maki_ui::keybindings::Bind| format_key(b.code, b.modifiers);
     match kb.label {
-        KeyLabel::Single => format!("`{}`", kb.binds[0].label),
-        KeyLabel::Alt => format!("`{}`{ALT_SEP}`{}`", kb.binds[0].label, kb.binds[1].label),
+        KeyLabel::Single => format!("`{}`", label_of(&kb.binds[0])),
+        KeyLabel::Alt => format!(
+            "`{}`{ALT_SEP}`{}`",
+            label_of(&kb.binds[0]),
+            label_of(&kb.binds[1])
+        ),
         KeyLabel::Multi => kb
             .binds
             .iter()
-            .map(|b| format!("`{}`", b.label))
+            .map(|b| format!("`{}`", label_of(b)))
             .collect::<Vec<_>>()
             .join(ALT_SEP),
-        KeyLabel::MacAlt(_) => format!("`{}`", kb.binds[0].label),
+        KeyLabel::MacAlt(_) => format!("`{}`", label_of(&kb.binds[0])),
         KeyLabel::MacMulti(_) => kb
             .binds
             .iter()
-            .map(|b| format!("`{}`", b.label))
+            .map(|b| format!("`{}`", label_of(b)))
             .collect::<Vec<_>>()
             .join(ALT_SEP),
         KeyLabel::Display(s) => format!("`{s}`"),

@@ -1,20 +1,19 @@
 use crate::components::ModalScroll;
 use crate::components::Overlay;
 use crate::components::keybindings::{
-    ALT_SEP, Bind, KEYBINDS, Keybind, KeybindContext, MultiKeys, ResolvedLabel, all_contexts, key,
+    ALT_SEP, Bind, KEYBINDS, Keybind, KeybindContext, ResolvedLabel, all_contexts, format_key, key,
 };
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
 use crate::theme;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent};
 use maki_lua::KeymapEntry;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::borrow::Cow;
-use std::fmt::Write;
 use unicode_width::UnicodeWidthStr;
 
 const TITLE: &str = " Keybindings ";
@@ -38,11 +37,11 @@ pub struct HelpModal {
     scroll: ModalScroll,
 }
 
-fn key_spans(label: ResolvedLabel<'_>, pad: usize, prefix: &str) -> Vec<Span<'static>> {
+fn key_spans(label: ResolvedLabel, pad: usize, prefix: &str) -> Vec<Span<'static>> {
     let theme = theme::current();
     match label {
         ResolvedLabel::Single(s) => {
-            let w = UnicodeWidthStr::width(s);
+            let w = UnicodeWidthStr::width(s.as_str());
             let trailing = pad.saturating_sub(w);
             vec![Span::styled(
                 format!("{prefix}{s}{:trailing$}", ""),
@@ -50,12 +49,12 @@ fn key_spans(label: ResolvedLabel<'_>, pad: usize, prefix: &str) -> Vec<Span<'st
             )]
         }
         ResolvedLabel::Alt(a, b) => multi_key_spans(&[a, b], pad, prefix, &theme),
-        ResolvedLabel::Multi(keys) => multi_key_spans_keys(keys, pad, prefix, &theme),
+        ResolvedLabel::Multi(keys) => multi_key_spans(&keys, pad, prefix, &theme),
     }
 }
 
 fn multi_key_spans(
-    keys: &[&'static str],
+    keys: &[String],
     pad: usize,
     prefix: &str,
     theme: &crate::theme::Theme,
@@ -63,7 +62,7 @@ fn multi_key_spans(
     let sep_w = UnicodeWidthStr::width(ALT_SEP);
     let content_w: usize = keys
         .iter()
-        .map(|k| UnicodeWidthStr::width(*k))
+        .map(|k| UnicodeWidthStr::width(k.as_str()))
         .sum::<usize>()
         + sep_w * keys.len().saturating_sub(1);
     let trailing = pad.saturating_sub(content_w);
@@ -79,22 +78,11 @@ fn multi_key_spans(
         } else if i == keys.len() - 1 {
             format!("{k}{:trailing$}", "")
         } else {
-            (*k).to_string()
+            k.clone()
         };
         spans.push(Span::styled(text, theme.keybind_key));
     }
     spans
-}
-
-fn multi_key_spans_keys(
-    keys: MultiKeys<'_>,
-    pad: usize,
-    prefix: &str,
-    theme: &crate::theme::Theme,
-) -> Vec<Span<'static>> {
-    let mut labels: Vec<&'static str> = Vec::with_capacity(keys.len());
-    keys.for_each(|_, k| labels.push(k));
-    multi_key_spans(&labels, pad, prefix, theme)
 }
 
 /// Returns the slice of `binds` that the row actually displays on this
@@ -160,84 +148,6 @@ fn is_format_char(c: char) -> bool {
         | '\u{2066}'..='\u{2069}' // bidi isolate
         | '\u{FEFF}' // zero-width no-break space
     )
-}
-
-/// US keyboard Shift+digit → shifted symbol. Used for auto-translation when
-/// kitty protocol reports Shift+digit as `Char(digit) + SHIFT`. Legacy
-/// terminals deliver the shifted symbol directly with no modifier.
-fn shift_symbol(c: char) -> Option<char> {
-    Some(match c {
-        '1' => '!',
-        '2' => '@',
-        '3' => '#',
-        '4' => '$',
-        '5' => '%',
-        '6' => '^',
-        '7' => '&',
-        '8' => '*',
-        '9' => '(',
-        '0' => ')',
-        _ => return None,
-    })
-}
-
-fn format_key(code: KeyCode, modifiers: KeyModifiers) -> String {
-    let is_char = matches!(code, KeyCode::Char(_));
-    let mut s = String::new();
-    let mut want_shift = modifiers.contains(KeyModifiers::SHIFT) && !is_char;
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        s.push_str("Ctrl+");
-    }
-    if modifiers.contains(KeyModifiers::ALT) {
-        s.push_str("Alt+");
-    }
-    if matches!(code, KeyCode::BackTab) {
-        want_shift = true;
-    }
-    if want_shift {
-        s.push_str("Shift+");
-    }
-    match code {
-        KeyCode::Char(' ') => s.push_str("Space"),
-        KeyCode::Char(c) => {
-            if modifiers.contains(KeyModifiers::SHIFT) {
-                if let Some(shifted) = shift_symbol(c) {
-                    s.push(shifted);
-                } else {
-                    s.push(c.to_ascii_uppercase());
-                }
-            } else {
-                s.push(c.to_ascii_uppercase());
-            }
-        }
-        KeyCode::Enter => s.push_str("Enter"),
-        KeyCode::Esc => s.push_str("Esc"),
-        KeyCode::Tab => s.push_str("Tab"),
-        KeyCode::Backspace => s.push_str("Bs"),
-        KeyCode::Delete => s.push_str("Del"),
-        KeyCode::Up => s.push('↑'),
-        KeyCode::Down => s.push('↓'),
-        KeyCode::Left => s.push('←'),
-        KeyCode::Right => s.push('→'),
-        KeyCode::Home => s.push_str("Home"),
-        KeyCode::End => s.push_str("End"),
-        KeyCode::PageUp => s.push_str("PageUp"),
-        KeyCode::PageDown => s.push_str("PageDown"),
-        KeyCode::Insert => s.push_str("Insert"),
-        KeyCode::F(n) => write!(s, "F{n}").unwrap(),
-        KeyCode::Null => s.push_str("Null"),
-        KeyCode::CapsLock => s.push_str("CapsLock"),
-        KeyCode::ScrollLock => s.push_str("ScrollLock"),
-        KeyCode::NumLock => s.push_str("NumLock"),
-        KeyCode::PrintScreen => s.push_str("PrintScreen"),
-        KeyCode::Pause => s.push_str("Pause"),
-        KeyCode::Menu => s.push_str("Menu"),
-        KeyCode::KeypadBegin => s.push_str("Keypad"),
-        KeyCode::Media(_) => s.push_str("Media"),
-        KeyCode::Modifier(_) => s.push_str("Modifier"),
-        KeyCode::BackTab => s.push_str("Tab"),
-    }
-    s
 }
 
 impl HelpModal {
@@ -361,7 +271,7 @@ impl HelpModal {
                 )));
                 for &(pfx, desc) in INPUT_PREFIXES {
                     let mut spans = key_spans(
-                        ResolvedLabel::Single(pfx),
+                        ResolvedLabel::Single(pfx.to_string()),
                         key_col_width - KEY_COL_GAP,
                         PREFIX_CHILD,
                     );
@@ -435,6 +345,7 @@ mod tests {
     use super::*;
     use crate::components::key as key_ev;
     use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
     use test_case::test_case;
 
     #[test_case(key_ev(KeyCode::Esc)       ; "esc_closes")]

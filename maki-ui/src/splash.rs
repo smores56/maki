@@ -1,4 +1,4 @@
-use crate::components::keybindings::key;
+use crate::components::keybindings::{Bind, format_key, key};
 use crate::theme::{self, lerp_u8};
 use crate::update;
 use ratatui::buffer::Buffer;
@@ -8,25 +8,40 @@ use std::time::Instant;
 
 const LOGO: &str = "maki";
 const TAGLINE: &str = "the efficient coder";
-const HELP_SEGMENTS: &[(&str, bool)] = &[
-    (key::HELP.label, true),
-    (" help", false),
-    (" · ", false),
-    ("/help", true),
-    (" in chat", false),
-];
-
-const TIPS: &[(&str, &str)] = &[
-    (
-        key::FILE_PICKER.label,
-        "to grab file paths with fuzzy search",
-    ),
-    (key::TASKS.label, "to see what your subagents are up to"),
-    (key::SEARCH.label, "to find things in the conversation"),
-    ("/btw", "to ask something without interrupting the session"),
-    ("/memory", "to view, edit, and delete persistent notes"),
-    ("/cd", "to switch to a different directory"),
-];
+fn help_segments() -> Vec<(String, bool)> {
+    fn key_str(b: Bind) -> String {
+        format_key(b.code, b.modifiers)
+    }
+    vec![
+        (key_str(key::HELP), true),
+        (" help".to_string(), false),
+        (" · ".to_string(), false),
+        ("/help".to_string(), true),
+        (" in chat".to_string(), false),
+    ]
+}
+fn tips() -> Vec<(String, &'static str)> {
+    fn key_str(b: Bind) -> String {
+        format_key(b.code, b.modifiers)
+    }
+    vec![
+        (
+            key_str(key::FILE_PICKER),
+            "to grab file paths with fuzzy search",
+        ),
+        (key_str(key::TASKS), "to see what your subagents are up to"),
+        (key_str(key::SEARCH), "to find things in the conversation"),
+        (
+            "/btw".to_string(),
+            "to ask something without interrupting the session",
+        ),
+        (
+            "/memory".to_string(),
+            "to view, edit, and delete persistent notes",
+        ),
+        ("/cd".to_string(), "to switch to a different directory"),
+    ]
+}
 
 const COLOR_TRANSITION_SECS: f32 = 0.4;
 
@@ -131,7 +146,7 @@ impl Splash {
     pub fn new(animate: bool) -> Self {
         let mut rng = [0u8; 8];
         getrandom::fill(&mut rng).ok();
-        let tip_idx = u32::from_le_bytes([rng[4], rng[5], rng[6], rng[7]]) as usize % TIPS.len();
+        let tip_idx = u32::from_le_bytes([rng[4], rng[5], rng[6], rng[7]]) as usize % tips().len();
         Self {
             start: Instant::now(),
             field_offset: (u64::from_le_bytes(rng) % 10_000) as f32,
@@ -351,14 +366,15 @@ impl Splash {
         let fg = extract_rgb(theme.foreground, (200, 200, 200));
         let bg_rgb = extract_rgb(bg, (15, 15, 25));
 
-        let total_width: u16 = HELP_SEGMENTS.iter().map(|(s, _)| s.len() as u16).sum();
+        let help_segs = help_segments();
+        let total_width: u16 = help_segs.iter().map(|(s, _)| s.len() as u16).sum();
         let x_start = area.x + area.width.saturating_sub(total_width) / 2;
 
-        let segments: Vec<_> = HELP_SEGMENTS
+        let segments: Vec<_> = help_segs
             .iter()
-            .map(|&(text, highlighted)| {
-                let (target, alpha) = if highlighted { (ac, 0.75) } else { (fg, 0.5) };
-                (text, faded_style(bg_rgb, target, alpha * fade, bg))
+            .map(|(text, highlighted)| {
+                let (target, alpha) = if *highlighted { (ac, 0.75) } else { (fg, 0.5) };
+                (text.as_str(), faded_style(bg_rgb, target, alpha * fade, bg))
             })
             .collect();
 
@@ -380,7 +396,7 @@ impl Splash {
         let fg = extract_rgb(theme.foreground, (200, 200, 200));
         let bg_rgb = extract_rgb(bg, (15, 15, 25));
 
-        let (label, desc) = TIPS[self.tip_idx];
+        let (label, desc) = &tips()[self.tip_idx];
         let total_width = (5 + label.len() + 1 + desc.len()) as u16;
         let x_start = area.x + area.width.saturating_sub(total_width) / 2;
 
@@ -389,7 +405,7 @@ impl Splash {
                 "tip: ",
                 faded_style(bg_rgb, tip_rgb, 0.75 * fade, bg).add_modifier(Modifier::BOLD),
             ),
-            (label, faded_style(bg_rgb, ac, 0.75 * fade, bg)),
+            (label.as_str(), faded_style(bg_rgb, ac, 0.75 * fade, bg)),
             (" ", Style::default()),
             (desc, faded_style(bg_rgb, fg, 0.5 * fade, bg)),
         ];

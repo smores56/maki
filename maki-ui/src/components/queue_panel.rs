@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::components::keybindings::key;
+use crate::components::keybindings::{format_key, key};
 use crate::theme;
 
 use ratatui::Frame;
@@ -37,14 +37,32 @@ pub fn view(frame: &mut Frame, area: Rect, entries: &[QueueEntry], focus: Option
         .map(|(i, entry)| {
             let flat = entry.text.replace('\n', " ");
             let (style, hint_parts) = if focus == Some(i) {
-                (theme::current().queue_delete, ("", FOCUSED_HINT, ""))
+                (
+                    theme::current().queue_delete,
+                    (
+                        Cow::Borrowed(""),
+                        Cow::Borrowed(FOCUSED_HINT),
+                        Cow::Borrowed(""),
+                    ),
+                )
             } else if i == 0 {
                 (
                     Style::new().fg(entry.color),
-                    (" - ", key::POP_QUEUE.label, " to delete"),
+                    (
+                        Cow::Borrowed(" - "),
+                        Cow::Owned(format_key(key::POP_QUEUE.code, key::POP_QUEUE.modifiers)),
+                        Cow::Borrowed(" to delete"),
+                    ),
                 )
             } else {
-                (Style::new().fg(entry.color), ("", "", ""))
+                (
+                    Style::new().fg(entry.color),
+                    (
+                        Cow::Borrowed(""),
+                        Cow::Owned(String::new()),
+                        Cow::Borrowed(""),
+                    ),
+                )
             };
             truncate_line(&flat, content_width, style, hint_parts)
         })
@@ -72,7 +90,7 @@ fn truncate_line(
     text: &str,
     max_width: usize,
     style: Style,
-    hint: (&'static str, &'static str, &'static str),
+    hint: (Cow<'static, str>, Cow<'static, str>, Cow<'static, str>),
 ) -> Line<'static> {
     let hint_style = theme::current().tool_dim;
     let hint_len = hint.0.len() + hint.1.len() + hint.2.len();
@@ -111,8 +129,13 @@ mod tests {
         assert_eq!(height(3), 5);
     }
 
-    const HINT: (&str, &str, &str) = (" - hint", "", "");
-    const NO_HINT: (&str, &str, &str) = ("", "", "");
+    const HINT: (Cow<'static, str>, Cow<'static, str>, Cow<'static, str>) = (
+        Cow::Borrowed(" - hint"),
+        Cow::Borrowed(""),
+        Cow::Borrowed(""),
+    );
+    const NO_HINT: (Cow<'static, str>, Cow<'static, str>, Cow<'static, str>) =
+        (Cow::Borrowed(""), Cow::Borrowed(""), Cow::Borrowed(""));
     fn style() -> Style {
         Style::new().fg(theme::current().foreground)
     }
@@ -137,7 +160,7 @@ mod tests {
     fn truncate_line_cases(
         input: &str,
         width: usize,
-        hint: (&'static str, &'static str, &'static str),
+        hint: (Cow<'static, str>, Cow<'static, str>, Cow<'static, str>),
         expected: &[&str],
     ) {
         assert_eq!(

@@ -1,6 +1,6 @@
 use crate::components::form::{render_form, selected_prefix};
 use crate::components::hint_line;
-use crate::components::keybindings::key;
+use crate::components::keybindings::{format_key, key};
 use crate::theme;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -16,13 +16,16 @@ const DISMISS_KEYS: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl+T/Esc"
 };
-const HINT_PAIRS: &[(&str, &str)] = &[
-    ("↑↓", "select"),
-    ("Space", "toggle parallel"),
-    ("Enter", "confirm"),
-    (key::OPEN_EDITOR.label, "edit plan"),
-    (DISMISS_KEYS, "dismiss"),
-];
+fn hint_pairs() -> Vec<(String, &'static str)> {
+    let open_editor = format_key(key::OPEN_EDITOR.code, key::OPEN_EDITOR.modifiers);
+    vec![
+        ("↑↓".to_string(), "select"),
+        ("Space".to_string(), "toggle parallel"),
+        ("Enter".to_string(), "confirm"),
+        (open_editor, "edit plan"),
+        (DISMISS_KEYS.to_string(), "dismiss"),
+    ]
+}
 
 struct MenuItem {
     label: &'static str,
@@ -130,7 +133,10 @@ impl PlanForm {
         let t = theme::current();
         Some(Line::from(vec![
             Span::styled(" Plan ", Style::new().fg(t.foreground)),
-            Span::styled(key::PLAN_TOGGLE.label, t.keybind_key),
+            Span::styled(
+                format_key(key::PLAN_TOGGLE.code, key::PLAN_TOGGLE.modifiers),
+                t.keybind_key,
+            ),
             Span::raw(" "),
         ]))
     }
@@ -189,7 +195,7 @@ impl PlanForm {
             lines.push(Line::from(spans));
         }
         lines.push(Line::default());
-        lines.push(hint_line(HINT_PAIRS));
+        lines.push(hint_line(&hint_pairs()));
 
         render_form(&t, FORM_LABEL, frame, area, lines, (0, 0));
     }
