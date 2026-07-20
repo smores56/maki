@@ -99,11 +99,20 @@ fn full_resolve(slug: &'static str, env_var: &'static str) -> Result<KeyPool, Ag
 pub struct OAuthAuthSource {
     cfg: &'static OAuthConfig,
     dir: maki_storage::StateDir,
+    /// Serializes concurrent refresh attempts on the same provider. Without it,
+    /// two simultaneous 401s both load the same refresh token; if the issuer
+    /// rotates refresh tokens, the loser's request fails (invalid_grant) and
+    /// would wipe the winner's freshly-saved tokens.
+    refresh_lock: smol::lock::Mutex<()>,
 }
 
 impl OAuthAuthSource {
     pub fn new(cfg: &'static OAuthConfig, dir: maki_storage::StateDir) -> Self {
-        Self { cfg, dir }
+        Self {
+            cfg,
+            dir,
+            refresh_lock: smol::lock::Mutex::new(()),
+        }
     }
 }
 
@@ -126,6 +135,9 @@ impl AuthSource for OAuthAuthSource {
         auth: &'a Arc<Mutex<ResolvedAuth>>,
     ) -> crate::provider::BoxFuture<'a, Result<(), AgentError>> {
         Box::pin(async move {
+            // Single-flight: a concurrent 401 waits here while the first
+            // caller refreshes, then re-loads whatever the first saved.
+            let _guard = self.refresh_lock.lock().await;
             let cfg = self.cfg;
             let dir = self.dir.clone();
             let resolved = smol::unblock(move || -> Result<ResolvedAuth, AgentError> {
@@ -142,8 +154,16 @@ impl AuthSource for OAuthAuthSource {
                         Ok(crate::providers::oauth::build_resolved(cfg, &fresh))
                     }
                     Err(e) => {
-                        tracing::warn!(provider = cfg.provider, error = %e, "OAuth refresh failed, clearing stale tokens");
-                        let _ = maki_storage::auth::delete_tokens(&dir, cfg.provider);
+                        // Only wipe stored tokens when the refresh token is
+                        // confirmed revoked (invalid_grant / 401). Transient
+                        // 5xx or network failures keep the file so the next
+                        // request can retry instead of forcing re-login.
+                        if e.is_auth_error() {
+                            tracing::warn!(provider = cfg.provider, error = %e, "OAuth refresh token revoked, clearing stored tokens");
+                            let _ = maki_storage::auth::delete_tokens(&dir, cfg.provider);
+                        } else {
+                            tracing::warn!(provider = cfg.provider, error = %e, "OAuth refresh failed (transient), keeping stored tokens");
+                        }
                         Err(e)
                     }
                 }

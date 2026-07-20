@@ -40,7 +40,7 @@ impl ExternalProvider {
             AuthKind::Env => build_env(manifest.slug, timeouts)?,
             AuthKind::OAuth => build_oauth(manifest.slug, timeouts)?,
         };
-        Ok(Some(Box::new(provider)))
+        Ok(provider.map(|p| Box::new(p) as Box<dyn Provider>))
     }
 
     fn engine_sync(&self) -> Result<&dyn Provider, AgentError> {
@@ -62,7 +62,7 @@ impl ExternalProvider {
     }
 }
 
-fn build_env(slug: &'static str, timeouts: Timeouts) -> Result<ExternalProvider, AgentError> {
+fn build_env(slug: &'static str, timeouts: Timeouts) -> Result<Option<ExternalProvider>, AgentError> {
     let auth_source: Box<dyn AuthSource> = match slug {
         "anthropic" => Box::new(EnvAuthSource::new(
             "anthropic",
@@ -87,7 +87,7 @@ fn build_env(slug: &'static str, timeouts: Timeouts) -> Result<ExternalProvider,
         "zai" => Box::new(EnvAuthSource::new(
             "zai",
             zai::CONFIG_STANDARD.api_key_env,
-            ResolvedAuth::bearer,
+            zai_bearer,
         )),
         "synthetic" => Box::new(EnvAuthSource::new(
             "synthetic",
@@ -105,13 +105,9 @@ fn build_env(slug: &'static str, timeouts: Timeouts) -> Result<ExternalProvider,
             ResolvedAuth::bearer,
             env_only,
         )),
-        other => {
-            return Err(AgentError::Config {
-                message: format!("no env auth source registered for '{other}'"),
-            });
-        }
+        _ => return Ok(None),
     };
-    Ok(ExternalProvider {
+    Ok(Some(ExternalProvider {
         slug,
         auth: Arc::new(Mutex::new(ResolvedAuth {
             base_url: None,
@@ -120,16 +116,16 @@ fn build_env(slug: &'static str, timeouts: Timeouts) -> Result<ExternalProvider,
         auth_source,
         engine: OnceLock::new(),
         timeouts,
-    })
+    }))
 }
 
-fn build_oauth(slug: &'static str, timeouts: Timeouts) -> Result<ExternalProvider, AgentError> {
-    let cfg = oauth_config(slug).ok_or_else(|| AgentError::Config {
-        message: format!("no OAuth config registered for '{slug}'"),
-    })?;
+fn build_oauth(slug: &'static str, timeouts: Timeouts) -> Result<Option<ExternalProvider>, AgentError> {
+    let Some(cfg) = oauth_config(slug) else {
+        return Ok(None);
+    };
     let dir = StateDir::resolve()?;
     let auth_source: Box<dyn AuthSource> = Box::new(OAuthAuthSource::new(cfg, dir));
-    Ok(ExternalProvider {
+    Ok(Some(ExternalProvider {
         slug,
         auth: Arc::new(Mutex::new(ResolvedAuth {
             base_url: None,
@@ -138,11 +134,20 @@ fn build_oauth(slug: &'static str, timeouts: Timeouts) -> Result<ExternalProvide
         auth_source,
         engine: OnceLock::new(),
         timeouts,
-    })
+    }))
 }
 
 fn env_only(_slug: &'static str, env_var: &'static str) -> Result<KeyPool, AgentError> {
     KeyPool::from_env(env_var)
+}
+
+fn zai_bearer(api_key: &str) -> ResolvedAuth {
+    let mut auth = ResolvedAuth::bearer(api_key);
+    let config = maki_config::providers::ProvidersConfig::load();
+    if let Some(url) = maki_config::providers::resolve_base_url("zai", config.get("zai")) {
+        auth.base_url = Some(url);
+    }
+    auth
 }
 
 fn build_engine(
@@ -216,14 +221,28 @@ impl Provider for ExternalProvider {
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
         Box::pin(async move {
             let engine = self.engine_sync()?;
-            engine.list_models().await
+            let result = engine.list_models().await;
+            if matches!(&result, Err(e) if e.is_auth_error()) && self.auth_source.is_oauth() {
+                if self.auth_source.refresh(&self.auth).await.is_ok() {
+                    return engine.list_models().await;
+                }
+                warn!(slug = self.slug, "auth refresh failed, surfacing original error");
+            }
+            result
         })
     }
 
     fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
         Box::pin(async move {
             let engine = self.engine_sync()?;
-            engine.fetch_usage().await
+            let result = engine.fetch_usage().await;
+            if matches!(&result, Err(e) if e.is_auth_error()) && self.auth_source.is_oauth() {
+                if self.auth_source.refresh(&self.auth).await.is_ok() {
+                    return engine.fetch_usage().await;
+                }
+                warn!(slug = self.slug, "auth refresh failed, surfacing original error");
+            }
+            result
         })
     }
 
@@ -242,6 +261,76 @@ impl Provider for ExternalProvider {
     fn adjust_model(&self, model: &mut Model) {
         if let Ok(engine) = self.engine_sync() {
             engine.adjust_model(model);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ENVELOPED_ENV_SLUGS: &[&str] = &[
+        "anthropic",
+        "google",
+        "mistral",
+        "deepseek",
+        "zai",
+        "synthetic",
+        "tensorx",
+        "openrouter",
+    ];
+
+    fn timeouts() -> Timeouts {
+        Timeouts::default()
+    }
+
+    #[test]
+    fn try_for_slug_env_builtins_return_some() {
+        for slug in ENVELOPED_ENV_SLUGS {
+            assert!(
+                ExternalProvider::try_for_slug(slug, timeouts())
+                    .unwrap()
+                    .is_some(),
+                "{slug} should route through ExternalProvider envelope"
+            );
+        }
+    }
+
+    #[test]
+    fn try_for_slug_openai_oauth_returns_some() {
+        let provided = ExternalProvider::try_for_slug("openai", timeouts()).unwrap();
+        assert!(provided.is_some(), "openai should route through envelope");
+    }
+
+    #[test]
+    fn try_for_slug_manifest_builtins_without_envelope_arm_return_none() {
+        // Regression for A1: these built-ins have manifests but no envelope arm,
+        // so they must return Ok(None) to fall through to ProviderKind::create.
+        for slug in ["copilot", "ollama", "llama-cpp", "opencode"] {
+            assert!(
+                ExternalProvider::try_for_slug(slug, timeouts())
+                    .unwrap()
+                    .is_none(),
+                "{slug} must return Ok(None) so provider_for_slug falls through to ProviderKind::create"
+            );
+        }
+    }
+
+    #[test]
+    fn try_for_slug_unknown_returns_none() {
+        assert!(ExternalProvider::try_for_slug("not-a-provider", timeouts())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn try_for_slug_returns_ok_for_every_builtin_manifest() {
+        for manifest in ManifestRegistry::builtins() {
+            assert!(
+                ExternalProvider::try_for_slug(manifest.slug, timeouts()).is_ok(),
+                "{} must not error during routing (Ok(None) or Ok(Some))",
+                manifest.slug
+            );
         }
     }
 }

@@ -15,6 +15,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_SAFETY_MARGIN: Duration = Duration::from_secs(3);
 const TOKEN_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_TIMEOUT: Duration = Duration::from_secs(300);
+/// Upper bound on the device-polling interval the auth server may request.
+/// Without it a hostile/buggy `interval` could stall the login thread past
+/// `POLL_TIMEOUT`, since `thread::sleep` runs before the deadline check.
+const MAX_POLL_INTERVAL_SECS: u64 = 60;
+/// Cap on server-controlled response text echoed into error messages / logs.
+/// Provider 5xx bodies can be HTML pages; without a cap they bloat logs and the
+/// user-facing error surface unboundedly.
+const MAX_ERROR_BODY: usize = 500;
+
+/// Header name OpenAI's OAuth sets from the JWT-derived account id. OAuth-only
+/// routing decisions on `OpenAi` key off this header's presence, and the value
+/// comes from `OAuthConfig.account_id_header_name` so a future OAuth provider
+/// with a different (or no) account-id header stays self-consistent.
+pub(crate) const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 
 #[derive(Debug, Clone, Copy)]
 pub struct OAuthEndpoints {
@@ -51,7 +65,7 @@ pub const OPENAI_OAUTH: OAuthConfig = OAuthConfig {
     header_name: "authorization",
     header_value_format: "Bearer {access}",
     account_id_from_jwt: true,
-    account_id_header_name: Some("chatgpt-account-id"),
+    account_id_header_name: Some(ACCOUNT_ID_HEADER),
 };
 
 pub fn oauth_config(slug: &str) -> Option<&'static OAuthConfig> {
@@ -91,6 +105,46 @@ fn http_client(timeout: Duration) -> Result<isahc::HttpClient, AgentError> {
         .map_err(|e| AgentError::Config {
             message: format!("http client: {e}"),
         })
+}
+
+/// Truncate server-controlled response text before it flows into error
+/// messages and logs. Char-based to stay panic-free on UTF-8 boundaries.
+fn body_excerpt(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_ERROR_BODY {
+        return trimmed.to_string();
+    }
+    let head: String = trimmed.chars().take(MAX_ERROR_BODY).collect();
+    format!("{head}...[truncated]")
+}
+
+/// OAuth endpoints return `{"error":"invalid_grant",...}` when a refresh
+/// token is genuinely revoked. Distinguish that (caller deletes stored
+/// tokens to force re-login) from transient 5xx/network failures (caller
+/// keeps the token file and the retry path tries again).
+fn is_invalid_grant(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+        .is_some_and(|e| e == "invalid_grant")
+}
+
+/// `invalid_grant` (or 400/401 from the token endpoint) means the refresh
+/// token is revoked: surface as an auth error so the caller can wipe stored
+/// tokens. Other failures are transient and stay `Config` so the caller leaves
+/// the token file in place for the next retry.
+fn refresh_failure(cfg: &OAuthConfig, status: u16, body: String) -> AgentError {
+    let excerpt = body_excerpt(&body);
+    if status == 400 || status == 401 || is_invalid_grant(&body) {
+        AgentError::Api {
+            status: 401,
+            message: format!("{} refresh token revoked: {excerpt}", cfg.provider),
+        }
+    } else {
+        AgentError::Config {
+            message: format!("{} token refresh failed ({status}): {excerpt}", cfg.provider),
+        }
+    }
 }
 
 fn extract_account_id(token: &str) -> Option<String> {
@@ -152,7 +206,7 @@ fn request_device_code(cfg: &OAuthConfig) -> Result<DeviceCodeResponse, AgentErr
     if resp.status().as_u16() != 200 {
         let body_text = resp.text().unwrap_or_else(|_| "unknown error".into());
         return Err(AgentError::Config {
-            message: format!("device code request failed: {body_text}"),
+            message: format!("device code request failed: {}", body_excerpt(&body_text)),
         });
     }
 
@@ -164,9 +218,22 @@ fn poll_device_token(cfg: &OAuthConfig) -> Result<DeviceTokenResponse, AgentErro
     let client = http_client(POLL_TIMEOUT)?;
     let device = request_device_code(cfg)?;
     println!("Open this URL in your browser:\n\n  {}\n", cfg.endpoints.device_auth_url);
+    if !device
+        .user_code
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(AgentError::Config {
+            message: "device authorization returned an unexpected user code format".into(),
+        });
+    }
     println!("Enter code: {}\n", device.user_code);
     println!("Waiting for authorization...");
-    let interval_secs = device.interval.parse::<u64>().unwrap_or(5).max(1);
+    let interval_secs = device
+        .interval
+        .parse::<u64>()
+        .unwrap_or(5)
+        .clamp(1, MAX_POLL_INTERVAL_SECS);
     let poll_interval = Duration::from_secs(interval_secs) + POLL_SAFETY_MARGIN;
     let deadline = std::time::Instant::now() + POLL_TIMEOUT;
 
@@ -204,7 +271,10 @@ fn poll_device_token(cfg: &OAuthConfig) -> Result<DeviceTokenResponse, AgentErro
         if status != 403 && status != 404 {
             let body_text = resp.text().unwrap_or_else(|_| "unknown error".into());
             return Err(AgentError::Config {
-                message: format!("device token poll failed ({status}): {body_text}"),
+                message: format!(
+                    "device token poll failed ({status}): {}",
+                    body_excerpt(&body_text)
+                ),
             });
         }
     }
@@ -241,7 +311,7 @@ fn exchange_device_token(
     if resp.status().as_u16() != 200 {
         let body_text = resp.text().unwrap_or_else(|_| "unknown error".into());
         return Err(AgentError::Config {
-            message: format!("token exchange failed: {body_text}"),
+            message: format!("token exchange failed: {}", body_excerpt(&body_text)),
         });
     }
 
@@ -283,9 +353,7 @@ pub fn refresh_tokens(cfg: &OAuthConfig, tokens: &OAuthTokens) -> Result<OAuthTo
 
     if resp.status().as_u16() != 200 {
         let body_text = resp.text().unwrap_or_else(|_| "unknown error".into());
-        return Err(AgentError::Config {
-            message: format!("{} token refresh failed: {body_text}", cfg.provider),
-        });
+        return Err(refresh_failure(cfg, resp.status().as_u16(), body_text));
     }
 
     let body_text = resp.text()?;
@@ -382,6 +450,7 @@ pub fn logout(cfg: &OAuthConfig, dir: &StateDir) -> Result<(), AgentError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_case::test_case;
 
     #[test]
     fn extract_account_id_from_jwt() {
@@ -410,5 +479,46 @@ mod tests {
     fn oauth_config_lookup_unknown_returns_none() {
         assert!(oauth_config("anthropic").is_none());
         assert!(oauth_config("copilot").is_none());
+    }
+
+    #[test_case(400, r#"{"error":"invalid_grant"}"#, true  ; "invalid_grant_body")]
+    #[test_case(401, "unauthorized",            true  ; "401_status")]
+    #[test_case(500, "server error",            false ; "5xx_transient")]
+    #[test_case(429, "slow down",               false ; "429_transient")]
+    fn refresh_failure_classifies_revocation(status: u16, body: &str, expected_auth: bool) {
+        let err = refresh_failure(&OPENAI_OAUTH, status, body.into());
+        assert_eq!(err.is_auth_error(), expected_auth);
+    }
+
+    #[test_case("short body", "short body" ; "under_limit_passthrough")]
+    #[test_case("", "" ; "empty")]
+    fn body_excerpt_short_input_passes_through(input: &str, expected: &str) {
+        assert_eq!(body_excerpt(input), expected);
+    }
+
+    #[test]
+    fn body_excerpt_truncates_long_input() {
+        let long = "x".repeat(MAX_ERROR_BODY * 3);
+        let out = body_excerpt(&long);
+        assert!(out.ends_with("...[truncated]"));
+        assert!(out.chars().count() < long.chars().count());
+    }
+
+    #[test_case(r#"{"error":"invalid_grant"}"#, true  ; "invalid_grant")]
+    #[test_case(r#"{"error":"expired_token"}"#, false ; "other_oauth_error")]
+    #[test_case("not json",                   false ; "non_json")]
+    #[test_case(r#"{}"#,                       false ; "no_error_field")]
+    fn is_invalid_grant_detects_revocation(body: &str, expected: bool) {
+        assert_eq!(is_invalid_grant(body), expected);
+    }
+
+    #[test]
+    fn interval_clamped_to_max() {
+        assert_eq!(5u64.clamp(1, MAX_POLL_INTERVAL_SECS), 5);
+        assert_eq!(1u64.clamp(1, MAX_POLL_INTERVAL_SECS), 1);
+        assert_eq!(
+            u64::MAX.clamp(1, MAX_POLL_INTERVAL_SECS),
+            MAX_POLL_INTERVAL_SECS
+        );
     }
 }

@@ -9,6 +9,7 @@ use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, dialect};
 
 use crate::providers::ResolvedAuth;
+use crate::providers::oauth::ACCOUNT_ID_HEADER;
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 
 static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
@@ -99,7 +100,7 @@ impl OpenAi {
             .unwrap()
             .headers
             .iter()
-            .any(|(name, _)| name == "chatgpt-account-id")
+            .any(|(name, _)| name == ACCOUNT_ID_HEADER)
     }
 
     fn codex_auth(&self) -> ResolvedAuth {
@@ -219,7 +220,7 @@ mod tests {
     #[test]
     fn is_oauth_true_when_account_id_header_present() {
         let mut headers = vec![("authorization".into(), "Bearer tok".into())];
-        headers.push(("chatgpt-account-id".into(), "acct_123".into()));
+        headers.push((ACCOUNT_ID_HEADER.into(), "acct_123".into()));
         let provider = make_openai(ResolvedAuth {
             base_url: None,
             headers,
@@ -230,7 +231,7 @@ mod tests {
     #[test]
     fn codex_auth_uses_coding_plan_base_url_when_oauth() {
         let mut headers = vec![("authorization".into(), "Bearer tok".into())];
-        headers.push(("chatgpt-account-id".into(), "acct_123".into()));
+        headers.push((ACCOUNT_ID_HEADER.into(), "acct_123".into()));
         let provider = make_openai(ResolvedAuth {
             base_url: None,
             headers,
@@ -240,7 +241,7 @@ mod tests {
         assert!(auth
             .headers
             .iter()
-            .any(|(name, value)| name == "chatgpt-account-id" && value == "acct_123"));
+            .any(|(name, value)| name == ACCOUNT_ID_HEADER && value == "acct_123"));
     }
 
     #[test]
@@ -253,7 +254,7 @@ mod tests {
     #[test]
     fn adjust_model_caps_context_window_for_codex_when_oauth() {
         let mut headers = vec![("authorization".into(), "Bearer tok".into())];
-        headers.push(("chatgpt-account-id".into(), "acct_123".into()));
+        headers.push((ACCOUNT_ID_HEADER.into(), "acct_123".into()));
         let provider = make_openai(ResolvedAuth {
             base_url: None,
             headers,
@@ -276,7 +277,7 @@ mod tests {
     #[test]
     fn list_models_returns_codex_only_when_oauth() {
         let mut headers = vec![("authorization".into(), "Bearer tok".into())];
-        headers.push(("chatgpt-account-id".into(), "acct_123".into()));
+        headers.push((ACCOUNT_ID_HEADER.into(), "acct_123".into()));
         let provider = make_openai(ResolvedAuth {
             base_url: None,
             headers,
