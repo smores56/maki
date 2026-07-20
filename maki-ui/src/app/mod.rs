@@ -57,7 +57,9 @@ use maki_agent::{
     SubagentInfo, ToolOutput,
 };
 use maki_config::UiConfig;
-use maki_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader};
+use maki_lua::{
+    BuiltinAction, EventHandle, HintReader, KeymapReader, LuaCommandReader,
+};
 use maki_providers::{Message, Model, ThinkingConfig};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
@@ -1556,6 +1558,33 @@ impl App {
 
 fn is_streaming_stop_key(key: KeyEvent) -> bool {
     key::QUIT.matches(key) || key.code == KeyCode::Esc
+}
+
+/// Run a built-in UI action against `app`. Mixed contract (callers and
+/// tests must not assume uniform behavior):
+/// - `EditInputInEditor` and `OpenEditor` return an `Action` variant so the
+///   event loop owns the terminal when launching the external editor.
+/// - `FilePicker` mutates `app` directly (the picker lives on `App`, no
+///   terminal involvement) and returns an empty `Vec`.
+///
+/// Call site matters: this runs after the `is_main_chat()` gate, so the
+/// caller is responsible for ensuring context. `OpenEditor` re-checks the
+/// plan path and flashes `FLASH_NO_PLAN` if missing.
+pub(crate) fn dispatch_builtin(action: BuiltinAction, app: &mut App) -> Vec<Action> {
+    match action {
+        BuiltinAction::EditInputInEditor => vec![Action::EditInputInEditor],
+        BuiltinAction::OpenEditor => match app.state.plan.path() {
+            Some(p) => vec![Action::OpenEditor(p.to_path_buf())],
+            None => {
+                app.flash(FLASH_NO_PLAN.into());
+                Vec::new()
+            }
+        },
+        BuiltinAction::FilePicker => {
+            app.file_picker.open(&app.state.session.cwd);
+            Vec::new()
+        }
+    }
 }
 
 fn sync_search_highlight(modal: &SearchModal, chat: &mut Chat) {

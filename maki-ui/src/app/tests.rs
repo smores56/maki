@@ -2413,7 +2413,7 @@ fn override_shadows_builtin_ctrl_when_no_overlay_open() {
         modifiers: kb::HELP.modifiers,
         desc: "plugin help override".into(),
         plugin: std::sync::Arc::from("test-plugin"),
-        id: 1,
+        handler: maki_lua::Handler::Lua(1),
     };
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
@@ -2438,7 +2438,7 @@ fn override_shadows_quit_builtin() {
         modifiers: kb::QUIT.modifiers,
         desc: "plugin quit override".into(),
         plugin: std::sync::Arc::from("test-plugin"),
-        id: 3,
+        handler: maki_lua::Handler::Lua(3),
     };
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
@@ -2464,7 +2464,7 @@ fn override_shadows_tab_mode_toggle() {
         modifiers: KeyModifiers::NONE,
         desc: "plugin tab override".into(),
         plugin: std::sync::Arc::from("test-plugin"),
-        id: 4,
+        handler: maki_lua::Handler::Lua(4),
     };
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
@@ -2489,7 +2489,7 @@ fn override_shadows_esc_builtin() {
         modifiers: KeyModifiers::NONE,
         desc: "plugin esc override".into(),
         plugin: std::sync::Arc::from("test-plugin"),
-        id: 5,
+        handler: maki_lua::Handler::Lua(5),
     };
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
@@ -2514,7 +2514,7 @@ fn override_does_not_shadow_suspend() {
         modifiers: kb::SUSPEND.modifiers,
         desc: "plugin suspend override".into(),
         plugin: std::sync::Arc::from("test-plugin"),
-        id: 6,
+        handler: maki_lua::Handler::Lua(6),
     };
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
@@ -2545,7 +2545,7 @@ fn overlay_wins_over_override_when_plan_form_open() {
         modifiers: kb::PLAN_TOGGLE.modifiers,
         desc: "plugin plan override".into(),
         plugin: std::sync::Arc::from("test-plugin"),
-        id: 2,
+        handler: maki_lua::Handler::Lua(2),
     };
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = plan_app();
@@ -2565,7 +2565,7 @@ fn streaming_cancel_wins_over_quit_override() {
         modifiers: kb::QUIT.modifiers,
         desc: "plugin quit override".into(),
         plugin: std::sync::Arc::from("test-plugin"),
-        id: 7,
+        handler: maki_lua::Handler::Lua(7),
     };
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
@@ -2592,7 +2592,7 @@ fn dead_host_override_falls_back_to_builtin() {
         modifiers: kb::HELP.modifiers,
         desc: "plugin help override".into(),
         plugin: std::sync::Arc::from("test-plugin"),
-        id: 8,
+        handler: maki_lua::Handler::Lua(8),
     };
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
@@ -2615,7 +2615,7 @@ fn streaming_cancel_wins_over_esc_override() {
         modifiers: KeyModifiers::NONE,
         desc: "plugin esc override".into(),
         plugin: std::sync::Arc::from("test-plugin"),
-        id: 9,
+        handler: maki_lua::Handler::Lua(9),
     };
     let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();

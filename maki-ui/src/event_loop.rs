@@ -569,6 +569,10 @@ impl<'t> EventLoop<'t> {
             UiAction::Session { req, reply_tx } => {
                 self.handle_session_request(req, reply_tx);
             }
+            UiAction::InvokeBuiltin { action } => {
+                let actions = crate::app::dispatch_builtin(action, self.focused_app());
+                self.dispatch(self.focused, actions);
+            }
         }
     }
 
