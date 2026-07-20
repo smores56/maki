@@ -12,20 +12,12 @@ use maki_storage::id::SessionRef;
 
 use crate::model::{Model, ModelFamily, ModelInfo};
 use crate::providers::Timeouts;
-use crate::providers::anthropic::Anthropic;
-use crate::providers::anthropic::bedrock;
+use crate::providers::anthropic::bedrock::{self, Bedrock};
 use crate::providers::copilot::Copilot;
-use crate::providers::deepseek::DeepSeek;
 use crate::providers::dynamic;
-use crate::providers::google::Google;
 use crate::providers::local::{LLAMACPP, LocalEndpoint, OLLAMA};
-use crate::providers::mistral::Mistral;
 use crate::providers::openai::OpenAi;
 use crate::providers::opencode::Opencode;
-use crate::providers::openrouter::OpenRouter;
-use crate::providers::synthetic::Synthetic;
-use crate::providers::tensorx::TensorX;
-use crate::providers::zai::Zai;
 use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter)]
@@ -197,25 +189,18 @@ impl ProviderKind {
 
     pub fn create(self, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
         match self {
-            Self::Anthropic => {
-                if bedrock::is_enabled() {
-                    Ok(Box::new(bedrock::Bedrock::new(timeouts)?))
-                } else {
-                    Ok(Box::new(Anthropic::new(timeouts)?))
-                }
-            }
             Self::OpenAi => Ok(Box::new(OpenAi::new(timeouts)?)),
-            Self::Google => Ok(Box::new(Google::new(timeouts)?)),
             Self::Copilot => Ok(Box::new(Copilot::new(timeouts)?)),
             Self::Ollama => Ok(Box::new(LocalEndpoint::new(&OLLAMA, timeouts)?)),
             Self::LlamaCpp => Ok(Box::new(LocalEndpoint::new(&LLAMACPP, timeouts)?)),
-            Self::Mistral => Ok(Box::new(Mistral::new(timeouts)?)),
-            Self::Zai => Ok(Box::new(Zai::new(timeouts)?)),
-            Self::DeepSeek => Ok(Box::new(DeepSeek::new(timeouts)?)),
-            Self::OpenRouter => Ok(Box::new(OpenRouter::new(timeouts)?)),
-            Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
-            Self::TensorX => Ok(Box::new(TensorX::new(timeouts)?)),
             Self::Opencode => Ok(Box::new(Opencode::new(timeouts)?)),
+            other => Err(AgentError::Config {
+                message: format!(
+                    "provider '{}' is routed through ExternalProvider in provider_for_slug, \
+                     not via ProviderKind::create",
+                    other
+                ),
+            }),
         }
     }
 }
@@ -259,6 +244,12 @@ pub trait Provider: Send + Sync {
 }
 
 pub fn provider_for_slug(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
+    if slug == "anthropic" && bedrock::is_enabled() {
+        return Ok(Box::new(Bedrock::new(timeouts)?));
+    }
+    if let Some(provider) = crate::external::ExternalProvider::try_for_slug(slug, timeouts)? {
+        return Ok(provider);
+    }
     if let Ok(kind) = ProviderKind::from_str(slug) {
         return kind.create(timeouts);
     }

@@ -4,6 +4,12 @@ use crate::providers::{
     openrouter, synthetic, tensorx, zai,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthKind {
+    Env,
+    OAuth,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderManifest {
     pub slug: &'static str,
@@ -14,6 +20,8 @@ pub struct ProviderManifest {
     pub fallback_max_output: Option<u32>,
     pub fallback_context_window: u32,
     pub models: &'static [ModelEntry],
+    pub auth_kind: AuthKind,
+    pub system_prefix: Option<&'static str>,
 }
 
 const ANTHROPIC: ProviderManifest = ProviderManifest {
@@ -25,6 +33,8 @@ const ANTHROPIC: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(128_000),
     fallback_context_window: 200_000,
     models: anthropic::models(),
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const OPENAI: ProviderManifest = ProviderManifest {
@@ -36,6 +46,8 @@ const OPENAI: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(100_000),
     fallback_context_window: 200_000,
     models: openai::models(),
+    auth_kind: AuthKind::OAuth,
+    system_prefix: None,
 };
 
 const GOOGLE: ProviderManifest = ProviderManifest {
@@ -47,6 +59,8 @@ const GOOGLE: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(65_536),
     fallback_context_window: 1_000_000,
     models: google::models(),
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const COPILOT: ProviderManifest = ProviderManifest {
@@ -58,6 +72,8 @@ const COPILOT: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(100_000),
     fallback_context_window: 200_000,
     models: copilot::models(),
+    auth_kind: AuthKind::OAuth,
+    system_prefix: None,
 };
 
 const OLLAMA: ProviderManifest = ProviderManifest {
@@ -69,6 +85,8 @@ const OLLAMA: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(16_384),
     fallback_context_window: 128_000,
     models: ollama::models(),
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const LLAMA_CPP: ProviderManifest = ProviderManifest {
@@ -80,6 +98,8 @@ const LLAMA_CPP: ProviderManifest = ProviderManifest {
     fallback_max_output: None,
     fallback_context_window: 128_000,
     models: llama_cpp::models(),
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const MISTRAL: ProviderManifest = ProviderManifest {
@@ -91,6 +111,8 @@ const MISTRAL: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(32_000),
     fallback_context_window: 128_000,
     models: mistral::models(),
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const ZAI: ProviderManifest = ProviderManifest {
@@ -102,6 +124,8 @@ const ZAI: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(16_000),
     fallback_context_window: 128_000,
     models: zai::models(),
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const DEEPSEEK: ProviderManifest = ProviderManifest {
@@ -113,6 +137,8 @@ const DEEPSEEK: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(384_000),
     fallback_context_window: 1_000_000,
     models: deepseek::models(),
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const OPENROUTER: ProviderManifest = ProviderManifest {
@@ -124,6 +150,8 @@ const OPENROUTER: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(128_000),
     fallback_context_window: 200_000,
     models: openrouter::models(),
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const SYNTHETIC: ProviderManifest = ProviderManifest {
@@ -135,6 +163,8 @@ const SYNTHETIC: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(32_000),
     fallback_context_window: 128_000,
     models: synthetic::models(),
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const TENSORX: ProviderManifest = ProviderManifest {
@@ -146,6 +176,8 @@ const TENSORX: ProviderManifest = ProviderManifest {
     fallback_max_output: None,
     fallback_context_window: 200_000,
     models: tensorx::models(),
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const OPENCODE: ProviderManifest = ProviderManifest {
@@ -157,6 +189,8 @@ const OPENCODE: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(128_000),
     fallback_context_window: 256_000,
     models: &[],
+    auth_kind: AuthKind::Env,
+    system_prefix: None,
 };
 
 const BUILTINS: &[ProviderManifest] = &[

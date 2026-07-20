@@ -19,7 +19,7 @@ use crate::{
 use super::{KeyPool, ResolvedAuth, http_client, next_sse_line};
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
-const ENV_VAR: &str = "GEMINI_API_KEY";
+pub(crate) const ENV_VAR: &str = "GEMINI_API_KEY";
 const FLASH_MAX_THINKING: u32 = 24_576;
 const PRO_MAX_THINKING: u32 = 32_768;
 
@@ -99,7 +99,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
     ]
 }
 
-fn resolve_auth_from_key(key: &str) -> ResolvedAuth {
+pub(crate) fn resolve_auth_from_key(key: &str) -> ResolvedAuth {
     ResolvedAuth {
         base_url: None,
         headers: vec![("x-goog-api-key".into(), key.to_string())],
@@ -114,17 +114,6 @@ pub struct Google {
 }
 
 impl Google {
-    pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::resolve("google", ENV_VAR)?;
-        let resolved = resolve_auth_from_key(pool.current());
-        Ok(Self {
-            client: http_client(timeouts),
-            auth: Arc::new(Mutex::new(resolved)),
-            key_pool: Some(pool),
-            stream_timeout: timeouts.stream,
-        })
-    }
-
     pub(crate) fn with_auth(
         auth: Arc<Mutex<super::ResolvedAuth>>,
         timeouts: super::Timeouts,

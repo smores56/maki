@@ -11,7 +11,7 @@ use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, 
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{KeyPool, ResolvedAuth};
 
-static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+pub(crate) static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     api_key_env: "TENSORX_API_KEY",
     base_url: "https://api.tensorx.ai/v1",
     max_tokens_field: "max_tokens",
@@ -49,16 +49,6 @@ pub struct TensorX {
 }
 
 impl TensorX {
-    pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::resolve("tensorx", CONFIG.api_key_env)?;
-        Ok(Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
-            auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
-            key_pool: Some(pool),
-            system_prefix: None,
-        })
-    }
-
     pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Self {
         Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts),

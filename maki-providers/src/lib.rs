@@ -1,4 +1,6 @@
 pub(crate) mod error;
+pub(crate) mod auth_source;
+pub(crate) mod external;
 pub mod manifest;
 pub mod model;
 pub mod model_registry;

@@ -17,7 +17,7 @@ use crate::{
 
 use super::{KeyPool, ResolvedAuth};
 
-static CONFIG_STANDARD: OpenAiCompatConfig = OpenAiCompatConfig {
+pub(crate) static CONFIG_STANDARD: OpenAiCompatConfig = OpenAiCompatConfig {
     api_key_env: "ZHIPU_API_KEY",
     base_url: "https://api.z.ai/api/paas/v4",
     max_tokens_field: "max_tokens",
@@ -250,23 +250,6 @@ pub struct Zai {
 }
 
 impl Zai {
-    pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::resolve("zai", CONFIG_STANDARD.api_key_env)?;
-        let mut auth = ResolvedAuth::bearer(pool.current());
-        let provider_config = maki_config::providers::ProvidersConfig::load();
-        if let Some(url) =
-            maki_config::providers::resolve_base_url("zai", provider_config.get("zai"))
-        {
-            auth.base_url = Some(url);
-        }
-        Ok(Self {
-            compat: OpenAiCompatProvider::new(&CONFIG_STANDARD, timeouts),
-            auth: Arc::new(Mutex::new(auth)),
-            key_pool: Some(pool),
-            system_prefix: None,
-        })
-    }
-
     pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Self {
         Self {
             compat: OpenAiCompatProvider::new(&CONFIG_STANDARD, timeouts),

@@ -18,7 +18,7 @@ const REFERER: &str = "https://maki.sh";
 const APP_TITLE: &str = "maki";
 const PER_MILLION: f64 = 1_000_000.0;
 
-static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+pub(crate) static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     api_key_env: "OPENROUTER_API_KEY",
     base_url: "https://openrouter.ai/api/v1",
     max_tokens_field: "max_tokens",
@@ -45,16 +45,6 @@ pub struct OpenRouter {
 }
 
 impl OpenRouter {
-    pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::from_env(CONFIG.api_key_env)?;
-        Ok(Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
-            auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
-            key_pool: Some(pool),
-            system_prefix: None,
-        })
-    }
-
     pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Self {
         Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts),

@@ -17,7 +17,7 @@ use super::{KeyPool, ResolvedAuth};
 const PAD: &str = "";
 const V4_MARKER: &str = "deepseek-v4";
 
-static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+pub(crate) static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     api_key_env: "DEEPSEEK_API_KEY",
     base_url: "https://api.deepseek.com",
     max_tokens_field: "max_tokens",
@@ -82,16 +82,6 @@ pub struct DeepSeek {
 }
 
 impl DeepSeek {
-    pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::resolve("deepseek", CONFIG.api_key_env)?;
-        Ok(Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
-            auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
-            key_pool: Some(pool),
-            system_prefix: None,
-        })
-    }
-
     pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Self {
         Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts),

@@ -33,7 +33,7 @@ const MONEY_EXPONENT: u32 = 2;
 const LABEL_SESSION: &str = "Current session";
 const LABEL_WEEK_ALL: &str = "Current week (all models)";
 
-const ENV_VAR: &str = "ANTHROPIC_API_KEY";
+pub(crate) const ENV_VAR: &str = "ANTHROPIC_API_KEY";
 
 inventory::submit!(maki_config::providers::BuiltInProvider {
     slug: "anthropic",
@@ -217,7 +217,7 @@ fn usage_eligible(auth: &super::ResolvedAuth) -> bool {
             .is_none_or(|u| u.contains("api.anthropic.com"))
 }
 
-fn resolve_auth_from_key(key: &str) -> super::ResolvedAuth {
+pub(crate) fn resolve_auth_from_key(key: &str) -> super::ResolvedAuth {
     super::ResolvedAuth {
         base_url: Some("https://api.anthropic.com/v1/messages".into()),
         headers: vec![("x-api-key".into(), key.to_string())],
@@ -233,19 +233,6 @@ pub struct Anthropic {
 }
 
 impl Anthropic {
-    pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::resolve("anthropic", ENV_VAR)?;
-        let resolved = resolve_auth_from_key(pool.current());
-        debug!(keys = pool.len(), "using API key authentication");
-        Ok(Self {
-            client: super::http_client(timeouts),
-            auth: Arc::new(Mutex::new(resolved)),
-            key_pool: Some(pool),
-            system_prefix: None,
-            stream_timeout: timeouts.stream,
-        })
-    }
-
     pub(crate) fn with_auth(
         auth: Arc<Mutex<super::ResolvedAuth>>,
         timeouts: super::Timeouts,
