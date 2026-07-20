@@ -1,4 +1,3 @@
-pub mod auth;
 mod platform;
 pub(crate) mod responses;
 

@@ -6,7 +6,7 @@ use isahc::config::Configurable;
 use maki_storage::StateDir;
 use maki_storage::auth::{OAuthTokens, delete_tokens, load_tokens, now_millis, save_tokens};
 use serde::Deserialize;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 use crate::AgentError;
 use crate::providers::{ResolvedAuth, urlenc};
@@ -15,7 +15,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_SAFETY_MARGIN: Duration = Duration::from_secs(3);
 const TOKEN_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_TIMEOUT: Duration = Duration::from_secs(300);
-const BEARER_HEADER: &str = "authorization";
 
 #[derive(Debug, Clone, Copy)]
 pub struct OAuthEndpoints {
@@ -32,7 +31,10 @@ pub struct OAuthConfig {
     pub client_id: &'static str,
     pub endpoints: OAuthEndpoints,
     pub env_fallback: Option<&'static str>,
+    pub header_name: &'static str,
+    pub header_value_format: &'static str,
     pub account_id_from_jwt: bool,
+    pub account_id_header_name: Option<&'static str>,
 }
 
 pub const OPENAI_OAUTH: OAuthConfig = OAuthConfig {
@@ -46,7 +48,10 @@ pub const OPENAI_OAUTH: OAuthConfig = OAuthConfig {
         redirect_uri: "https://auth.openai.com/deviceauth/callback",
     },
     env_fallback: Some("OPENAI_API_KEY"),
+    header_name: "authorization",
+    header_value_format: "Bearer {access}",
     account_id_from_jwt: true,
+    account_id_header_name: Some("chatgpt-account-id"),
 };
 
 pub fn oauth_config(slug: &str) -> Option<&'static OAuthConfig> {
@@ -288,12 +293,21 @@ pub fn refresh_tokens(cfg: &OAuthConfig, tokens: &OAuthTokens) -> Result<OAuthTo
     Ok(into_oauth_tokens(token_resp, cfg))
 }
 
-/// Build the per-request headers auth source. Providers with a JWT-derived
-/// account id compose a second header elsewhere (`build_coding_plan_resolved`).
-pub fn build_resolved(tokens: &OAuthTokens) -> ResolvedAuth {
+/// Build the per-request auth headers from `OAuthConfig`'s data fields. Both
+/// the Bearer header and the optional JWT-derived account-id header land in
+/// shared auth state, so engines read a single `Arc<Mutex<ResolvedAuth>>`
+/// instead of re-reading tokens per request.
+pub fn build_resolved(cfg: &OAuthConfig, tokens: &OAuthTokens) -> ResolvedAuth {
+    let value = cfg.header_value_format.replace("{access}", &tokens.access);
+    let mut headers = vec![(cfg.header_name.into(), value)];
+    if let Some(header) = cfg.account_id_header_name
+        && let Some(account_id) = &tokens.account_id
+    {
+        headers.push((header.into(), account_id.clone()));
+    }
     ResolvedAuth {
         base_url: None,
-        headers: vec![(BEARER_HEADER.into(), format!("Bearer {}", tokens.access))],
+        headers,
     }
 }
 
@@ -301,23 +315,14 @@ pub fn is_oauth(cfg: &OAuthConfig, dir: &StateDir) -> bool {
     load_tokens(dir, cfg.provider).is_some()
 }
 
+/// Resolve auth from on-disk state without any HTTP. Expired OAuth tokens
+/// are returned as-is; the centralized retry path in `ExternalProvider::
+/// stream_message` refreshes them lazily on a 401. This keeps `resolve`
+/// synchronous and off the executor.
 pub fn resolve(cfg: &OAuthConfig, dir: &StateDir) -> Result<ResolvedAuth, AgentError> {
     if let Some(tokens) = load_tokens(dir, cfg.provider) {
-        if !tokens.is_expired() {
-            debug!(provider = cfg.provider, "using OAuth authentication");
-            return Ok(build_resolved(&tokens));
-        }
-        match refresh_tokens(cfg, &tokens) {
-            Ok(fresh) => {
-                save_tokens(dir, cfg.provider, &fresh)?;
-                debug!(provider = cfg.provider, "using OAuth authentication (refreshed)");
-                return Ok(build_resolved(&fresh));
-            }
-            Err(e) => {
-                warn!(provider = cfg.provider, error = %e, "OAuth refresh failed, clearing stale tokens");
-                delete_tokens(dir, cfg.provider).ok();
-            }
-        }
+        debug!(provider = cfg.provider, expired = tokens.is_expired(), "using OAuth authentication");
+        return Ok(build_resolved(cfg, &tokens));
     }
 
     if let Some(env_var) = cfg.env_fallback
@@ -326,7 +331,7 @@ pub fn resolve(cfg: &OAuthConfig, dir: &StateDir) -> Result<ResolvedAuth, AgentE
         debug!(provider = cfg.provider, "using API key from {env_var}");
         return Ok(ResolvedAuth {
             base_url: None,
-            headers: vec![(BEARER_HEADER.into(), format!("Bearer {key}"))],
+            headers: vec![(cfg.header_name.into(), format!("Bearer {key}"))],
         });
     }
 
@@ -334,7 +339,7 @@ pub fn resolve(cfg: &OAuthConfig, dir: &StateDir) -> Result<ResolvedAuth, AgentE
         debug!(provider = cfg.provider, "using saved API key");
         return Ok(ResolvedAuth {
             base_url: None,
-            headers: vec![(BEARER_HEADER.into(), format!("Bearer {}", creds.api_key))],
+            headers: vec![(cfg.header_name.into(), format!("Bearer {}", creds.api_key))],
         });
     }
 

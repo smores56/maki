@@ -26,7 +26,6 @@ pub struct ExternalProvider {
     auth_source: Box<dyn AuthSource>,
     engine: OnceLock<Box<dyn Provider>>,
     timeouts: Timeouts,
-    storage: Option<StateDir>,
 }
 
 impl ExternalProvider {
@@ -44,12 +43,12 @@ impl ExternalProvider {
         Ok(Some(Box::new(provider)))
     }
 
-    async fn engine(&self) -> Result<&dyn Provider, AgentError> {
+    fn engine_sync(&self) -> Result<&dyn Provider, AgentError> {
         if let Some(engine) = self.engine.get() {
             return Ok(engine.as_ref());
         }
-        self.auth_source.resolve(&self.auth).await?;
-        let built = build_engine(self.slug, self.auth.clone(), self.timeouts, self.storage.clone())?;
+        self.auth_source.resolve(&self.auth)?;
+        let built = build_engine(self.slug, self.auth.clone(), self.timeouts)?;
         if self.engine.set(built).is_err() {
             // Another caller won the race; use its engine.
             return Ok(self
@@ -121,7 +120,6 @@ fn build_env(slug: &'static str, timeouts: Timeouts) -> Result<ExternalProvider,
         auth_source,
         engine: OnceLock::new(),
         timeouts,
-        storage: None,
     })
 }
 
@@ -130,7 +128,7 @@ fn build_oauth(slug: &'static str, timeouts: Timeouts) -> Result<ExternalProvide
         message: format!("no OAuth config registered for '{slug}'"),
     })?;
     let dir = StateDir::resolve()?;
-    let auth_source: Box<dyn AuthSource> = Box::new(OAuthAuthSource::new(cfg, dir.clone()));
+    let auth_source: Box<dyn AuthSource> = Box::new(OAuthAuthSource::new(cfg, dir));
     Ok(ExternalProvider {
         slug,
         auth: Arc::new(Mutex::new(ResolvedAuth {
@@ -140,7 +138,6 @@ fn build_oauth(slug: &'static str, timeouts: Timeouts) -> Result<ExternalProvide
         auth_source,
         engine: OnceLock::new(),
         timeouts,
-        storage: Some(dir),
     })
 }
 
@@ -152,16 +149,13 @@ fn build_engine(
     slug: &str,
     auth: Arc<Mutex<ResolvedAuth>>,
     timeouts: Timeouts,
-    storage: Option<StateDir>,
 ) -> Result<Box<dyn Provider>, AgentError> {
     let prefix = ManifestRegistry::get(slug)
         .and_then(|m| m.system_prefix)
         .map(str::to_string);
     match slug {
         "openai" => Ok(Box::new(
-            OpenAi::with_auth(auth, timeouts)
-                .with_storage(storage)
-                .with_system_prefix(prefix),
+            OpenAi::with_auth(auth, timeouts).with_system_prefix(prefix),
         )),
         "anthropic" => Ok(Box::new(
             anthropic::Anthropic::with_auth(auth, timeouts).with_system_prefix(prefix),
@@ -203,7 +197,7 @@ impl Provider for ExternalProvider {
         session_id: Option<&'a SessionRef>,
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
-            let engine = self.engine().await?;
+            let engine = self.engine_sync()?;
             let result = engine
                 .stream_message(model, messages, system, tools, event_tx, opts, session_id)
                 .await;
@@ -221,14 +215,14 @@ impl Provider for ExternalProvider {
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
         Box::pin(async move {
-            let engine = self.engine().await?;
+            let engine = self.engine_sync()?;
             engine.list_models().await
         })
     }
 
     fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
         Box::pin(async move {
-            let engine = self.engine().await?;
+            let engine = self.engine_sync()?;
             engine.fetch_usage().await
         })
     }
@@ -238,16 +232,16 @@ impl Provider for ExternalProvider {
     }
 
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async move { self.auth_source.reload(&self.auth).await })
+        Box::pin(async { self.auth_source.reload(&self.auth) })
     }
 
     fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
-        Box::pin(async move { self.auth_source.rotate_key(&self.auth).await })
+        Box::pin(async { self.auth_source.rotate_key(&self.auth) })
     }
 
     fn adjust_model(&self, model: &mut Model) {
-        if let Some(engine) = self.engine.get() {
-            engine.as_ref().adjust_model(model);
+        if let Ok(engine) = self.engine_sync() {
+            engine.adjust_model(model);
         }
     }
 }

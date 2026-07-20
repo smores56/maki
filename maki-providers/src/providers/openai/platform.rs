@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 
 use flume::Sender;
-use maki_storage::StateDir;
 use maki_storage::id::SessionRef;
 use serde_json::Value;
 
@@ -9,7 +8,6 @@ use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, dialect};
 
-use super::auth;
 use crate::providers::ResolvedAuth;
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 
@@ -20,6 +18,13 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     include_stream_usage: true,
     provider_name: "OpenAI",
 };
+
+// Codex models route to the ChatGPT Coding Plan backend, which requires a
+// `chatgpt-account-id` header (derived from the OAuth token's JWT and written
+// into shared auth by `OAuthAuthSource::resolve`). The router's base URL lives
+// here, not in `OAuthConfig`, because endpoint selection is per-model routing,
+// not an auth concern.
+const CODING_PLAN_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 // Non-codex models OpenAI offers for subscription usage via the Coding Plan.
 // Codex models are matched by their `-codex` substring in
@@ -61,7 +66,6 @@ fn coding_plan_context_window(model_id: &str) -> Option<u32> {
 pub struct OpenAi {
     compat: OpenAiCompatProvider,
     auth: Arc<Mutex<ResolvedAuth>>,
-    storage: Option<StateDir>,
     system_prefix: Option<String>,
 }
 
@@ -73,14 +77,8 @@ impl OpenAi {
         Self {
             compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
             auth,
-            storage: None,
             system_prefix: None,
         }
-    }
-
-    pub(crate) fn with_storage(mut self, storage: Option<StateDir>) -> Self {
-        self.storage = storage;
-        self
     }
 
     pub(crate) fn with_system_prefix(mut self, prefix: Option<String>) -> Self {
@@ -92,26 +90,29 @@ impl OpenAi {
         self.auth.lock().unwrap().clone()
     }
 
+    // OAuth is active when shared auth carries the account-id header that
+    // `OAuthAuthSource::resolve` wrote from the JWT-derived account id. This
+    // reads the resolved state already shared with the engine, no disk access.
     fn is_oauth(&self) -> bool {
-        self.storage
-            .as_ref()
-            .is_some_and(|dir| auth::is_oauth(&auth::OPENAI_OAUTH, dir))
+        self.auth
+            .lock()
+            .unwrap()
+            .headers
+            .iter()
+            .any(|(name, _)| name == "chatgpt-account-id")
     }
 
-    fn codex_auth(&self) -> Result<ResolvedAuth, AgentError> {
-        // Prefer OAuth tokens for the ChatGPT Coding Plan backend.
-        if let Some(storage) = self.storage.as_ref()
-            && let Some(tokens) =
-                maki_storage::auth::load_tokens(storage, auth::OPENAI_OAUTH.provider)
-        {
-            return Ok(auth::build_coding_plan_resolved(&tokens));
-        }
-        // Fall back to standard API key via the Responses API.
+    fn codex_auth(&self) -> ResolvedAuth {
         let mut auth = self.current_auth();
-        if auth.base_url.is_none() {
-            auth.base_url = Some(CONFIG.base_url.into());
-        }
-        Ok(auth)
+        auth.base_url = Some(
+            if self.is_oauth() {
+                CODING_PLAN_BASE_URL
+            } else {
+                CONFIG.base_url
+            }
+            .into(),
+        );
+        auth
     }
 }
 
@@ -133,7 +134,7 @@ impl Provider for OpenAi {
             if is_codex_model(&model.id) {
                 let body = super::responses::build_body(model, messages, system, tools);
                 let stream_timeout = self.compat.stream_timeout();
-                let codex_auth = self.codex_auth()?;
+                let codex_auth = self.codex_auth();
                 return super::responses::do_stream(
                     self.compat.client(),
                     model,
@@ -203,5 +204,87 @@ mod tests {
     #[test_case("gpt-5.4-nano", None)]
     fn coding_plan_context_window_resolves_plan_models(model_id: &str, expected: Option<u32>) {
         assert_eq!(coding_plan_context_window(model_id), expected);
+    }
+
+    fn make_openai(auth: ResolvedAuth) -> OpenAi {
+        OpenAi::with_auth(Arc::new(Mutex::new(auth)), crate::providers::Timeouts::default())
+    }
+
+    #[test]
+    fn is_oauth_false_for_api_key_only_auth() {
+        let provider = make_openai(ResolvedAuth::bearer("sk-test"));
+        assert!(!provider.is_oauth());
+    }
+
+    #[test]
+    fn is_oauth_true_when_account_id_header_present() {
+        let mut headers = vec![("authorization".into(), "Bearer tok".into())];
+        headers.push(("chatgpt-account-id".into(), "acct_123".into()));
+        let provider = make_openai(ResolvedAuth {
+            base_url: None,
+            headers,
+        });
+        assert!(provider.is_oauth());
+    }
+
+    #[test]
+    fn codex_auth_uses_coding_plan_base_url_when_oauth() {
+        let mut headers = vec![("authorization".into(), "Bearer tok".into())];
+        headers.push(("chatgpt-account-id".into(), "acct_123".into()));
+        let provider = make_openai(ResolvedAuth {
+            base_url: None,
+            headers,
+        });
+        let auth = provider.codex_auth();
+        assert_eq!(auth.base_url.as_deref(), Some(CODING_PLAN_BASE_URL));
+        assert!(auth
+            .headers
+            .iter()
+            .any(|(name, value)| name == "chatgpt-account-id" && value == "acct_123"));
+    }
+
+    #[test]
+    fn codex_auth_uses_standard_base_url_when_api_key() {
+        let provider = make_openai(ResolvedAuth::bearer("sk-test"));
+        let auth = provider.codex_auth();
+        assert_eq!(auth.base_url.as_deref(), Some(CONFIG.base_url));
+    }
+
+    #[test]
+    fn adjust_model_caps_context_window_for_codex_when_oauth() {
+        let mut headers = vec![("authorization".into(), "Bearer tok".into())];
+        headers.push(("chatgpt-account-id".into(), "acct_123".into()));
+        let provider = make_openai(ResolvedAuth {
+            base_url: None,
+            headers,
+        });
+        let mut model = Model::from_spec("openai/gpt-5.7-codex").unwrap();
+        model.context_window = 1_000_000;
+        provider.adjust_model(&mut model);
+        assert_eq!(model.context_window, CODEX_PLAN_CONTEXT_WINDOW);
+    }
+
+    #[test]
+    fn adjust_model_does_not_cap_when_api_key() {
+        let provider = make_openai(ResolvedAuth::bearer("sk-test"));
+        let mut model = Model::from_spec("openai/gpt-5.7-codex").unwrap();
+        model.context_window = 1_000_000;
+        provider.adjust_model(&mut model);
+        assert_eq!(model.context_window, 1_000_000);
+    }
+
+    #[test]
+    fn list_models_returns_codex_only_when_oauth() {
+        let mut headers = vec![("authorization".into(), "Bearer tok".into())];
+        headers.push(("chatgpt-account-id".into(), "acct_123".into()));
+        let provider = make_openai(ResolvedAuth {
+            base_url: None,
+            headers,
+        });
+        smol::block_on(async {
+            let models = provider.list_models().await.unwrap();
+            assert!(models.iter().all(|m| is_codex_model(&m.id)));
+            assert!(!models.is_empty());
+        });
     }
 }
