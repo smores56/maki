@@ -302,33 +302,50 @@ impl Keybind {
 /// modal for both built-in `Bind`s and plugin-set `KeymapEntry`s, so the two
 /// paths can never drift. Allocates per call; cheap relative to render.
 pub fn format_key(code: KeyCode, modifiers: KeyModifiers) -> String {
-    let is_char = matches!(code, KeyCode::Char(_));
+    let shift_set = modifiers.contains(KeyModifiers::SHIFT);
+    let has_other_mod =
+        modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT);
+
     let mut s = String::new();
-    let mut want_shift = modifiers.contains(KeyModifiers::SHIFT) && !is_char;
     if modifiers.contains(KeyModifiers::CONTROL) {
         s.push_str("Ctrl+");
     }
     if modifiers.contains(KeyModifiers::ALT) {
         s.push_str("Alt+");
     }
-    if matches!(code, KeyCode::BackTab) {
-        want_shift = true;
-    }
+
+    // Whether to prepend "Shift+" before the glyph. For non-Char keys, always.
+    // For a lone Char, the glyph encodes shift (A, !), so the prefix is dropped.
+    // For Char with Ctrl/Alt, the prefix is kept unless shift_symbol already
+    // encodes it, so Ctrl+Shift+C does not collapse onto Ctrl+C while Ctrl+!
+    // stays unambiguous against Ctrl+1.
+    let want_shift = match code {
+        KeyCode::BackTab => true,
+        _ if !shift_set => false,
+        KeyCode::Char(c) => has_other_mod && shift_symbol(c).is_none(),
+        _ => true,
+    };
     if want_shift {
         s.push_str("Shift+");
     }
+
     match code {
         KeyCode::Char(' ') => s.push_str("Space"),
-        KeyCode::Char(c) => {
-            if modifiers.contains(KeyModifiers::SHIFT) {
-                if let Some(shifted) = shift_symbol(c) {
-                    s.push(shifted);
-                } else {
-                    s.push(c.to_ascii_uppercase());
-                }
+        // A plugin lhs parsed as a single control byte must never reach the
+        // terminal raw via a Span; render it as `<U+XXXX>` so terminal escape
+        // sequences cannot be smuggled into the help modal's key column.
+        KeyCode::Char(c) if c.is_control() => {
+            write!(s, "<U+{:04X}>", c as u32).unwrap();
+        }
+        KeyCode::Char(c) if shift_set => {
+            if let Some(shifted) = shift_symbol(c) {
+                s.push(shifted);
             } else {
                 s.push(c.to_ascii_uppercase());
             }
+        }
+        KeyCode::Char(c) => {
+            s.push(c.to_ascii_uppercase());
         }
         KeyCode::Enter => s.push_str("Enter"),
         KeyCode::Esc => s.push_str("Esc"),
@@ -861,6 +878,20 @@ mod tests {
     #[test_case(KeyCode::Char('3'), KeyModifiers::SHIFT, "#" ; "shift_three_becomes_hash")]
     #[test_case(KeyCode::Char('4'), KeyModifiers::SHIFT, "$" ; "shift_four_becomes_dollar")]
     #[test_case(KeyCode::Char('a'), KeyModifiers::SHIFT, "A" ; "shift_letter_uppercases")]
+    #[test_case(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        "Ctrl+Shift+C" ;
+        "ctrl_shift_char_keeps_shift_prefix"
+    )]
+    #[test_case(
+        KeyCode::Char('1'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        "Ctrl+!" ;
+        "ctrl_shift_digit_uses_symbol"
+    )]
+    #[test_case(KeyCode::Char('\u{7}'), KeyModifiers::NONE, "<U+0007>" ; "control_byte_bel_rendered_as_hex")]
+    #[test_case(KeyCode::Char('\u{1b}'), KeyModifiers::NONE, "<U+001B>" ; "control_byte_esc_rendered_as_hex")]
     fn format_key_cases(code: KeyCode, mods: KeyModifiers, expected: &str) {
         assert_eq!(format_key(code, mods), expected);
     }

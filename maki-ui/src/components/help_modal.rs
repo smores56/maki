@@ -594,19 +594,4 @@ mod tests {
             "sanitizes-to-empty override does not surface as a Plugin binding"
         );
     }
-
-    #[test_case(KeyCode::F(7), KeyModifiers::NONE, "F7" ; "f_key_bare")]
-    #[test_case(KeyCode::Char('c'), KeyModifiers::CONTROL, "Ctrl+C" ; "ctrl_char")]
-    #[test_case(KeyCode::Char(' '), KeyModifiers::NONE, "Space" ; "space")]
-    #[test_case(KeyCode::BackTab, KeyModifiers::NONE, "Shift+Tab" ; "backtab_adds_shift")]
-    #[test_case(KeyCode::Tab, KeyModifiers::SHIFT, "Shift+Tab" ; "shift_tab")]
-    #[test_case(KeyCode::F(1), KeyModifiers::CONTROL | KeyModifiers::SHIFT, "Ctrl+Shift+F1" ; "ctrl_shift_f")]
-    #[test_case(KeyCode::Char('1'), KeyModifiers::SHIFT, "!" ; "shift_one_becomes_bang")]
-    #[test_case(KeyCode::Char('2'), KeyModifiers::SHIFT, "@" ; "shift_two_becomes_at")]
-    #[test_case(KeyCode::Char('3'), KeyModifiers::SHIFT, "#" ; "shift_three_becomes_hash")]
-    #[test_case(KeyCode::Char('4'), KeyModifiers::SHIFT, "$" ; "shift_four_becomes_dollar")]
-    #[test_case(KeyCode::Char('a'), KeyModifiers::SHIFT, "A" ; "shift_letter_uppercases")]
-    fn format_key_cases(code: KeyCode, mods: KeyModifiers, expected: &str) {
-        assert_eq!(format_key(code, mods), expected);
-    }
 }
