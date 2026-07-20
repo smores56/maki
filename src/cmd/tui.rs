@@ -145,6 +145,13 @@ fn build_stack(
             .context("initialize lua plugin host")?
     };
 
+    if !cli.no_plugins
+        && let Err(e) = plugin_host
+            .register_builtin_defaults(maki_ui::keybindings::builtin_default_bindings())
+    {
+        tracing::warn!(error = %e, "registering built-in keymap defaults failed");
+    }
+
     let (fallback_config, fallback_model) = fallback.unzip();
     let reloading = fallback_model.is_some();
     let config = config_or_fallback(

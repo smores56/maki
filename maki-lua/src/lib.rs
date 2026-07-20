@@ -7,7 +7,9 @@ mod loader;
 pub(crate) mod plugin_permissions;
 mod runtime;
 
-pub use api::keymap::{Handler, KeymapEntry, KeymapReader, KeymapSnapshot};
+pub use api::keymap::{
+    BuiltinDefaultBinding, Handler, KeymapEntry, KeymapReader, KeymapSnapshot,
+};
 pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
 pub use api::util::command::{
     Anchor, Axis, Border, BuiltinAction, Dimension, Edge, FloatConfig, FloatConfigPatch,

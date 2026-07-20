@@ -157,6 +157,32 @@ pub mod key {
     };
 }
 
+/// Boot-time default bindings between remappable built-in UI actions and
+/// their default keys. Registered into the runtime `KeymapStore` before any
+/// `init.lua` runs so user remaps can shadow them via `maki.keymap.set`.
+/// Order matches the `BuiltinAction` round-trip tests.
+pub fn builtin_default_bindings() -> Vec<maki_lua::BuiltinDefaultBinding> {
+    use maki_lua::{BuiltinAction, BuiltinDefaultBinding};
+    use crate::keybindings::key;
+    vec![
+        BuiltinDefaultBinding {
+            key: key::EDIT_INPUT.code,
+            modifiers: key::EDIT_INPUT.modifiers,
+            action: BuiltinAction::EditInputInEditor,
+        },
+        BuiltinDefaultBinding {
+            key: key::FILE_PICKER.code,
+            modifiers: key::FILE_PICKER.modifiers,
+            action: BuiltinAction::FilePicker,
+        },
+        BuiltinDefaultBinding {
+            key: key::OPEN_EDITOR.code,
+            modifiers: key::OPEN_EDITOR.modifiers,
+            action: BuiltinAction::OpenEditor,
+        },
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
 pub enum KeybindContext {
     General,

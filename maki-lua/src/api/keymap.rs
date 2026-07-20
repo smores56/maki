@@ -13,6 +13,13 @@ static NEXT_KEYMAP_ID: AtomicU64 = AtomicU64::new(1);
 pub const BUILTIN_PLUGIN: &str = "maki.builtin";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuiltinDefaultBinding {
+    pub key: KeyCode,
+    pub modifiers: KeyModifiers,
+    pub action: BuiltinAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handler {
     Lua(u64),
     Builtin(BuiltinAction),
@@ -321,7 +328,7 @@ fn parse_key_name(name: &str) -> Result<KeyCode, String> {
     }
 }
 
-fn publish_keymap_snapshot(lua: &Lua) {
+pub(crate) fn publish_keymap_snapshot(lua: &Lua) {
     if let Some(store) = lua.app_data_ref::<KeymapStore>() {
         let entries = store.snapshot_entries();
         if let Some(writer) = lua.app_data_ref::<KeymapWriter>() {

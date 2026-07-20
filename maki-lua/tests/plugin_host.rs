@@ -3380,3 +3380,83 @@ fn job_callbacks_fire_while_command_handler_parked() {
         .expect("job callbacks starved while command handler was parked");
     assert!(matches!(action, maki_lua::UiAction::Flash(msg) if msg == "job:hi"));
 }
+
+const DEFAULT_BINDINGS_ERR: &str = "default binding did not publish within timeout";
+
+/// Boot-time defaults land in the runtime KeymapStore on the priority
+/// lane before later LoadSource/RunInitLua requests process; user
+/// `maki.keymap.set(...)` against a default key then shadows the default
+/// directly at the registry level (not just at lookup time).
+#[test]
+fn register_builtin_defaults_publishes_and_removable_by_init_lua() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use maki_lua::{BuiltinAction, BuiltinDefaultBinding, Handler};
+
+    let host = PluginHost::new(fresh_registry()).unwrap();
+
+    let defaults = vec![
+        BuiltinDefaultBinding {
+            key: KeyCode::Char('o'),
+            modifiers: KeyModifiers::ALT,
+            action: BuiltinAction::EditInputInEditor,
+        },
+        BuiltinDefaultBinding {
+            key: KeyCode::Char('s'),
+            modifiers: KeyModifiers::CONTROL,
+            action: BuiltinAction::FilePicker,
+        },
+        BuiltinDefaultBinding {
+            key: KeyCode::Char('o'),
+            modifiers: KeyModifiers::CONTROL,
+            action: BuiltinAction::OpenEditor,
+        },
+    ];
+    host.register_builtin_defaults(defaults).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let snap = loop {
+        let s = host.keymap_reader().load();
+        if s.entries.len() == 3 {
+            break s;
+        }
+        assert!(std::time::Instant::now() < deadline, "{DEFAULT_BINDINGS_ERR}");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(snap.entries.iter().any(|e| e.handler == Handler::Builtin(BuiltinAction::EditInputInEditor)));
+    assert!(snap.entries.iter().any(|e| e.handler == Handler::Builtin(BuiltinAction::FilePicker)));
+    assert!(snap.entries.iter().any(|e| e.handler == Handler::Builtin(BuiltinAction::OpenEditor)));
+
+    host.load_source(
+        "remap",
+        r#"
+        maki.keymap.set("n", "<A-e>", "EditInputInEditor")
+        "#,
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let snap = loop {
+        let s = host.keymap_reader().load();
+        let alt_e = s.entries.iter().any(|e| {
+            e.key == KeyCode::Char('e') && e.modifiers == KeyModifiers::ALT
+        });
+        let alt_o_builtin = s.entries.iter().any(|e| {
+            e.key == KeyCode::Char('o')
+                && e.modifiers == KeyModifiers::ALT
+                && matches!(e.handler, Handler::Builtin(BuiltinAction::EditInputInEditor))
+        });
+        if alt_e && !alt_o_builtin {
+            break s;
+        }
+        assert!(std::time::Instant::now() < deadline, "{DEFAULT_BINDINGS_ERR}");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let edit_at_alt_e = snap.entries.iter().find(|e| {
+        e.key == KeyCode::Char('e') && e.modifiers == KeyModifiers::ALT
+    });
+    assert_eq!(
+        edit_at_alt_e.unwrap().handler,
+        Handler::Builtin(BuiltinAction::EditInputInEditor),
+        "remap should publish Builtin(EditInputInEditor) at the new key"
+    );
+}

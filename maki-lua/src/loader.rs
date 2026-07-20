@@ -9,7 +9,7 @@ use include_dir::{Dir, include_dir};
 use maki_agent::tools::ToolRegistry;
 use maki_config::{PluginsConfig, RawConfig};
 
-use crate::api::keymap::KeymapReader;
+use crate::api::keymap::{BuiltinDefaultBinding, KeymapReader};
 use crate::api::options::{PluginOptionSpecs, PluginOpts};
 use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
 use crate::error::PluginError;
@@ -434,6 +434,24 @@ impl PluginHost {
 
     pub fn ui_action_rx(&self) -> Option<flume::Receiver<UiAction>> {
         self.inner.as_ref().map(|t| t.ui_action_rx.clone())
+    }
+
+    /// Enqueue built-in default keymap bindings on the priority lane so
+    /// they land in the runtime `KeymapStore` before any `RunInitLua` or
+    /// `LoadSource` request processes on the standard lane. `init.lua` and
+    /// plugin sources then run against a store that already has defaults,
+    /// letting `maki.keymap.set(mode, lhs, "<BuiltinAction>")` shadow them.
+    pub fn register_builtin_defaults(
+        &self,
+        bindings: Vec<BuiltinDefaultBinding>,
+    ) -> Result<(), PluginError> {
+        let tx = self
+            .inner
+            .as_ref()
+            .map(|t| &t.prio_tx)
+            .ok_or(PluginError::HostDead)?;
+        tx.send(Request::RegisterBuiltinDefaults { bindings })
+            .map_err(|_| PluginError::HostDead)
     }
 }
 

@@ -28,7 +28,7 @@ use crate::api::autocmd::AutocmdStore;
 use crate::api::create_maki_global;
 use crate::api::r#fn::{JobStore, deliver_job_event};
 use crate::api::keymap::KeymapReader;
-use crate::api::keymap::{KeymapStore, KeymapWriter};
+use crate::api::keymap::{BuiltinDefaultBinding, KeymapStore, KeymapWriter, publish_keymap_snapshot};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
 use crate::api::slot::SlotStore;
 use crate::api::tool::{LuaTool, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply};
@@ -169,6 +169,9 @@ pub enum Request {
     },
     RunKeybindCallback {
         id: u64,
+    },
+    RegisterBuiltinDefaults {
+        bindings: Vec<BuiltinDefaultBinding>,
     },
     Describe {
         plugin: Arc<str>,
@@ -2410,6 +2413,20 @@ pub fn spawn(
                                     }
                                 }).detach();
                             }
+                        }
+                        Request::RegisterBuiltinDefaults { bindings } => {
+                            if let Some(mut store) = rt.lua.app_data_mut::<KeymapStore>() {
+                                for b in bindings {
+                                    store.set_builtin(
+                                        b.key,
+                                        b.modifiers,
+                                        b.action,
+                                        Arc::from(crate::api::keymap::BUILTIN_PLUGIN),
+                                        String::new(),
+                                    );
+                                }
+                            }
+                            publish_keymap_snapshot(&rt.lua);
                         }
                     }
                 }
