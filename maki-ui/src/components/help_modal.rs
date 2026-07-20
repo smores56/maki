@@ -37,7 +37,16 @@ pub struct HelpModal {
     scroll: ModalScroll,
 }
 
-fn key_spans(label: ResolvedLabel, pad: usize, prefix: &str) -> Vec<Span<'static>> {
+/// A `Keybind` row paired with its resolved label and visible-bind slice, so a
+/// single `view` pass can reuse both across column-width, render, and
+/// unmatched-override matching without re-allocating per (row, override).
+struct ResolvedRow {
+    kb: &'static Keybind,
+    label: ResolvedLabel,
+    visible: &'static [Bind],
+}
+
+fn key_spans(label: &ResolvedLabel, pad: usize, prefix: &str) -> Vec<Span<'static>> {
     let theme = theme::current();
     match label {
         ResolvedLabel::Single(s) => {
@@ -48,13 +57,16 @@ fn key_spans(label: ResolvedLabel, pad: usize, prefix: &str) -> Vec<Span<'static
                 theme.keybind_key,
             )]
         }
-        ResolvedLabel::Alt(a, b) => multi_key_spans(&[a, b], pad, prefix, &theme),
-        ResolvedLabel::Multi(keys) => multi_key_spans(&keys, pad, prefix, &theme),
+        ResolvedLabel::Alt(a, b) => multi_key_spans(&[a.as_str(), b.as_str()], pad, prefix, &theme),
+        ResolvedLabel::Multi(keys) => {
+            let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+            multi_key_spans(&keys, pad, prefix, &theme)
+        }
     }
 }
 
 fn multi_key_spans(
-    keys: &[String],
+    keys: &[&str],
     pad: usize,
     prefix: &str,
     theme: &crate::theme::Theme,
@@ -62,7 +74,7 @@ fn multi_key_spans(
     let sep_w = UnicodeWidthStr::width(ALT_SEP);
     let content_w: usize = keys
         .iter()
-        .map(|k| UnicodeWidthStr::width(k.as_str()))
+        .map(|k| UnicodeWidthStr::width(*k))
         .sum::<usize>()
         + sep_w * keys.len().saturating_sub(1);
     let trailing = pad.saturating_sub(content_w);
@@ -78,19 +90,11 @@ fn multi_key_spans(
         } else if i == keys.len() - 1 {
             format!("{k}{:trailing$}", "")
         } else {
-            k.clone()
+            (*k).to_string()
         };
         spans.push(Span::styled(text, theme.keybind_key));
     }
     spans
-}
-
-/// Returns the slice of `binds` that the row actually displays on this
-/// platform. `MacAlt` shows two labels on mac, one elsewhere; the trailing
-/// bind must not match an override the row does not display.
-fn visible_binds(kb: &Keybind) -> &[Bind] {
-    let n = kb.resolved_label().visible_count();
-    &kb.binds[..n.min(kb.binds.len())]
 }
 
 fn binds_contain(binds: &[Bind], entry: &KeymapEntry) -> bool {
@@ -99,14 +103,25 @@ fn binds_contain(binds: &[Bind], entry: &KeymapEntry) -> bool {
         .any(|b| b.code == entry.key && b.modifiers == entry.modifiers)
 }
 
-fn row_description<'a>(kb: &'a Keybind, overrides: &[KeymapEntry]) -> Cow<'a, str> {
-    let matched = overrides
-        .iter()
-        .find(|e| binds_contain(visible_binds(kb), e) && !e.desc.is_empty());
-    match matched {
-        Some(e) => Cow::Owned(sanitize_desc(&e.desc)),
-        None => Cow::Borrowed(kb.description),
+/// Description for a built-in row. The first override whose key matches one of
+/// `visible` wins; an override on a sibling alias bind that the row does not
+/// display (e.g. the trailing half of `MacAlt` off-mac) cannot win here and is
+/// left for the Plugin bindings section. If the winning override's sanitized
+/// desc is empty, falls through to the next match or the default.
+fn row_description<'a>(
+    kb: &'a Keybind,
+    visible: &[Bind],
+    overrides: &[KeymapEntry],
+) -> Cow<'a, str> {
+    for e in overrides {
+        if !e.desc.is_empty() && binds_contain(visible, e) {
+            let sanitized = sanitize_desc(&e.desc);
+            if !sanitized.is_empty() {
+                return Cow::Owned(sanitized);
+            }
+        }
     }
+    Cow::Borrowed(kb.description)
 }
 
 fn sanitize_desc(desc: &str) -> String {
@@ -193,13 +208,29 @@ impl HelpModal {
             return Rect::default();
         }
 
+        // Resolve each visible row once per draw, so the per-override matching
+        // below pays one `resolved_label` allocation per row instead of one
+        // per (row, override).
+        let rows: Vec<ResolvedRow> = KEYBINDS
+            .iter()
+            .filter(|kb| kb.platform.is_visible())
+            .map(|kb| {
+                let label = kb.resolved_label();
+                let n = label.visible_count().min(kb.binds.len());
+                ResolvedRow {
+                    kb,
+                    label,
+                    visible: &kb.binds[..n],
+                }
+            })
+            .collect();
+
         let mut lines: Vec<Line> = Vec::new();
         let theme = theme::current();
 
-        let key_col_width = KEYBINDS
+        let key_col_width = rows
             .iter()
-            .filter(|kb| kb.platform.is_visible())
-            .map(|kb| kb.resolved_label().display_width())
+            .map(|r| r.label.display_width())
             .chain(
                 overrides
                     .iter()
@@ -225,12 +256,9 @@ impl HelpModal {
                 theme.keybind_section,
             )));
 
-            for kb in KEYBINDS
-                .iter()
-                .filter(|kb| kb.context == ctx && kb.platform.is_visible())
-            {
-                let desc = row_description(kb, overrides);
-                let mut spans = key_spans(kb.resolved_label(), key_col_width, PREFIX_TOP);
+            for r in rows.iter().filter(|r| r.kb.context == ctx) {
+                let desc = row_description(r.kb, r.visible, overrides);
+                let mut spans = key_spans(&r.label, key_col_width, PREFIX_TOP);
                 spans.push(Span::styled(desc, theme.keybind_desc));
                 lines.push(Line::from(spans));
             }
@@ -239,11 +267,9 @@ impl HelpModal {
                 if child.parent() != Some(ctx) {
                     continue;
                 }
-                let child_binds: Vec<_> = KEYBINDS
-                    .iter()
-                    .filter(|kb| kb.context == child && kb.platform.is_visible())
-                    .collect();
-                if child_binds.is_empty() {
+                let child_rows: Vec<&ResolvedRow> =
+                    rows.iter().filter(|r| r.kb.context == child).collect();
+                if child_rows.is_empty() {
                     continue;
                 }
                 lines.push(Line::default());
@@ -251,13 +277,9 @@ impl HelpModal {
                     format!("    {}", child.label()),
                     theme.keybind_section,
                 )));
-                for kb in child_binds {
-                    let desc = row_description(kb, overrides);
-                    let mut spans = key_spans(
-                        kb.resolved_label(),
-                        key_col_width - KEY_COL_GAP,
-                        PREFIX_CHILD,
-                    );
+                for r in child_rows {
+                    let desc = row_description(r.kb, r.visible, overrides);
+                    let mut spans = key_spans(&r.label, key_col_width - KEY_COL_GAP, PREFIX_CHILD);
                     spans.push(Span::styled(desc, theme.keybind_desc));
                     lines.push(Line::from(spans));
                 }
@@ -270,11 +292,8 @@ impl HelpModal {
                     theme.keybind_section,
                 )));
                 for &(pfx, desc) in INPUT_PREFIXES {
-                    let mut spans = key_spans(
-                        ResolvedLabel::Single(pfx.to_string()),
-                        key_col_width - KEY_COL_GAP,
-                        PREFIX_CHILD,
-                    );
+                    let label = ResolvedLabel::Single(pfx.to_string());
+                    let mut spans = key_spans(&label, key_col_width - KEY_COL_GAP, PREFIX_CHILD);
                     spans.push(Span::styled(desc, theme.keybind_desc));
                     lines.push(Line::from(spans));
                 }
@@ -283,13 +302,7 @@ impl HelpModal {
 
         let unmatched: Vec<&KeymapEntry> = overrides
             .iter()
-            .filter(|e| {
-                !e.desc.is_empty()
-                    && !KEYBINDS
-                        .iter()
-                        .filter(|kb| kb.platform.is_visible())
-                        .any(|kb| binds_contain(visible_binds(kb), e))
-            })
+            .filter(|e| !e.desc.is_empty() && !rows.iter().any(|r| binds_contain(r.visible, e)))
             .collect();
         if !unmatched.is_empty() {
             lines.push(Line::default());
@@ -443,6 +456,38 @@ mod tests {
         assert!(
             !text.contains("Plugin bindings"),
             "matched override must not be listed again in Plugin bindings"
+        );
+    }
+
+    #[test]
+    fn first_alias_override_wins_and_swallows_second() {
+        let first = KeymapEntry {
+            key: key::NEXT_CHAT.code,
+            modifiers: key::NEXT_CHAT.modifiers,
+            desc: "first override".into(),
+            plugin: std::sync::Arc::from("p"),
+            id: 10,
+        };
+        let second = KeymapEntry {
+            key: key::PREV_CHAT.code,
+            modifiers: key::PREV_CHAT.modifiers,
+            desc: "second override".into(),
+            plugin: std::sync::Arc::from("p"),
+            id: 11,
+        };
+        let terminal = render_modal(&[first, second]);
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("first override"),
+            "first alias override wins the shared row"
+        );
+        assert!(
+            !text.contains("second override"),
+            "later alias override is not surfaced (first wins, shared-row match excludes it from Plugin bindings)"
+        );
+        assert!(
+            !text.contains("Plugin bindings"),
+            "matched alias row swallows both overrides, no Plugin bindings section"
         );
     }
 
