@@ -4,7 +4,6 @@ use flume::Sender;
 use maki_storage::StateDir;
 use maki_storage::id::SessionRef;
 use serde_json::Value;
-use tracing::{debug, warn};
 
 use crate::model::Model;
 use crate::provider::{BoxFuture, Provider};
@@ -67,18 +66,6 @@ pub struct OpenAi {
 }
 
 impl OpenAi {
-    pub fn new(timeouts: crate::providers::Timeouts) -> Result<Self, AgentError> {
-        let storage = StateDir::resolve()?;
-        let resolved = auth::resolve(&storage)?;
-        let compat = OpenAiCompatProvider::new(&CONFIG, timeouts);
-        Ok(Self {
-            compat,
-            auth: Arc::new(Mutex::new(resolved)),
-            storage: Some(storage),
-            system_prefix: None,
-        })
-    }
-
     pub(crate) fn with_auth(
         auth: Arc<Mutex<ResolvedAuth>>,
         timeouts: crate::providers::Timeouts,
@@ -91,6 +78,11 @@ impl OpenAi {
         }
     }
 
+    pub(crate) fn with_storage(mut self, storage: Option<StateDir>) -> Self {
+        self.storage = storage;
+        self
+    }
+
     pub(crate) fn with_system_prefix(mut self, prefix: Option<String>) -> Self {
         self.system_prefix = prefix;
         self
@@ -101,58 +93,16 @@ impl OpenAi {
     }
 
     fn is_oauth(&self) -> bool {
-        self.storage.as_ref().is_some_and(auth::is_oauth)
-    }
-
-    async fn refresh_oauth(&self) -> Result<(), AgentError> {
-        let storage = self.storage.clone().ok_or_else(|| AgentError::Config {
-            message: "OAuth refresh not available for externally-managed auth".into(),
-        })?;
-        let resolved = smol::unblock(move || {
-            let tokens =
-                maki_storage::auth::load_tokens(&storage, auth::PROVIDER).ok_or_else(|| {
-                    AgentError::Api {
-                        status: 401,
-                        message: "OpenAI OAuth tokens not found on disk".into(),
-                    }
-                })?;
-            match auth::refresh_tokens(&tokens) {
-                Ok(fresh) => {
-                    maki_storage::auth::save_tokens(&storage, auth::PROVIDER, &fresh)?;
-                    Ok(auth::build_oauth_resolved(&fresh))
-                }
-                Err(e) => {
-                    warn!(error = %e, "OpenAI OAuth refresh failed, clearing stale tokens");
-                    let _ = maki_storage::auth::delete_tokens(&storage, auth::PROVIDER);
-                    Err(e)
-                }
-            }
-        })
-        .await?;
-        *self.auth.lock().unwrap() = resolved;
-        debug!("refreshed OpenAI OAuth token");
-        Ok(())
-    }
-
-    async fn with_oauth_retry<T, F, Fut>(&self, f: F) -> Result<T, AgentError>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<T, AgentError>>,
-    {
-        let result = f().await;
-        if self.is_oauth()
-            && matches!(&result, Err(e) if e.is_auth_error())
-            && self.refresh_oauth().await.is_ok()
-        {
-            return f().await;
-        }
-        result
+        self.storage
+            .as_ref()
+            .is_some_and(|dir| auth::is_oauth(&auth::OPENAI_OAUTH, dir))
     }
 
     fn codex_auth(&self) -> Result<ResolvedAuth, AgentError> {
         // Prefer OAuth tokens for the ChatGPT Coding Plan backend.
         if let Some(storage) = self.storage.as_ref()
-            && let Some(tokens) = maki_storage::auth::load_tokens(storage, auth::PROVIDER)
+            && let Some(tokens) =
+                maki_storage::auth::load_tokens(storage, auth::OPENAI_OAUTH.provider)
         {
             return Ok(auth::build_coding_plan_resolved(&tokens));
         }
@@ -183,32 +133,25 @@ impl Provider for OpenAi {
             if is_codex_model(&model.id) {
                 let body = super::responses::build_body(model, messages, system, tools);
                 let stream_timeout = self.compat.stream_timeout();
-                return self
-                    .with_oauth_retry(|| async {
-                        let codex_auth = self.codex_auth()?;
-                        super::responses::do_stream(
-                            self.compat.client(),
-                            model,
-                            &body,
-                            event_tx,
-                            &codex_auth,
-                            stream_timeout,
-                        )
-                        .await
-                    })
-                    .await;
+                let codex_auth = self.codex_auth()?;
+                return super::responses::do_stream(
+                    self.compat.client(),
+                    model,
+                    &body,
+                    event_tx,
+                    &codex_auth,
+                    stream_timeout,
+                )
+                .await;
             }
 
             let mut body = self.compat.build_body(model, messages, system, tools);
             opts.thinking
                 .apply_reasoning_effort(&mut body, &dialect::STANDARD, model);
-            self.with_oauth_retry(|| async {
-                let auth = self.current_auth();
-                self.compat
-                    .do_stream(model, &[], &body, event_tx, &auth)
-                    .await
-            })
-            .await
+            let auth = self.current_auth();
+            self.compat
+                .do_stream(model, &[], &body, event_tx, &auth)
+                .await
         })
     }
 
@@ -223,33 +166,8 @@ impl Provider for OpenAi {
                     .collect();
                 return Ok(models);
             }
-            self.with_oauth_retry(|| async {
-                let auth = self.current_auth();
-                self.compat.do_list_models(&auth).await
-            })
-            .await
-        })
-    }
-
-    fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async {
-            if self.is_oauth() {
-                self.refresh_oauth().await
-            } else {
-                Ok(())
-            }
-        })
-    }
-
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async {
-            let Some(storage) = self.storage.clone() else {
-                return Ok(());
-            };
-            let resolved = smol::unblock(move || auth::resolve(&storage)).await?;
-            *self.auth.lock().unwrap() = resolved;
-            debug!("reloaded OpenAI auth from storage");
-            Ok(())
+            let auth = self.current_auth();
+            self.compat.do_list_models(&auth).await
         })
     }
 

@@ -15,8 +15,9 @@ use maki_config::providers::{
 use maki_config::{load_env_files, load_permissions};
 use maki_lua::PluginHost;
 use maki_providers::provider::fetch_all_models;
-use maki_providers::{ProviderData, catalog_providers};
-use maki_providers::{copilot_auth, dynamic, openai_auth};
+use maki_providers::{
+    ProviderData, catalog_providers, copilot_auth, dynamic, oauth, oauth_config,
+};
 use maki_storage::StateDir;
 use maki_storage::auth::ProviderCredentials;
 use maki_storage::auth::{
@@ -26,8 +27,11 @@ use maki_storage::model::persist_model;
 
 pub fn auth_login(provider: Option<&str>, storage: &StateDir) -> Result<()> {
     match provider {
-        Some("openai") => openai_auth::login(storage)?,
         Some("copilot") => copilot_auth::login(storage)?,
+        Some(slug) if oauth_config(slug).is_some() => {
+            let cfg = oauth_config(slug).expect("checked above");
+            oauth::login(cfg, storage)?;
+        }
         Some(slug) => {
             let slug = slugify(slug);
             if builtin_provider(&slug).is_none()
@@ -410,8 +414,11 @@ fn prompt_api_key(url: Option<&str>, display_name: &str, optional: bool) -> Resu
 pub fn auth_logout(provider: &str, storage: &StateDir) -> Result<()> {
     let slug = slugify(provider);
     match provider {
-        "openai" => openai_auth::logout(storage)?,
         "copilot" => copilot_auth::logout(storage)?,
+        _ if oauth_config(provider).is_some() => {
+            let cfg = oauth_config(provider).expect("checked above");
+            oauth::logout(cfg, storage)?;
+        }
         _ => {
             let mut config = ProvidersConfig::load();
             let deleted =

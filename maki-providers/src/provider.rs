@@ -16,7 +16,6 @@ use crate::providers::anthropic::bedrock::{self, Bedrock};
 use crate::providers::copilot::Copilot;
 use crate::providers::dynamic;
 use crate::providers::local::{LLAMACPP, LocalEndpoint, OLLAMA};
-use crate::providers::openai::OpenAi;
 use crate::providers::opencode::Opencode;
 use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
 
@@ -189,7 +188,6 @@ impl ProviderKind {
 
     pub fn create(self, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
         match self {
-            Self::OpenAi => Ok(Box::new(OpenAi::new(timeouts)?)),
             Self::Copilot => Ok(Box::new(Copilot::new(timeouts)?)),
             Self::Ollama => Ok(Box::new(LocalEndpoint::new(&OLLAMA, timeouts)?)),
             Self::LlamaCpp => Ok(Box::new(LocalEndpoint::new(&LLAMACPP, timeouts)?)),
