@@ -3098,3 +3098,97 @@ fn subagent_cancel_then_navigate_back_main_unaffected() {
     assert_eq!(app.status, Status::Streaming);
     assert!(!app.chats[0].is_finished());
 }
+
+fn keymap_reader_with_builtins(bindings: &[(KeyCode, KeyModifiers, maki_lua::BuiltinAction)]) -> KeymapReader {
+    let entries = bindings
+        .iter()
+        .map(|(k, m, a)| maki_lua::KeymapEntry {
+            key: *k,
+            modifiers: *m,
+            desc: String::new(),
+            plugin: std::sync::Arc::from("maki.builtin"),
+            handler: maki_lua::Handler::Builtin(*a),
+        })
+        .collect();
+    maki_lua::test_support::keymap_reader_with(entries)
+}
+
+#[test]
+fn remap_edit_input_to_alt_e_suppresses_default_alt_o() {
+    use maki_lua::BuiltinAction;
+    let mut app = test_app();
+    app.keymap_reader = keymap_reader_with_builtins(&[
+        (KeyCode::Char('e'), KeyModifiers::ALT, BuiltinAction::EditInputInEditor),
+        (KeyCode::Char('s'), KeyModifiers::CONTROL, BuiltinAction::FilePicker),
+        (KeyCode::Char('o'), KeyModifiers::CONTROL, BuiltinAction::OpenEditor),
+    ]);
+
+    let alt_e = app.update(Msg::Key(kb::EDIT_INPUT.to_key_event()));
+    // Alt+E: registered under the remap. Wait, kb::EDIT_INPUT is Alt+O.
+    let _ = alt_e;
+    let alt_e_event = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT);
+    let actions = app.update(Msg::Key(alt_e_event));
+    assert!(
+        matches!(&actions[..], [Action::EditInputInEditor]),
+        "remap target Alt+E should fire EditInputInEditor"
+    );
+
+    let actions = app.update(Msg::Key(kb::EDIT_INPUT.to_key_event()));
+    assert!(
+        actions.is_empty(),
+        "Alt+O default should be suppressed after EditInputInEditor moved off it"
+    );
+}
+
+#[test]
+fn default_consts_fallback_when_snapshot_has_no_builtins() {
+    let mut app = test_app();
+    // Empty snapshot (no plugin host registered defaults).
+    app.keymap_reader = maki_lua::test_support::keymap_reader_with(vec![]);
+
+    let actions = app.update(Msg::Key(kb::EDIT_INPUT.to_key_event()));
+    assert!(matches!(&actions[..], [Action::EditInputInEditor]));
+}
+
+#[test]
+fn del_action_disables_builtin_via_snapshot_absence() {
+    use maki_lua::BuiltinAction;
+    let mut app = test_app();
+    // Defaults registered, but FilePicker was cleared (del_action on the
+    // store side). The snapshot no longer carries a FilePicker entry.
+    app.keymap_reader = keymap_reader_with_builtins(&[
+        (KeyCode::Char('o'), KeyModifiers::ALT, BuiltinAction::EditInputInEditor),
+        (KeyCode::Char('o'), KeyModifiers::CONTROL, BuiltinAction::OpenEditor),
+    ]);
+
+    let actions = app.update(Msg::Key(kb::FILE_PICKER.to_key_event()));
+    assert!(
+        actions.is_empty(),
+        "del_action should leave Ctrl+S with no fallback to the static default"
+    );
+    assert!(
+        !app.file_picker.is_open(),
+        "FilePicker should not have opened"
+    );
+}
+
+#[test]
+fn non_main_chat_ignores_builtin_remap() {
+    use maki_lua::BuiltinAction;
+    let mut app = app_with_active_subagent();
+    app.keymap_reader = keymap_reader_with_builtins(&[
+        (KeyCode::Char('e'), KeyModifiers::ALT, BuiltinAction::EditInputInEditor),
+        (KeyCode::Char('o'), KeyModifiers::ALT, BuiltinAction::EditInputInEditor),
+        (KeyCode::Char('s'), KeyModifiers::CONTROL, BuiltinAction::FilePicker),
+        (KeyCode::Char('o'), KeyModifiers::CONTROL, BuiltinAction::OpenEditor),
+    ]);
+    assert!(!app.is_main_chat());
+
+    let alt_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT);
+    let actions = app.update(Msg::Key(alt_e));
+    assert!(
+        matches!(&actions[..], []),
+        "built-in remap must not fire outside main chat (gate preserved by call site)"
+    );
+    assert!(!app.file_picker.is_open());
+}

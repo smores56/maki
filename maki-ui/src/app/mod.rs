@@ -732,27 +732,53 @@ impl App {
         false
     }
 
-    fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
+    /// Resolve a built-in UI action for {key}: snapshot entries win, then the
+    /// static default consts act as a fallback. The fallback fires only for
+    /// variants absent from the snapshot, so that a registered remap (which
+    /// dedup-by-variant removes the default entry) shadows the default
+    /// key, and `del_action` (which removes the entry) disables the action.
+    /// When no plugin host registered defaults (e.g. `--no-plugins`), the
+    /// snapshot has no built-ins, so the consts faithfully cover the three
+    /// defaults.
+    fn lookup_builtin(&self, key: KeyEvent) -> Option<BuiltinAction> {
+        let snap = self.keymap_reader.load();
+        let mut snapshot_has_any_builtin = false;
+        for entry in &snap.entries {
+            if let maki_lua::Handler::Builtin(action) = entry.handler {
+                snapshot_has_any_builtin = true;
+                if entry.key == key.code && entry.modifiers == key.modifiers {
+                    return Some(action);
+                }
+            }
+        }
+        if snapshot_has_any_builtin {
+            return None;
+        }
         if key::EDIT_INPUT.matches(key) {
-            return vec![Action::EditInputInEditor];
+            return Some(BuiltinAction::EditInputInEditor);
+        }
+        if is_ctrl(&key) {
+            if key::OPEN_EDITOR.matches(key) {
+                return Some(BuiltinAction::OpenEditor);
+            }
+            if key::FILE_PICKER.matches(key) {
+                return Some(BuiltinAction::FilePicker);
+            }
+        }
+        None
+    }
+
+    fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if let Some(action) = self.lookup_builtin(key) {
+            return dispatch_builtin(action, self);
         }
         if is_ctrl(&key) {
             if key::POP_QUEUE.matches(key) {
                 self.queue.remove(0);
-            } else if key::OPEN_EDITOR.matches(key) {
-                return match self.state.plan.path() {
-                    Some(p) => vec![Action::OpenEditor(p.to_path_buf())],
-                    None => {
-                        self.flash(FLASH_NO_PLAN.into());
-                        vec![]
-                    }
-                };
             } else if key::SEARCH.matches(key) {
                 let top = self.chats[self.active_chat].scroll_top();
                 let auto = self.chats[self.active_chat].auto_scroll();
                 self.search_modal.open(top, auto);
-            } else if key::FILE_PICKER.matches(key) {
-                self.file_picker.open(&self.state.session.cwd);
             } else if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
                 self.start_image_paste();
             } else if let InputAction::PaletteSync(val) = self.input_box.handle_key(key) {
