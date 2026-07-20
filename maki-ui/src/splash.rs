@@ -8,40 +8,6 @@ use std::time::Instant;
 
 const LOGO: &str = "maki";
 const TAGLINE: &str = "the efficient coder";
-fn help_segments() -> Vec<(String, bool)> {
-    fn key_str(b: Bind) -> String {
-        format_key(b.code, b.modifiers)
-    }
-    vec![
-        (key_str(key::HELP), true),
-        (" help".to_string(), false),
-        (" · ".to_string(), false),
-        ("/help".to_string(), true),
-        (" in chat".to_string(), false),
-    ]
-}
-fn tips() -> Vec<(String, &'static str)> {
-    fn key_str(b: Bind) -> String {
-        format_key(b.code, b.modifiers)
-    }
-    vec![
-        (
-            key_str(key::FILE_PICKER),
-            "to grab file paths with fuzzy search",
-        ),
-        (key_str(key::TASKS), "to see what your subagents are up to"),
-        (key_str(key::SEARCH), "to find things in the conversation"),
-        (
-            "/btw".to_string(),
-            "to ask something without interrupting the session",
-        ),
-        (
-            "/memory".to_string(),
-            "to view, edit, and delete persistent notes",
-        ),
-        ("/cd".to_string(), "to switch to a different directory"),
-    ]
-}
 
 const COLOR_TRANSITION_SECS: f32 = 0.4;
 
@@ -68,6 +34,42 @@ const TAU: f32 = std::f32::consts::TAU;
 const PI: f32 = std::f32::consts::PI;
 const FRAC_PI_2: f32 = std::f32::consts::FRAC_PI_2;
 const BHASKARA_B: f32 = 4.0 / (PI * PI);
+
+fn help_segments() -> Vec<(String, bool)> {
+    fn key_str(b: Bind) -> String {
+        format_key(b.code, b.modifiers)
+    }
+    vec![
+        (key_str(key::HELP), true),
+        (" help".to_string(), false),
+        (" · ".to_string(), false),
+        ("/help".to_string(), true),
+        (" in chat".to_string(), false),
+    ]
+}
+
+fn tips() -> Vec<(String, &'static str)> {
+    fn key_str(b: Bind) -> String {
+        format_key(b.code, b.modifiers)
+    }
+    vec![
+        (
+            key_str(key::FILE_PICKER),
+            "to grab file paths with fuzzy search",
+        ),
+        (key_str(key::TASKS), "to see what your subagents are up to"),
+        (key_str(key::SEARCH), "to find things in the conversation"),
+        (
+            "/btw".to_string(),
+            "to ask something without interrupting the session",
+        ),
+        (
+            "/memory".to_string(),
+            "to view, edit, and delete persistent notes",
+        ),
+        ("/cd".to_string(), "to switch to a different directory"),
+    ]
+}
 
 #[inline(always)]
 fn fast_sin(x: f32) -> f32 {
@@ -133,7 +135,8 @@ pub struct Splash {
     start: Instant,
     field_offset: f32,
     animate: bool,
-    tip_idx: usize,
+    tip: (String, &'static str),
+    help_segments: Vec<(String, bool)>,
 }
 
 impl Default for Splash {
@@ -146,12 +149,14 @@ impl Splash {
     pub fn new(animate: bool) -> Self {
         let mut rng = [0u8; 8];
         getrandom::fill(&mut rng).ok();
-        let tip_idx = u32::from_le_bytes([rng[4], rng[5], rng[6], rng[7]]) as usize % tips().len();
+        let tips = tips();
+        let tip_idx = u32::from_le_bytes([rng[4], rng[5], rng[6], rng[7]]) as usize % tips.len();
         Self {
             start: Instant::now(),
             field_offset: (u64::from_le_bytes(rng) % 10_000) as f32,
             animate,
-            tip_idx,
+            tip: tips.into_iter().nth(tip_idx).unwrap(),
+            help_segments: help_segments(),
         }
     }
 
@@ -366,7 +371,7 @@ impl Splash {
         let fg = extract_rgb(theme.foreground, (200, 200, 200));
         let bg_rgb = extract_rgb(bg, (15, 15, 25));
 
-        let help_segs = help_segments();
+        let help_segs = &self.help_segments;
         let total_width: u16 = help_segs.iter().map(|(s, _)| s.len() as u16).sum();
         let x_start = area.x + area.width.saturating_sub(total_width) / 2;
 
@@ -396,7 +401,7 @@ impl Splash {
         let fg = extract_rgb(theme.foreground, (200, 200, 200));
         let bg_rgb = extract_rgb(bg, (15, 15, 25));
 
-        let (label, desc) = &tips()[self.tip_idx];
+        let (label, desc) = &self.tip;
         let total_width = (5 + label.len() + 1 + desc.len()) as u16;
         let x_start = area.x + area.width.saturating_sub(total_width) / 2;
 
