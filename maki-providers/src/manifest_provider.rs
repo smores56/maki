@@ -2,16 +2,20 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use flume::Sender;
 use maki_config::providers::{ProvidersConfig, resolve_base_url};
+use maki_storage::StateDir;
 use maki_storage::id::SessionRef;
 use serde_json::Value;
 use tracing::debug;
+use tracing::warn;
 
 use crate::AgentError;
-use crate::auth_source::{AuthSource, EnvAuthSource};
+use crate::auth_source::{AuthSource, EnvAuthSource, OAuthAuthSource};
 use crate::manifest::{AuthKind, ManifestRegistry};
 use crate::model::{Model, ModelInfo};
 use crate::provider::{BoxFuture, Provider};
 use crate::providers::ResolvedAuth;
+use crate::providers::oauth::oauth_config;
+use crate::providers::openai::OpenAi;
 use crate::providers::{
     KeyPool, Timeouts, anthropic, deepseek, google, mistral, openrouter, synthetic, tensorx, zai,
 };
@@ -33,22 +37,22 @@ impl ManifestProvider {
         let Some(manifest) = ManifestRegistry::get(slug) else {
             return Ok(None);
         };
-        if !matches!(manifest.auth_kind, AuthKind::Env) {
-            return Ok(None);
-        }
-        let provider =
-            build_env(manifest.slug, timeouts)?.map(|p| Box::new(p) as Box<dyn Provider>);
-        Ok(provider)
+        let provider = match manifest.auth_kind {
+            AuthKind::Env => build_env(manifest.slug, timeouts)?,
+            AuthKind::OAuth => build_oauth(manifest.slug, timeouts)?,
+        };
+        Ok(provider.map(|p| Box::new(p) as Box<dyn Provider>))
     }
 
     fn engine(&self) -> Result<&dyn Provider, AgentError> {
         if let Some(engine) = self.engine.get() {
             return Ok(engine.as_ref());
         }
-        // Auth is resolved eagerly at construction (build_env today, build_oauth
-        // in PR 2) so the engine reads a populated handle here. AuthSource's
-        // reload/refresh/rotate_key mutate the same Arc the engine reads
-        // per-request, so no re-resolve is needed at engine-build time.
+        // Auth is resolved eagerly at construction (build_env for Env slugs,
+        // build_oauth for OAuth slugs) so the engine reads a populated handle
+        // here. AuthSource's reload/refresh/rotate_key mutate the same Arc the
+        // engine reads per-request, so no re-resolve is needed at engine-build
+        // time.
         let built = build_engine(self.slug, self.auth.clone(), self.timeouts)?;
         if self.engine.set(built).is_err() {
             // Another caller won the race; use its engine.
@@ -73,6 +77,8 @@ const ENV_ENVELOPED_SLUGS: &[&str] = &[
     "tensorx",
     "openrouter",
 ];
+
+const OAUTH_ENVELOPED_SLUGS: &[&str] = &["openai"];
 
 fn build_env(
     slug: &'static str,
@@ -163,12 +169,49 @@ fn bearer_with_base_url(api_key: &str, base_url: Option<String>) -> ResolvedAuth
     auth
 }
 
+fn build_oauth(
+    slug: &'static str,
+    timeouts: Timeouts,
+) -> Result<Option<ManifestProvider>, AgentError> {
+    // Partition check: any OAuth builtin not listed here falls through to
+    // `provider_for_slug`'s next routing tier. Currently only `openai` is
+    // enveloped; `copilot` stays on ProviderKind::create until a later
+    // LuaAuthSource lands it as a Lua manifest (its token-import flow does
+    // not fit OAuthConfig).
+    if !OAUTH_ENVELOPED_SLUGS.contains(&slug) {
+        return Ok(None);
+    }
+    let Some(cfg) = oauth_config(slug) else {
+        return Ok(None);
+    };
+    let dir = StateDir::resolve()?;
+    let auth_source: Box<dyn AuthSource> = Box::new(OAuthAuthSource::new(cfg, dir));
+    let auth = Arc::new(Mutex::new(ResolvedAuth {
+        base_url: None,
+        headers: Vec::new(),
+    }));
+    // Eager-resolve matches build_env's contract: load on-disk OAuth tokens
+    // (or env-fallback API key) into shared auth state at construction so the
+    // engine reads populated headers on the first request, and
+    // provider_for_slug fails fast when no tokens exist (mirroring env-key
+    // absence). HTTP refresh is deferred to the lazy retry path on a 401.
+    auth_source.resolve(&auth)?;
+    Ok(Some(ManifestProvider {
+        slug,
+        auth,
+        auth_source,
+        engine: OnceLock::new(),
+        timeouts,
+    }))
+}
+
 fn build_engine(
     slug: &str,
     auth: Arc<Mutex<ResolvedAuth>>,
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
     match slug {
+        "openai" => Ok(Box::new(OpenAi::with_auth(auth, timeouts))),
         "anthropic" => Ok(Box::new(anthropic::Anthropic::with_auth(auth, timeouts))),
         "google" => Ok(Box::new(google::Google::with_auth(auth, timeouts))),
         "mistral" => Ok(Box::new(mistral::Mistral::with_auth(auth, timeouts))),
@@ -177,7 +220,9 @@ fn build_engine(
         "synthetic" => Ok(Box::new(synthetic::Synthetic::with_auth(auth, timeouts))),
         "tensorx" => Ok(Box::new(tensorx::TensorX::with_auth(auth, timeouts))),
         "openrouter" => Ok(Box::new(openrouter::OpenRouter::with_auth(auth, timeouts))),
-        other => unreachable!("slug '{other}' reached build_engine but not ENV_ENVELOPED_SLUGS"),
+        other => unreachable!(
+            "slug '{other}' reached build_engine but not ENV_ENVELOPED_SLUGS or OAUTH_ENVELOPED_SLUGS"
+        ),
     }
 }
 
@@ -194,28 +239,60 @@ impl Provider for ManifestProvider {
     ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
         Box::pin(async move {
             let engine = self.engine()?;
-            engine
+            let result = engine
                 .stream_message(model, messages, system, tools, event_tx, opts, session_id)
-                .await
+                .await;
+            if matches!(&result, Err(e) if e.is_auth_error()) && self.auth_source.is_oauth() {
+                if self.auth_source.refresh(&self.auth).await.is_ok() {
+                    return engine
+                        .stream_message(model, messages, system, tools, event_tx, opts, session_id)
+                        .await;
+                }
+                warn!(
+                    slug = self.slug,
+                    "auth refresh failed, surfacing original error"
+                );
+            }
+            result
         })
     }
 
     fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
         Box::pin(async move {
             let engine = self.engine()?;
-            engine.list_models().await
+            let result = engine.list_models().await;
+            if matches!(&result, Err(e) if e.is_auth_error()) && self.auth_source.is_oauth() {
+                if self.auth_source.refresh(&self.auth).await.is_ok() {
+                    return engine.list_models().await;
+                }
+                warn!(
+                    slug = self.slug,
+                    "auth refresh failed, surfacing original error"
+                );
+            }
+            result
         })
     }
 
     fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
         Box::pin(async move {
             let engine = self.engine()?;
-            engine.fetch_usage().await
+            let result = engine.fetch_usage().await;
+            if matches!(&result, Err(e) if e.is_auth_error()) && self.auth_source.is_oauth() {
+                if self.auth_source.refresh(&self.auth).await.is_ok() {
+                    return engine.fetch_usage().await;
+                }
+                warn!(
+                    slug = self.slug,
+                    "auth refresh failed, surfacing original error"
+                );
+            }
+            result
         })
     }
 
     fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async move { self.auth_source.refresh(&self.auth) })
+        Box::pin(async move { self.auth_source.refresh(&self.auth).await })
     }
 
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
@@ -238,7 +315,7 @@ mod tests {
     use super::*;
 
     const LOCAL_HOST_SLUGS: &[&str] = &["ollama", "llama-cpp", "opencode"];
-    const OAUTH_SLUGS: &[&str] = &["openai", "copilot"];
+    const OAUTH_FALLTHROUGH_SLUGS: &[&str] = &["copilot"];
 
     #[test]
     fn try_for_slug_local_manifests_return_ok_none() {
@@ -253,15 +330,37 @@ mod tests {
     }
 
     #[test]
-    fn try_for_slug_oauth_manifests_return_ok_none() {
-        for slug in OAUTH_SLUGS {
-            assert!(
-                ManifestProvider::try_for_slug(slug, Timeouts::default())
-                    .unwrap()
-                    .is_none(),
-                "{slug} is OAuth and stays on ProviderKind::create until Phase 2"
-            );
+    fn try_for_slug_openai_routes_through_envelope() {
+        // OPENAI_API_KEY drives the env-fallback arm in `oauth::resolve`, so
+        // the routing test succeeds regardless of whether tokens are stored
+        // on disk. `cfg.env_fallback` already pins the var name.
+        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-test") };
+        struct VarGuard(&'static str);
+        impl Drop for VarGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var(self.0) }
+            }
         }
+        let _guard = VarGuard("OPENAI_API_KEY");
+        assert!(
+            ManifestProvider::try_for_slug("openai", Timeouts::default())
+                .unwrap()
+                .is_some(),
+            "openai is an OAuth builtin routed through the manifest envelope",
+        );
+    }
+
+    #[test]
+    fn try_for_slug_copilot_returns_ok_none() {
+        // Copilot's auth (token import, no refresh/device flow) does not fit
+        // OAuthConfig yet; it stays on ProviderKind::create until a later
+        // LuaAuthSource lands it as a Lua manifest.
+        assert!(
+            ManifestProvider::try_for_slug("copilot", Timeouts::default())
+                .unwrap()
+                .is_none(),
+            "copilot must return Ok(None) so provider_for_slug falls through to ProviderKind::create",
+        );
     }
 
     #[test]
@@ -273,7 +372,14 @@ mod tests {
                     ENV_ENVELOPED_SLUGS.contains(&manifest.slug),
                 ),
                 ("LOCAL_HOST", LOCAL_HOST_SLUGS.contains(&manifest.slug)),
-                ("OAUTH", OAUTH_SLUGS.contains(&manifest.slug)),
+                (
+                    "OAUTH_ENVELOPED",
+                    OAUTH_ENVELOPED_SLUGS.contains(&manifest.slug),
+                ),
+                (
+                    "OAUTH_FALLTHROUGH",
+                    OAUTH_FALLTHROUGH_SLUGS.contains(&manifest.slug),
+                ),
             ];
             let count = buckets.iter().filter(|(_, in_bucket)| *in_bucket).count();
             assert_eq!(
@@ -289,7 +395,8 @@ mod tests {
         for (bucket_slugs, expected) in [
             (ENV_ENVELOPED_SLUGS, AuthKind::Env),
             (LOCAL_HOST_SLUGS, AuthKind::Env),
-            (OAUTH_SLUGS, AuthKind::OAuth),
+            (OAUTH_ENVELOPED_SLUGS, AuthKind::OAuth),
+            (OAUTH_FALLTHROUGH_SLUGS, AuthKind::OAuth),
         ] {
             for slug in bucket_slugs {
                 let manifest = ManifestRegistry::get(slug).unwrap_or_else(|| {

@@ -1,24 +1,57 @@
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use tracing::debug;
 
 use crate::AgentError;
 use crate::providers::KeyPool;
 use crate::providers::ResolvedAuth;
+use crate::providers::oauth::OAuthConfig;
+
+type ProviderLocks = Mutex<HashMap<&'static str, Arc<smol::lock::Mutex<()>>>>;
+
+// Per-process single-flight refresh lock, keyed by OAuth provider slug. The
+// lock must outlive any single `OAuthAuthSource` instance: a fresh
+// `ManifestProvider` for the same slug (e.g. cleared auth state forcing a new
+// `build_oauth`) would otherwise get a brand-new `Mutex` and lose the
+// serialization this lock exists to provide — two concurrent 401s would both
+// load the same refresh token, race to save, and (if the issuer rotates
+// refresh tokens) the loser would wipe the winner's freshly-stored tokens.
+static OAUTH_REFRESH_LOCKS: LazyLock<ProviderLocks> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn oauth_refresh_lock(provider: &'static str) -> Arc<smol::lock::Mutex<()>> {
+    let mut map = OAUTH_REFRESH_LOCKS.lock().unwrap();
+    map.entry(provider)
+        .or_insert_with(|| Arc::new(smol::lock::Mutex::new(())))
+        .clone()
+}
 
 pub trait AuthSource: Send + Sync {
     // Sync signatures suffice for Env/OAuth (env var read, on-disk token load).
-    // Phase 4's LuaAuthSource round-trips the Lua host thread, which blocks the
-    // caller; resolve/reload must become async BoxFutures before that impl lands.
+    // Only `refresh` is async because the HTTP token-refresh path blocks on
+    // the network. A future Lua-backed AuthSource (over the Lua host thread)
+    // would block the caller; resolve/reload must become async BoxFutures
+    // before that impl lands.
     fn resolve(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError>;
     fn reload(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
         Ok(())
     }
-    fn refresh(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
-        Ok(())
+    fn refresh<'a>(
+        &'a self,
+        auth: &'a Arc<Mutex<ResolvedAuth>>,
+    ) -> crate::provider::BoxFuture<'a, Result<(), AgentError>> {
+        let _ = auth;
+        Box::pin(async { Ok(()) })
     }
     fn rotate_key(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> Result<bool, AgentError> {
         Ok(false)
+    }
+    // `is_oauth` signals "on auth error, retry after refresh" to the centralized
+    // `with_oauth_retry` in ManifestProvider. A future Lua-backed AuthSource
+    // join may flip this to a trait method returning an enum (e.g.
+    // `AuthKind::OAuth`), replacing the bool flag.
+    fn is_oauth(&self) -> bool {
+        false
     }
 }
 
@@ -139,6 +172,90 @@ impl AuthSource for EnvAuthSource {
             *auth.lock().unwrap() = (self.build)(&pending.key);
         }
         Ok(still_current)
+    }
+}
+
+pub struct OAuthAuthSource {
+    cfg: &'static OAuthConfig,
+    dir: maki_storage::StateDir,
+    /// Serializes concurrent refresh attempts on the same provider. Without it,
+    /// two simultaneous 401s both load the same refresh token; if the issuer
+    /// rotates refresh tokens, the loser's request fails (invalid_grant) and
+    /// would wipe the winner's freshly-saved tokens. Shared across all
+    /// `OAuthAuthSource` instances for this slug (see `OAUTH_REFRESH_LOCKS`).
+    refresh_lock: Arc<smol::lock::Mutex<()>>,
+}
+
+impl OAuthAuthSource {
+    pub fn new(cfg: &'static OAuthConfig, dir: maki_storage::StateDir) -> Self {
+        Self {
+            cfg,
+            dir,
+            refresh_lock: oauth_refresh_lock(cfg.provider),
+        }
+    }
+}
+
+impl AuthSource for OAuthAuthSource {
+    fn resolve(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
+        let resolved = crate::providers::oauth::resolve(self.cfg, &self.dir)?;
+        *auth.lock().unwrap() = resolved;
+        Ok(())
+    }
+
+    fn reload(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
+        let resolved = crate::providers::oauth::resolve(self.cfg, &self.dir)?;
+        *auth.lock().unwrap() = resolved;
+        debug!(provider = self.cfg.provider, "reloaded OAuth auth");
+        Ok(())
+    }
+
+    fn refresh<'a>(
+        &'a self,
+        auth: &'a Arc<Mutex<ResolvedAuth>>,
+    ) -> crate::provider::BoxFuture<'a, Result<(), AgentError>> {
+        Box::pin(async move {
+            // Single-flight: a concurrent 401 waits here while the first
+            // caller refreshes, then re-loads whatever the first saved.
+            let _guard = self.refresh_lock.lock().await;
+            let cfg = self.cfg;
+            let dir = self.dir.clone();
+            let resolved = smol::unblock(move || -> Result<ResolvedAuth, AgentError> {
+                let tokens = maki_storage::auth::load_tokens(&dir, cfg.provider).ok_or_else(|| {
+                    AgentError::Api {
+                        status: 401,
+                        message: format!("{} OAuth tokens not found on disk", cfg.provider),
+                    }
+                })?;
+                match crate::providers::oauth::refresh_tokens(cfg, &tokens) {
+                    Ok(fresh) => {
+                        maki_storage::auth::save_tokens(&dir, cfg.provider, &fresh)?;
+                        debug!(provider = cfg.provider, "refreshed OAuth tokens");
+                        Ok(crate::providers::oauth::build_resolved(cfg, &fresh))
+                    }
+                    Err(e) => {
+                        // Only wipe stored tokens when the refresh token is
+                        // confirmed revoked (invalid_grant / 401). Transient
+                        // 5xx or network failures keep the file so the next
+                        // request can retry instead of forcing re-login.
+                        if e.is_auth_error() {
+                            tracing::warn!(provider = cfg.provider, error = %e, "OAuth refresh token revoked, clearing stored tokens");
+                            let _ = maki_storage::auth::delete_tokens(&dir, cfg.provider);
+                        } else {
+                            tracing::warn!(provider = cfg.provider, error = %e, "OAuth refresh failed (transient), keeping stored tokens");
+                        }
+                        Err(e)
+                    }
+                }
+            })
+            .await?;
+            *auth.lock().unwrap() = resolved;
+            Ok(())
+        })
+    }
+
+    fn is_oauth(&self) -> bool {
+        true
     }
 }
 

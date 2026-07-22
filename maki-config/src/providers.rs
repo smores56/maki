@@ -179,29 +179,21 @@ pub enum ProvidersConfigError {
 }
 
 impl ProvidersConfig {
-    /// Read and parse `providers.toml`. Hard-exits on parse errors so a typo
-    /// in tier or pricing surfaces immediately instead of silently dropping
-    /// every provider and starting maki with an empty registry.
+    /// Read and parse `providers.toml`. Hard-exits on any error so a typo
+    /// in tier or pricing (or an unreadable file) surfaces immediately
+    /// instead of silently dropping every provider and starting maki with an
+    /// empty registry. Missing files are treated as an empty registry (see
+    /// `load_from`) and never reach this path.
     pub fn load() -> Self {
-        match Self::try_load() {
-            Ok(config) => config,
-            Err(ProvidersConfigError::Read { path, source }) => {
-                tracing::warn!(path = %path.display(), error = %source, "cannot read providers.toml");
-                Self::default()
-            }
-            Err(error) => {
-                eprintln!("error: {error}");
-                process::exit(BAD_CONFIG_EXIT_CODE);
-            }
-        }
+        Self::try_load().unwrap_or_else(|error| {
+            eprintln!("error: {error}");
+            process::exit(BAD_CONFIG_EXIT_CODE);
+        })
     }
 
     /// Read and parse `providers.toml`, returning a typed error instead of
-    /// hard-exiting. Runtime callers (e.g. `KeyPool::resolve` refreshing the
-    /// key pool on demand) must not exit the process; the `Parse` variant
-    /// uses `toml::de::Error::message()` to avoid leaking the raw line
-    /// (which may contain a secret api_key value embedded in the malformed
-    /// TOML).
+    /// hard-exiting. Use for runtime callers that must not kill the process
+    /// (e.g. refreshing the key pool on demand).
     pub fn try_load() -> Result<Self, ProvidersConfigError> {
         Self::load_from(&providers_file_path())
     }
@@ -219,6 +211,9 @@ impl ProvidersConfig {
                 });
             }
         };
+        // `toml::de::Error`'s `Display` leaks the raw offending line (which
+        // may contain a secret api_key embedded in malformed TOML); `message`
+        // surfaces only the parse error and position.
         let config = toml::from_str(&content).map_err(|source: toml::de::Error| {
             ProvidersConfigError::Parse {
                 path: path.to_path_buf(),
