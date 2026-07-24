@@ -515,6 +515,18 @@ pub fn has_manifest_provider(slug: &str) -> bool {
     registry().lock().unwrap().contains_key(slug)
 }
 
+/// Engine spec for a Lua-registered manifest provider, looked up by slug.
+/// `EngineSpec` is the authoritative source of `api_key_env` / `base_url`
+/// (the `ProviderManifest` capability struct carries neither), so docgen and
+/// status surfaces query it here for env/url rendering.
+pub fn engine_spec(slug: &str) -> Option<EngineSpec> {
+    registry()
+        .lock()
+        .unwrap()
+        .get(slug)
+        .map(|(spec, _)| spec.clone())
+}
+
 pub(crate) fn manifest_provider(
     slug: &str,
     timeouts: Timeouts,

@@ -1,9 +1,11 @@
 use std::fmt::Write;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use maki_agent::tools::ToolRegistry;
 use maki_lua::PluginHost;
-use maki_providers::manifest::ManifestRegistry;
+use maki_providers::manifest::{ManifestRegistry, ProviderManifest};
+use maki_providers::manifest_provider::{self, EngineSpec};
 use maki_providers::model::{ModelEntry, ModelTier};
 use maki_providers::provider::ProviderKind;
 use strum::IntoEnumIterator;
@@ -330,6 +332,73 @@ fn write_section(out: &mut String, section: &ProviderSection) {
     }
 }
 
+/// Features line for a manifest-owned provider, derived from the manifest's
+/// capability fields. Mirrors the prose style of `ProviderKind::features`:
+/// comma-separated, lowercased, only lists what the manifest actually declares.
+/// Stays generic (no hand-prose) until a manifest ships its own `docs` table.
+fn derive_manifest_features(manifest: &ProviderManifest) -> Option<String> {
+    let mut feats: Vec<&str> = Vec::new();
+    if manifest.supports_thinking {
+        feats.push("thinking mode");
+    }
+    if manifest.models.iter().any(|m| m.vision) {
+        feats.push("vision input");
+    }
+    if manifest.accepts_arbitrary_models {
+        feats.push("arbitrary model IDs");
+    }
+    if feats.is_empty() {
+        return None;
+    }
+    let mut s = feats.join(", ");
+    s[0..1].make_ascii_uppercase();
+    Some(s)
+}
+
+/// One section per manifest-owned builtin (DeepSeek today). Skips slugs the
+/// native `ProviderKind` already documents (so the two paths never double-print
+/// a provider) and derives env/url from `EngineSpec`, the authoritative source
+/// of both for a Lua-registered provider.
+fn write_manifest_sections(out: &mut String) {
+    let mut owned: Vec<&ProviderManifest> = ManifestRegistry::builtins()
+        .into_iter()
+        .filter(|m| ProviderKind::from_str(m.slug).is_err())
+        .collect();
+    owned.sort_by_key(|m| m.slug);
+
+    for manifest in owned {
+        let _ = writeln!(out, "### {}\n", manifest.display_name);
+        let mut auth_lines: Vec<String> = Vec::new();
+        let mut urls: Vec<String> = Vec::new();
+        if let Some(EngineSpec::OpenaiCompat {
+            api_key_env,
+            base_url,
+            ..
+        }) = manifest_provider::engine_spec(manifest.slug)
+        {
+            auth_lines.push(format!("`{api_key_env}`"));
+            urls.push(base_url);
+        }
+        for line in &auth_lines {
+            let _ = writeln!(out, "- **Env var**: {line}");
+        }
+        if urls.len() == 1 {
+            let _ = writeln!(out, "- **API**: `{}`", urls[0]);
+        } else {
+            let _ = writeln!(out, "- **API endpoints**:");
+            for url in &urls {
+                let _ = writeln!(out, "  - `{url}`");
+            }
+        }
+        if let Some(features) = derive_manifest_features(manifest) {
+            let _ = writeln!(out, "- **Features**: {features}");
+        }
+        let _ = writeln!(out);
+        write_model_table(out, manifest.models);
+        let _ = writeln!(out);
+    }
+}
+
 pub fn generate() -> String {
     let mut out = String::with_capacity(4096);
 
@@ -358,6 +427,11 @@ pub fn generate() -> String {
         write_section(&mut out, section);
         let _ = writeln!(out);
     }
+
+    // Manifest-owned builtins (DeepSeek) are loaded by the Lua host above and
+    // register into `ManifestRegistry`; render their sections out of the
+    // engine/auth specs since they have no Rust `ProviderKind`.
+    write_manifest_sections(&mut out);
 
     let _ = writeln!(out, "{MODEL_IDENTIFIERS}\n");
     let _ = writeln!(out, "{}", dynamic_providers_section());

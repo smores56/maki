@@ -192,6 +192,19 @@ enable_free_models = true
 
 The default is `false`.
 
+### DeepSeek
+
+- **Env var**: `DEEPSEEK_API_KEY`
+- **API**: `https://api.deepseek.com`
+- **Features**: Thinking mode
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Medium | **deepseek-v4-flash** (default) | $0.14 / $0.28 | 1000K ctx / 384K out |
+| Strong | **deepseek-v4-pro** (default) | $0.43 / $0.87 | 1000K ctx / 384K out |
+
+Defaults: deepseek-v4-flash (medium), deepseek-v4-pro (strong)
+
 ## Model Identifiers
 
 Models are referenced as `provider/model_id`:
