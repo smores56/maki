@@ -113,10 +113,11 @@ pub(crate) fn lib_dir() -> &'static Dir<'static> {
         .dir
 }
 
-static BUNDLED_PROVIDERS: &[BundledPlugin] = &[BundledPlugin {
-    name: "deepseek",
-    dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/providers/deepseek"),
-}];
+/// Embedded `plugins/providers` tree. Each `<slug>/init.lua` is a provider
+/// manifest discovered by iterating this dir's child directories, so adding a
+/// new provider is a drop-in folder with no Rust edit.
+static PROVIDERS_DIR: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/../plugins/providers");
 
 static BUNDLED_DIRS: LazyLock<&'static [&'static Dir<'static>]> = LazyLock::new(|| {
     let dirs: Vec<&'static Dir<'static>> = BUNDLED_PLUGINS.iter().map(|p| &p.dir).collect();
@@ -287,25 +288,22 @@ impl PluginHost {
         Ok(())
     }
 
-    /// Load every embedded `plugins/providers/<slug>/init.lua` manifest. Each
-    /// manifest calls `maki.provider.register` as a side-effect on the Lua
+    /// Discover and load every `plugins/providers/<slug>/init.lua` manifest.
+    /// Each manifest calls `maki.provider.register` as a side-effect on the Lua
     /// thread, registering into the static manifest registry so
     /// `provider_for_slug("<slug>", ...)` routes through the `ManifestProvider`
-    /// envelope. No-op when the host is disabled.
+    /// envelope. Discovery walks `PROVIDERS_DIR.dirs()`, so new providers are a
+    /// drop-in folder; unlike `BUNDLED_PLUGINS`, they are not gated by
+    /// `PluginsConfig` (a provider manifest isn't a user-visible plugin).
     fn load_bundled_providers(&self) -> Result<(), PluginError> {
-        if self.inner.is_none() {
-            return Ok(());
-        }
-        for plugin in BUNDLED_PROVIDERS {
-            let init = plugin
-                .dir
-                .get_file("init.lua")
-                .and_then(|f| f.contents_utf8())
-                .ok_or_else(|| PluginError::Lua {
-                    plugin: plugin.name.to_string(),
-                    source: mlua::Error::runtime("bundled provider missing init.lua"),
-                })?;
-            let name: Arc<str> = Arc::from(plugin.name);
+        for dir in PROVIDERS_DIR.dirs() {
+            let Some(slug) = dir.path().file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(init) = dir.get_file("init.lua").and_then(|f| f.contents_utf8()) else {
+                continue;
+            };
+            let name: Arc<str> = Arc::from(format!("providers/{slug}"));
             self.send_load(
                 name,
                 init.to_owned(),
