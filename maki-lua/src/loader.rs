@@ -116,8 +116,7 @@ pub(crate) fn lib_dir() -> &'static Dir<'static> {
 /// Embedded `plugins/providers` tree. Each `<slug>/init.lua` is a provider
 /// manifest discovered by iterating this dir's child directories, so adding a
 /// new provider is a drop-in folder with no Rust edit.
-static PROVIDERS_DIR: Dir<'static> =
-    include_dir!("$CARGO_MANIFEST_DIR/../plugins/providers");
+static PROVIDERS_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../plugins/providers");
 
 static BUNDLED_DIRS: LazyLock<&'static [&'static Dir<'static>]> = LazyLock::new(|| {
     let dirs: Vec<&'static Dir<'static>> = BUNDLED_PLUGINS.iter().map(|p| &p.dir).collect();
@@ -301,9 +300,10 @@ impl PluginHost {
                 Some(s) => s,
                 None => continue,
             };
-            let init = match dir.files().find(|f| {
-                f.path().file_name() == Some(std::ffi::OsStr::new("init.lua"))
-            }) {
+            let init = match dir
+                .files()
+                .find(|f| f.path().file_name() == Some(std::ffi::OsStr::new("init.lua")))
+            {
                 Some(f) => match f.contents_utf8() {
                     Some(s) => s,
                     None => continue,
