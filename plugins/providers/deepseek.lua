@@ -8,6 +8,10 @@ maki.provider.register({
   accepts_arbitrary_models = false,
   fallback_max_output = 384000,
   fallback_context_window = 1000000,
+  qualities = {
+    "Thinking mode toggle (on/off)",
+    "open-weight models",
+  },
   engine = maki.provider.openai_compat({
     base_url = "https://api.deepseek.com",
     api_key_env = "DEEPSEEK_API_KEY",

@@ -82,6 +82,8 @@ pub struct ManifestDescriptor {
     pub fallback_context_window: Option<u32>,
     #[serde(default)]
     pub models: Vec<ModelInfoDescriptor>,
+    #[serde(default)]
+    pub qualities: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -204,7 +206,6 @@ impl ManifestProvider {
     /// Eager auth resolution: a missing key fails here. Used by
     /// `provider_for_slug` for env-key providers loaded from a manifest.
     pub fn new(
-        _slug: Arc<str>,
         engine_spec: EngineSpec,
         auth: Arc<LuaAuthSource>,
         timeouts: Timeouts,
@@ -317,6 +318,14 @@ fn pad_reasoning_content(model_id: &str, body: &mut Value) {
 
 fn leak_str(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
+}
+
+fn leak_qualities(q: Option<Vec<String>>) -> Option<&'static [&'static str]> {
+    q.map(|vec| {
+        let leaked: Vec<&'static str> = vec.iter().map(|s| leak_str(s)).collect();
+        let boxed: Box<[&'static str]> = leaked.into_boxed_slice();
+        &*Box::leak(boxed)
+    })
 }
 
 fn leak_openai_compat_config(
@@ -534,7 +543,13 @@ impl ManifestDescriptor {
                     vision: d.supports_vision.unwrap_or(false),
                     default: d.default.unwrap_or(false),
                     pricing: d.pricing.clone().unwrap_or_default(),
-                    max_output_tokens: d.max_output_tokens.or(fallback_max_output).unwrap_or(0),
+                    max_output_tokens: d
+                        .max_output_tokens
+                        .or(fallback_max_output)
+                        .unwrap_or_else(|| {
+                            warn!(model = %d.id, "manifest model declares no max_output_tokens; defaulting to 0");
+                            0
+                        }),
                     context_window: d.context_window.unwrap_or(fallback_context_window),
                 };
                 (entry, d.into_model_info())
@@ -550,6 +565,7 @@ impl ManifestDescriptor {
             fallback_max_output,
             fallback_context_window,
             models: Box::leak(entries.into_boxed_slice()),
+            qualities: leak_qualities(self.qualities),
         };
         (slug_arc, engine_spec, model_infos, manifest)
     }
@@ -583,9 +599,7 @@ pub(crate) fn manifest_provider(
         .ok_or_else(|| AgentError::Config {
             message: format!("no manifest provider registered for '{slug}'"),
         })?;
-    let slug_arc: Arc<str> = Arc::from(slug);
     Ok(Box::new(ManifestProvider::new(
-        slug_arc,
         engine_spec,
         auth,
         timeouts,

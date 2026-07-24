@@ -336,11 +336,18 @@ fn write_section(out: &mut String, section: &ProviderSection) {
     }
 }
 
-/// Features line for a manifest-owned provider, derived from the manifest's
-/// capability fields. Mirrors the prose style of `ProviderKind::features`:
-/// comma-separated, lowercased, only lists what the manifest actually declares.
-/// Stays generic (no hand-prose) until a manifest ships its own `docs` table.
+/// Features line for a manifest-owned provider. A manifest's `qualities` (an
+/// author-owned prose list, e.g. "open-weight models") wins verbatim when
+/// present; otherwise the line is derived from capability fields (thinking,
+/// vision, arbitrary models). Mirrors the prose style of `ProviderKind::features`.
 fn derive_manifest_features(manifest: &ProviderManifest) -> Option<String> {
+    if let Some(qs) = manifest.qualities
+        && !qs.is_empty()
+    {
+        let mut s = qs.join(", ");
+        s[0..1].make_ascii_uppercase();
+        return Some(s);
+    }
     let mut feats: Vec<&str> = Vec::new();
     if manifest.supports_thinking {
         feats.push("thinking mode");
@@ -454,6 +461,7 @@ A manifest has four pieces:
 - **`engine`** (table from `maki.provider.openai_compat{...}`): the OpenAI-compatible endpoint. Keys: `base_url`, `api_key_env`, `max_tokens_field`, `include_stream_usage`, `provider_name`, `thinking` (e.g. `"deepseek"`, for the reasoning toggle shape).
 - **`auth`** (table from `maki.auth.env_key{...}`): exposes `resolve`, `rotate`, `refresh`. `resolve` must return the current API key as a string.
 - **`models`** (list): static model entries with `id`, `tier`, `default`, `pricing`, `context_window`, `max_output_tokens`, `supports_thinking`, `supports_vision`.
+- **`qualities`** (optional list of strings): descriptive prose shown in the provider docs Features line (e.g. `"open-weight models"`). When omitted, the line is derived from capability fields (`supports_thinking`, vision, `accepts_arbitrary_models`).
 
 ```lua
 maki.provider.register({
@@ -464,6 +472,7 @@ maki.provider.register({
   accepts_arbitrary_models = false,
   fallback_max_output = 8192,
   fallback_context_window = 128000,
+  qualities = { "open-weight models" },
   engine = maki.provider.openai_compat({
     base_url = "https://api.my-provider.com",
     api_key_env = "MY_PROVIDER_API_KEY",
@@ -485,6 +494,6 @@ maki.provider.register({
 })
 ```
 
-Only `slug`, `engine`, `auth`, and `models` are required; `display_name`, `family`, `supports_thinking`, `accepts_arbitrary_models`, `fallback_max_output`, and `fallback_context_window` are optional and default to generic-safe values. Because manifests run at startup as a side-effect of plugin load, no return value is needed.
+Only `slug`, `engine`, `auth`, and `models` are required; `display_name`, `family`, `supports_thinking`, `accepts_arbitrary_models`, `fallback_max_output`, `fallback_context_window`, and `qualities` are optional and default to generic-safe values (or, for `qualities`, a derived features line). Because manifests run at startup as a side-effect of plugin load, no return value is needed.
 
 The `DeepSeek` bundled manifest (`plugins/providers/deepseek.lua`) is a complete, copy-pasteable reference, including the `thinking = "deepseek"` engine flag that wires up the deepseek reasoning toggle."#;

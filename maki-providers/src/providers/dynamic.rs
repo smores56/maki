@@ -800,6 +800,7 @@ esac
             fallback_max_output: None,
             fallback_context_window: 0,
             models: &[],
+            qualities: None,
         });
         let tmp = TempDir::new().unwrap();
         write_script(

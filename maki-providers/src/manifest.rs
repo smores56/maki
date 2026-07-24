@@ -16,6 +16,7 @@ pub struct ProviderManifest {
     pub fallback_max_output: Option<u32>,
     pub fallback_context_window: u32,
     pub models: &'static [ModelEntry],
+    pub qualities: Option<&'static [&'static str]>,
 }
 
 const ANTHROPIC: ProviderManifest = ProviderManifest {
@@ -27,6 +28,7 @@ const ANTHROPIC: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(128_000),
     fallback_context_window: 200_000,
     models: anthropic::models(),
+    qualities: None,
 };
 
 const OPENAI: ProviderManifest = ProviderManifest {
@@ -38,6 +40,7 @@ const OPENAI: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(100_000),
     fallback_context_window: 200_000,
     models: openai::models(),
+    qualities: None,
 };
 
 const GOOGLE: ProviderManifest = ProviderManifest {
@@ -49,6 +52,7 @@ const GOOGLE: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(65_536),
     fallback_context_window: 1_000_000,
     models: google::models(),
+    qualities: None,
 };
 
 const COPILOT: ProviderManifest = ProviderManifest {
@@ -60,6 +64,7 @@ const COPILOT: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(100_000),
     fallback_context_window: 200_000,
     models: copilot::models(),
+    qualities: None,
 };
 
 const OLLAMA: ProviderManifest = ProviderManifest {
@@ -71,6 +76,7 @@ const OLLAMA: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(16_384),
     fallback_context_window: 128_000,
     models: ollama::models(),
+    qualities: None,
 };
 
 const LLAMA_CPP: ProviderManifest = ProviderManifest {
@@ -82,6 +88,7 @@ const LLAMA_CPP: ProviderManifest = ProviderManifest {
     fallback_max_output: None,
     fallback_context_window: 128_000,
     models: llama_cpp::models(),
+    qualities: None,
 };
 
 const MISTRAL: ProviderManifest = ProviderManifest {
@@ -93,6 +100,7 @@ const MISTRAL: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(32_000),
     fallback_context_window: 128_000,
     models: mistral::models(),
+    qualities: None,
 };
 
 const ZAI: ProviderManifest = ProviderManifest {
@@ -104,6 +112,7 @@ const ZAI: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(16_000),
     fallback_context_window: 128_000,
     models: zai::models(),
+    qualities: None,
 };
 
 const OPENROUTER: ProviderManifest = ProviderManifest {
@@ -115,6 +124,7 @@ const OPENROUTER: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(128_000),
     fallback_context_window: 200_000,
     models: openrouter::models(),
+    qualities: None,
 };
 
 const SYNTHETIC: ProviderManifest = ProviderManifest {
@@ -126,6 +136,7 @@ const SYNTHETIC: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(32_000),
     fallback_context_window: 128_000,
     models: synthetic::models(),
+    qualities: None,
 };
 
 const TENSORX: ProviderManifest = ProviderManifest {
@@ -137,6 +148,7 @@ const TENSORX: ProviderManifest = ProviderManifest {
     fallback_max_output: None,
     fallback_context_window: 200_000,
     models: tensorx::models(),
+    qualities: None,
 };
 
 const OPENCODE: ProviderManifest = ProviderManifest {
@@ -148,6 +160,7 @@ const OPENCODE: ProviderManifest = ProviderManifest {
     fallback_max_output: Some(128_000),
     fallback_context_window: 256_000,
     models: &[],
+    qualities: None,
 };
 
 const BUILTINS: &[ProviderManifest] = &[
@@ -259,6 +272,19 @@ mod tests {
     #[test]
     fn for_slug_returns_none_for_unknown_slug() {
         assert!(ManifestRegistry::for_slug("totally-unknown-slug").is_none());
+    }
+
+    #[test]
+    fn provider_kind_slug_matches_strum_display() {
+        use strum::IntoEnumIterator;
+        for kind in ProviderKind::iter() {
+            assert_eq!(
+                kind.slug(),
+                kind.to_string(),
+                "ProviderKind::slug() drifted from strum Display for {:?}",
+                kind,
+            );
+        }
     }
 
     #[test]
