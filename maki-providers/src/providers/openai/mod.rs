@@ -19,7 +19,6 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     plans: None,
     login_url: Some("https://platform.openai.com/api-keys"),
     needs_url: false,
-    manifest_owned: false,
 });
 
 pub(crate) const fn models() -> &'static [ModelEntry] {

@@ -125,11 +125,6 @@ pub struct BuiltInProvider {
     pub login_url: Option<&'static str>,
     /// Whether the login flow should prompt for a base URL (e.g. local inference servers).
     pub needs_url: bool,
-    /// `true` when this provider's `ProviderManifest` is owned at runtime by
-    /// the Lua loader (registered into `ManifestRegistry` at boot) rather than
-    /// compiled into the static `BUILTINS` table. Tests that statically assert
-    /// manifest presence skip these.
-    pub manifest_owned: bool,
 }
 
 inventory::collect!(BuiltInProvider);

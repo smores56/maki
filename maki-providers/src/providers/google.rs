@@ -44,7 +44,6 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     plans: None,
     login_url: Some("https://aistudio.google.com/apikey"),
     needs_url: false,
-    manifest_owned: false,
 });
 
 pub(crate) const fn models() -> &'static [ModelEntry] {

@@ -32,33 +32,14 @@ use crate::model::{Model, ModelEntry, ModelFamily, ModelInfo, ModelPricing, Mode
 use crate::model_registry::model_registry;
 use crate::provider::{BoxFuture, Provider};
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
-use crate::providers::{KeyPool, ResolvedAuth, Timeouts, with_prefix};
+use crate::providers::{ResolvedAuth, Timeouts, with_prefix};
 use crate::types::{ProviderUsage, ThinkingConfig, dialect};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 const V4_MARKER: &str = "deepseek-v4";
-const DEEPSEEK_SLUG: &str = "deepseek";
-const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
-const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
-const DEEPSEEK_PROVIDER_NAME: &str = "DeepSeek";
-const MAX_TOKENS_FIELD: &str = "max_tokens";
-
-pub trait AuthSource: Send + Sync {
-    fn resolve(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError>;
-    fn reload(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
-        Ok(())
-    }
-    fn refresh(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> BoxFuture<'_, Result<(), AgentError>> {
-        Box::pin(async { Ok(()) })
-    }
-    fn rotate_key(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> Result<bool, AgentError> {
-        Ok(false)
-    }
-}
 
 /// Authoritative description of a manifest provider's engine. Built by the
-/// Lua loader from a `maki.provider.openai_compat{...}` descriptor (or, for
-/// the non-Lua fallback, `deepseek_engine_spec`).
+/// Lua loader from a `maki.provider.openai_compat{...}` descriptor.
 #[derive(Debug, Clone)]
 pub enum EngineSpec {
     OpenaiCompat {
@@ -152,66 +133,31 @@ impl ModelInfoDescriptor {
 
 pub struct ManifestProvider {
     compat: OpenAiCompatProvider,
-    auth: Arc<dyn AuthSource>,
+    auth: Arc<LuaAuthSource>,
     auth_handle: Arc<Mutex<ResolvedAuth>>,
     thinking: Option<ThinkingMode>,
     system_prefix: Option<String>,
 }
 
 impl ManifestProvider {
-    /// Eager auth resolution: a missing key fails here, matching the old
-    /// `DeepSeek::new` precondition. Used by `provider_for_slug` for
-    /// env-key providers loaded from a manifest.
+    /// Eager auth resolution: a missing key fails here. Used by
+    /// `provider_for_slug` for env-key providers loaded from a manifest.
     pub fn new(
         _slug: Arc<str>,
         engine_spec: EngineSpec,
-        auth: Arc<dyn AuthSource>,
+        auth: Arc<LuaAuthSource>,
         timeouts: Timeouts,
     ) -> Result<Self, AgentError> {
         let auth_handle = Arc::new(Mutex::new(ResolvedAuth::bearer("")));
         auth.resolve(&auth_handle)?;
-        Ok(Self::from_parts(
-            engine_spec,
-            auth,
-            auth_handle,
-            None,
-            timeouts,
-        ))
-    }
-
-    /// Auth already resolved by an outer owner (dynamic providers resolve via
-    /// their script and mutate the shared handle themselves); the auth source
-    /// is a no-op and only the handle + system prefix matter.
-    pub(crate) fn with_resolved_auth(
-        engine_spec: EngineSpec,
-        auth_handle: Arc<Mutex<ResolvedAuth>>,
-        system_prefix: Option<String>,
-        timeouts: Timeouts,
-    ) -> Self {
-        Self::from_parts(
-            engine_spec,
-            Arc::new(NoopAuthSource),
-            auth_handle,
-            system_prefix,
-            timeouts,
-        )
-    }
-
-    fn from_parts(
-        engine_spec: EngineSpec,
-        auth: Arc<dyn AuthSource>,
-        auth_handle: Arc<Mutex<ResolvedAuth>>,
-        system_prefix: Option<String>,
-        timeouts: Timeouts,
-    ) -> Self {
         let (thinking, config) = leak_openai_compat_config(&engine_spec);
-        Self {
+        Ok(Self {
             compat: OpenAiCompatProvider::new(config, timeouts),
             auth,
             auth_handle,
             thinking,
-            system_prefix,
-        }
+            system_prefix: None,
+        })
     }
 }
 
@@ -355,50 +301,6 @@ fn leak_openai_compat_config(
     }
 }
 
-/// Pure-Rust env-key auth for the no-Lua-host paths (`ProviderKind::DeepSeek
-/// .create`, which never boots the Lua runtime) and a unit-test fixture. The
-/// manifest/LuaAuthSource path is the real one — kept only so those paths
-/// resolve without a Lua instance.
-struct EnvKeyAuthSource {
-    slug: String,
-    env_var: String,
-    pool: Mutex<Option<KeyPool>>,
-}
-
-impl EnvKeyAuthSource {
-    pub fn new(slug: String, env_var: String) -> Self {
-        Self {
-            slug,
-            env_var,
-            pool: Mutex::new(None),
-        }
-    }
-}
-
-impl AuthSource for EnvKeyAuthSource {
-    fn resolve(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
-        let pool = KeyPool::resolve(&self.slug, &self.env_var)?;
-        *auth.lock().unwrap() = ResolvedAuth::bearer(pool.current());
-        *self.pool.lock().unwrap() = Some(pool);
-        Ok(())
-    }
-
-    fn rotate_key(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<bool, AgentError> {
-        let guard = self.pool.lock().unwrap();
-        Ok(guard
-            .as_ref()
-            .is_some_and(|p| p.rotate_auth(auth, ResolvedAuth::bearer)))
-    }
-}
-
-struct NoopAuthSource;
-
-impl AuthSource for NoopAuthSource {
-    fn resolve(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
-        Ok(())
-    }
-}
-
 /// Auth source backed by Lua function-tables pulled from a manifest's `auth`
 /// field (`resolve`, optional `rotate`/`refresh`). Built by the `maki-lua`
 /// loader; `maki.auth.env_key` (and future `maki.auth.*`) produce the tables.
@@ -437,9 +339,7 @@ impl LuaAuthSource {
             message: format!("{} auth {op}: {e}", self.slug),
         }
     }
-}
 
-impl AuthSource for LuaAuthSource {
     fn resolve(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
         let key = self
             .resolve
@@ -491,7 +391,7 @@ impl AuthSource for LuaAuthSource {
     }
 }
 
-type Registry = HashMap<Arc<str>, (EngineSpec, Arc<dyn AuthSource>)>;
+type Registry = HashMap<Arc<str>, (EngineSpec, Arc<LuaAuthSource>)>;
 
 static MANIFEST_PROVIDERS: OnceLock<Mutex<Registry>> = OnceLock::new();
 
@@ -506,7 +406,7 @@ fn registry() -> &'static Mutex<Registry> {
 pub fn register_manifest_provider(
     slug: Arc<str>,
     engine_spec: EngineSpec,
-    auth: Arc<dyn AuthSource>,
+    auth: Arc<LuaAuthSource>,
     models: Vec<ModelInfo>,
     manifest: ProviderManifest,
 ) {
@@ -636,66 +536,6 @@ pub(crate) fn manifest_provider(
     )?))
 }
 
-pub fn deepseek_engine_spec() -> EngineSpec {
-    EngineSpec::OpenaiCompat {
-        slug: DEEPSEEK_SLUG.to_string(),
-        base_url: DEEPSEEK_BASE_URL.to_string(),
-        api_key_env: DEEPSEEK_API_KEY_ENV.to_string(),
-        max_tokens_field: MAX_TOKENS_FIELD.to_string(),
-        include_stream_usage: true,
-        provider_name: DEEPSEEK_PROVIDER_NAME.to_string(),
-        thinking: Some(ThinkingMode::DeepSeek),
-    }
-}
-
-inventory::submit!(maki_config::providers::BuiltInProvider {
-    slug: DEEPSEEK_SLUG,
-    display_name: DEEPSEEK_PROVIDER_NAME,
-    protocol: maki_config::providers::Protocol::Openai,
-    default_base_url: DEEPSEEK_BASE_URL,
-    default_api_key_env: DEEPSEEK_API_KEY_ENV,
-    default_model: "deepseek/deepseek-v4-flash",
-    plans: None,
-    login_url: Some("https://platform.deepseek.com/api_keys"),
-    needs_url: false,
-    manifest_owned: true,
-});
-
-/// Pure-Rust fallback for `ProviderKind::DeepSeek.create` and other non-Lua
-/// paths: the same `ManifestProvider` the Lua manifest would build. In
-/// practice the Lua loader registers DeepSeek first, so `provider_for_slug`
-/// short-circuits here before this arm; it stays so those paths
-/// (capability/login subcommands) never boot the Lua host yet still compile.
-pub fn deepseek_provider(timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
-    let slug: Arc<str> = Arc::from(DEEPSEEK_SLUG);
-    let auth: Arc<dyn AuthSource> = Arc::new(EnvKeyAuthSource::new(
-        DEEPSEEK_SLUG.to_string(),
-        DEEPSEEK_API_KEY_ENV.to_string(),
-    ));
-    Ok(Box::new(ManifestProvider::new(
-        slug,
-        deepseek_engine_spec(),
-        auth,
-        timeouts,
-    )?))
-}
-
-/// Dynamic providers with `base = "deepseek"` resolve auth via their own
-/// script into a shared handle; this wraps that handle with the DeepSeek
-/// engine (thinking + system prefix), replacing the deleted `DeepSeek::with_auth`.
-pub(crate) fn deepseek_provider_with_auth(
-    auth_handle: Arc<Mutex<ResolvedAuth>>,
-    system_prefix: Option<String>,
-    timeouts: Timeouts,
-) -> Box<dyn Provider> {
-    Box::new(ManifestProvider::with_resolved_auth(
-        deepseek_engine_spec(),
-        auth_handle,
-        system_prefix,
-        timeouts,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,56 +545,12 @@ mod tests {
     const V4: &str = "deepseek-v4-pro";
     const R1: &str = "deepseek-reasoner";
 
-    #[test]
-    fn engine_spec_carries_deepseek_thinking_mode() {
-        let spec = deepseek_engine_spec();
-        let EngineSpec::OpenaiCompat {
-            thinking, base_url, ..
-        } = spec;
-        assert_eq!(thinking, Some(ThinkingMode::DeepSeek));
-        assert_eq!(base_url, DEEPSEEK_BASE_URL);
-    }
-
-    #[test]
-    fn env_key_auth_source_resolves_from_env() {
-        let env_var = format!("MAKI_TEST_DS_KEY_{}", fastrand::u32(..));
-        unsafe { std::env::set_var(&env_var, "sk-from-env") };
-        let source = EnvKeyAuthSource::new(DEEPSEEK_SLUG.into(), env_var.clone());
-        let handle = Arc::new(Mutex::new(ResolvedAuth::bearer("")));
-        source.resolve(&handle).unwrap();
-        unsafe { std::env::remove_var(&env_var) };
-        let auth = handle.lock().unwrap().clone();
-        assert_eq!(auth.headers[0].1, "Bearer sk-from-env");
-    }
-
-    #[test]
-    fn env_key_auth_source_fails_when_unset() {
-        let env_var = format!("MAKI_TEST_DS_NONE_{}", fastrand::u32(..));
-        let source = EnvKeyAuthSource::new(format!("deepseek-none-{}", fastrand::u32(..)), env_var);
-        let handle = Arc::new(Mutex::new(ResolvedAuth::bearer("")));
-        let err = source.resolve(&handle).unwrap_err();
-        assert!(matches!(err, AgentError::Config { .. }));
-    }
-
-    /// Guards the no-Lua-host `EnvKeyAuthSource` fallback (the `ProviderKind::
-    /// DeepSeek` arm). `LuaAuthSource` needs a full Lua host, so its overlap
-    /// with an in-flight async Lua call can't be unit-tested standalone here;
-    /// the end-to-end loader tests (`load_builtins_loads_deepseek_manifest_provider`,
-    /// `manifest_routes_deepseek_provider`) exercise the Lua path. The real
-    /// sync-vs-async overlap first occurs when an auth `refresh` ships — left
-    /// for the oauth follow-up PR.
-    /// TODO(first real async refresh): stress `LuaAuthSource::resolve`
-    /// concurrent with an async Lua call on the runtime executor.
-    #[test]
-    #[ignore = "lua auth sync/async overlap deferred to the first real async refresh"]
-    fn lua_auth_source_no_deadlock_under_concurrent_async() {}
-
     #[test_case(true  ; "thinking_enabled_pads")]
     #[test_case(false ; "thinking_disabled_no_pad")]
     fn deepseek_thinking_body_shape(enabled: bool) {
         let model = Model {
             id: V4.to_string(),
-            provider: Arc::from(DEEPSEEK_SLUG),
+            provider: Arc::from("deepseek"),
             ..test_model()
         };
         let mut body = json!({"messages": [
@@ -796,7 +592,7 @@ mod tests {
         use crate::model::{ModelFamily, ModelPricing, ModelTier};
         Model {
             id: "deepseek-v4-pro".to_string(),
-            provider: Arc::from(DEEPSEEK_SLUG),
+            provider: Arc::from("deepseek"),
             tier: ModelTier::Strong,
             family: ModelFamily::Generic,
             supports_tool_examples_override: None,

@@ -39,8 +39,6 @@ pub enum ProviderKind {
     LlamaCpp,
     Mistral,
     Zai,
-    #[strum(serialize = "deepseek")]
-    DeepSeek,
     #[strum(serialize = "openrouter")]
     OpenRouter,
     Synthetic,
@@ -61,7 +59,6 @@ impl ProviderKind {
             Self::LlamaCpp => "LlamaCpp",
             Self::Mistral => "Mistral",
             Self::Zai => "Z.AI",
-            Self::DeepSeek => "DeepSeek",
             Self::OpenRouter => "OpenRouter",
             Self::Synthetic => "Synthetic",
             Self::TensorX => "TensorX",
@@ -79,7 +76,6 @@ impl ProviderKind {
             Self::LlamaCpp => "LLAMA_CPP_API_KEY",
             Self::Mistral => "MISTRAL_API_KEY",
             Self::Zai => "ZHIPU_API_KEY",
-            Self::DeepSeek => "DEEPSEEK_API_KEY",
             Self::OpenRouter => "OPENROUTER_API_KEY",
             Self::Synthetic => "SYNTHETIC_API_KEY",
             Self::TensorX => "TENSORX_API_KEY",
@@ -99,7 +95,6 @@ impl ProviderKind {
             Self::LlamaCpp => "http://localhost:8080/v1",
             Self::Mistral => "https://api.mistral.ai/v1",
             Self::Zai => "https://api.z.ai/api/paas/v4",
-            Self::DeepSeek => "https://api.deepseek.com",
             Self::OpenRouter => "https://openrouter.ai/api/v1",
             Self::Synthetic => "https://api.synthetic.new/openai/v1",
             Self::TensorX => "https://api.tensorx.ai/v1",
@@ -124,7 +119,6 @@ impl ProviderKind {
                 Some("Reasoning effort support (low/medium/high), open-weight models")
             }
             Self::TensorX => Some("Open-weight models, zero data retention, prompt caching"),
-            Self::DeepSeek => Some("Thinking mode toggle (on/off), open-weight models"),
             Self::OpenRouter => {
                 Some("300+ models from all providers, prompt caching, provider routing")
             }
@@ -145,7 +139,6 @@ impl ProviderKind {
             Self::LlamaCpp => ModelFamily::Generic,
             Self::Mistral => ModelFamily::Generic,
             Self::Zai => ModelFamily::Glm,
-            Self::DeepSeek => ModelFamily::Generic,
             Self::OpenRouter => ModelFamily::Generic,
             Self::Synthetic => ModelFamily::Synthetic,
             Self::TensorX => ModelFamily::Generic,
@@ -168,7 +161,6 @@ impl ProviderKind {
             Self::LlamaCpp => None,
             Self::Mistral => Some(32_000),
             Self::Zai => Some(16_000),
-            Self::DeepSeek => Some(384_000),
             Self::OpenRouter => Some(128_000),
             Self::Synthetic => Some(32_000),
             Self::TensorX => None,
@@ -186,7 +178,6 @@ impl ProviderKind {
             Self::LlamaCpp => 128_000,
             Self::Mistral => 128_000,
             Self::Zai => 128_000,
-            Self::DeepSeek => 1_000_000,
             Self::OpenRouter => 200_000,
             Self::Synthetic => 128_000,
             Self::TensorX => 200_000,
@@ -210,7 +201,6 @@ impl ProviderKind {
             Self::LlamaCpp => Ok(Box::new(LocalEndpoint::new(&LLAMACPP, timeouts)?)),
             Self::Mistral => Ok(Box::new(Mistral::new(timeouts)?)),
             Self::Zai => Ok(Box::new(Zai::new(timeouts)?)),
-            Self::DeepSeek => crate::manifest_provider::deepseek_provider(timeouts),
             Self::OpenRouter => Ok(Box::new(OpenRouter::new(timeouts)?)),
             Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
             Self::TensorX => Ok(Box::new(TensorX::new(timeouts)?)),

@@ -426,11 +426,6 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
             Synthetic::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::DeepSeek => crate::manifest_provider::deepseek_provider_with_auth(
-            auth.clone(),
-            meta.system_prefix.clone(),
-            timeouts,
-        ),
         ProviderKind::OpenRouter => Box::new(
             OpenRouter::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
@@ -742,7 +737,6 @@ esac
     #[test_case("mistral", ProviderKind::Mistral ; "base_mistral")]
     #[test_case("zai", ProviderKind::Zai ; "base_zai")]
     #[test_case("synthetic", ProviderKind::Synthetic ; "base_synthetic")]
-    #[test_case("deepseek", ProviderKind::DeepSeek ; "base_deepseek")]
     #[test_case("opencode", ProviderKind::Opencode ; "base_opencode")]
     fn discover_accepts_all_bases(base: &str, expected: ProviderKind) {
         let tmp = TempDir::new().unwrap();

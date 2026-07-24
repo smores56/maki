@@ -282,9 +282,6 @@ mod tests {
     #[test]
     fn every_builtin_provider_inventory_entry_has_matching_manifest() {
         for builtin in inventory::iter::<BuiltInProvider>() {
-            if builtin.manifest_owned {
-                continue;
-            }
             let manifest = ManifestRegistry::get(builtin.slug).unwrap_or_else(|| {
                 panic!(
                     "BuiltInProvider slug {:?} has no ProviderManifest",
