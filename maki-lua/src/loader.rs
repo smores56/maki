@@ -252,13 +252,6 @@ impl PluginHost {
             }
         }
         for builtin in &config.names {
-            // The "providers" builtin has no init.lua; each
-            // `plugins/providers/<slug>/init.lua` is loaded after the loop so
-            // the config layer stays provider-agnostic (one "providers" name,
-            // not one per slug).
-            if builtin == "providers" {
-                continue;
-            }
             let dir = match BUNDLED_PLUGINS.iter().find(|p| p.name == builtin.as_str()) {
                 Some(p) => &p.dir,
                 None => {
@@ -287,49 +280,6 @@ impl PluginHost {
                 None,
                 PluginPermissions::trusted(),
                 opts,
-            )?;
-        }
-        if config.names.iter().any(|n| n == "providers") {
-            self.load_provider_manifests()?;
-        }
-        Ok(())
-    }
-
-    /// Load every `plugins/providers/<slug>/init.lua` manifest. Each calls
-    /// `maki.provider.register` on the Lua thread, registering into the static
-    /// manifest registry so `provider_for_slug("<slug>", ...)` routes through
-    /// the `ManifestProvider` envelope. Gated by the "providers" builtin so
-    /// `[plugins.providers] enabled = false` disables all Lua-managed
-    /// providers. `include_dir` keys nested files by full relative path, so a
-    /// child dir's `init.lua` is found by file name, not `get_file`.
-    fn load_provider_manifests(&self) -> Result<(), PluginError> {
-        let dir = &BUNDLED_PLUGINS
-            .iter()
-            .find(|p| p.name == "providers")
-            .expect("providers plugin bundled")
-            .dir;
-        for sub in dir.dirs() {
-            let slug = match sub.path().file_name().and_then(|n| n.to_str()) {
-                Some(s) => s,
-                None => continue,
-            };
-            let init = match sub
-                .files()
-                .find(|f| f.path().file_name() == Some(std::ffi::OsStr::new("init.lua")))
-            {
-                Some(f) => match f.contents_utf8() {
-                    Some(s) => s,
-                    None => continue,
-                },
-                None => continue,
-            };
-            let name: Arc<str> = Arc::from(format!("providers/{slug}"));
-            self.send_load(
-                name,
-                init.to_owned(),
-                None,
-                PluginPermissions::trusted(),
-                PluginOpts::default(),
             )?;
         }
         Ok(())
@@ -651,10 +601,10 @@ mod tests {
         PluginHost::disabled().begin_shutdown();
     }
 
-    /// `load_builtins` folds in the embedded `plugins/providers/*/init.lua`
-    /// manifests. DeepSeek is the first migrated provider, so its manifest must
-    /// land in the static manifest registry and make `provider_for_slug` route
-    /// through the `ManifestProvider` envelope.
+    /// `load_builtins` loads the `providers` builtin, whose `init.lua` requires
+    /// each manifest module (e.g. `deepseek`). DeepSeek is the first migrated
+    /// provider, so its manifest must land in the static manifest registry and
+    /// make `provider_for_slug` route through the `ManifestProvider` envelope.
     #[test]
     fn load_builtins_loads_deepseek_manifest_provider() {
         let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).unwrap();

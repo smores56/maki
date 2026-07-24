@@ -252,7 +252,7 @@ Dynamic provider models are namespaced as `{slug}/{model_id}` (e.g. `myproxy/cla
 - Must be executable
 ## Authoring a Provider
 
-Built-in providers like DeepSeek ship as Lua manifests under `plugins/providers/<slug>/init.lua`. Each manifest is plain Lua that calls `maki.provider.register` to wire a slug to an engine, an auth function-table, and a static model list. The host discovers every `plugins/providers/*/init.lua` at boot and runs it as a trusted builtin plugin, so adding a provider is a drop-in folder with no Rust change.
+Built-in providers like DeepSeek ship as Lua manifests under `plugins/providers/`. The `providers` plugin is a normal builtin: its `init.lua` requires one module per provider (e.g. `require("deepseek")` loads `plugins/providers/deepseek.lua`), and each manifest is plain Lua that calls `maki.provider.register` to wire a slug to an engine, an auth function-table, and a static model list. To add a provider, drop a `<slug>.lua` file next to the others and add a `require("<slug>")` line to `plugins/providers/init.lua`. No Rust change.
 
 A manifest has four pieces:
 
@@ -293,4 +293,4 @@ maki.provider.register({
 
 Only `slug`, `engine`, `auth`, and `models` are required; `display_name`, `family`, `supports_thinking`, `accepts_arbitrary_models`, `fallback_max_output`, and `fallback_context_window` are optional and default to generic-safe values. Because manifests run at startup as a side-effect of plugin load, no return value is needed.
 
-The `DeepSeek` bundled manifest (`plugins/providers/deepseek/init.lua`) is a complete, copy-pasteable reference, including the `thinking = "deepseek"` engine flag that wires up the deepseek reasoning toggle.
+The `DeepSeek` bundled manifest (`plugins/providers/deepseek.lua`) is a complete, copy-pasteable reference, including the `thinking = "deepseek"` engine flag that wires up the deepseek reasoning toggle.

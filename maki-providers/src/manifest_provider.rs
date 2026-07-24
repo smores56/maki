@@ -1,8 +1,9 @@
 //! Provider manifests loaded by the Lua host.
 //!
 //! A manifest wires a slug (e.g. `"deepseek"`) to an OpenAI-compatible engine,
-//! an auth function-table, and a static model list. Each `plugins/providers/<slug>/init.lua`
-//! calls `maki.provider.register` as a side-effect of plugin load; `register`
+//! an auth function-table, and a static model list. The `providers` builtin
+//! plugin requires one module per provider (e.g. `plugins/providers/deepseek.lua`),
+//! and each calls `maki.provider.register` as a side-effect of plugin load; `register`
 //! pulls the `resolve`/`rotate`/`refresh` `mlua::Function`s out of `opts.auth`
 //! (so they stay first-class and don't go through serde), nulls the field,
 //! deserializes the rest of `opts` into a [`ManifestDescriptor`], and hands the
