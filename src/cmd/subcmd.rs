@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
 use std::path::Path;
@@ -543,7 +544,7 @@ pub fn models(no_plugins: bool) -> Result<()> {
         .then(|| {
             let mut host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), true)
                 .context("initialize lua plugin host")?;
-            host.load_builtins(&PluginsConfig::default())
+            host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
                 .context("load builtin plugins")?;
             Ok::<PluginHost, color_eyre::Report>(host)
         })

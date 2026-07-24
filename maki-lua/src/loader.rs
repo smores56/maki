@@ -103,6 +103,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         name: "lib",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/lib"),
     },
+    BundledPlugin {
+        name: "providers",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/providers"),
+    },
 ];
 
 pub(crate) fn lib_dir() -> &'static Dir<'static> {
@@ -112,11 +116,6 @@ pub(crate) fn lib_dir() -> &'static Dir<'static> {
         .expect("lib plugin bundled")
         .dir
 }
-
-/// Embedded `plugins/providers` tree. Each `<slug>/init.lua` is a provider
-/// manifest discovered by iterating this dir's child directories, so adding a
-/// new provider is a drop-in folder with no Rust edit.
-static PROVIDERS_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/../plugins/providers");
 
 static BUNDLED_DIRS: LazyLock<&'static [&'static Dir<'static>]> = LazyLock::new(|| {
     let dirs: Vec<&'static Dir<'static>> = BUNDLED_PLUGINS.iter().map(|p| &p.dir).collect();
@@ -253,6 +252,13 @@ impl PluginHost {
             }
         }
         for builtin in &config.names {
+            // The "providers" builtin has no init.lua; each
+            // `plugins/providers/<slug>/init.lua` is loaded after the loop so
+            // the config layer stays provider-agnostic (one "providers" name,
+            // not one per slug).
+            if builtin == "providers" {
+                continue;
+            }
             let dir = match BUNDLED_PLUGINS.iter().find(|p| p.name == builtin.as_str()) {
                 Some(p) => &p.dir,
                 None => {
@@ -283,24 +289,31 @@ impl PluginHost {
                 opts,
             )?;
         }
-        self.load_bundled_providers()?;
+        if config.names.iter().any(|n| n == "providers") {
+            self.load_provider_manifests()?;
+        }
         Ok(())
     }
 
-    /// Discover and load every `plugins/providers/<slug>/init.lua` manifest.
-    /// Each manifest calls `maki.provider.register` as a side-effect on the Lua
-    /// thread, registering into the static manifest registry so
-    /// `provider_for_slug("<slug>", ...)` routes through the `ManifestProvider`
-    /// envelope. Discovery walks `PROVIDERS_DIR.dirs()`, so new providers are a
-    /// drop-in folder; unlike `BUNDLED_PLUGINS`, they are not gated by
-    /// `PluginsConfig` (a provider manifest isn't a user-visible plugin).
-    fn load_bundled_providers(&self) -> Result<(), PluginError> {
-        for dir in PROVIDERS_DIR.dirs() {
-            let slug = match dir.path().file_name().and_then(|n| n.to_str()) {
+    /// Load every `plugins/providers/<slug>/init.lua` manifest. Each calls
+    /// `maki.provider.register` on the Lua thread, registering into the static
+    /// manifest registry so `provider_for_slug("<slug>", ...)` routes through
+    /// the `ManifestProvider` envelope. Gated by the "providers" builtin so
+    /// `[plugins.providers] enabled = false` disables all Lua-managed
+    /// providers. `include_dir` keys nested files by full relative path, so a
+    /// child dir's `init.lua` is found by file name, not `get_file`.
+    fn load_provider_manifests(&self) -> Result<(), PluginError> {
+        let dir = &BUNDLED_PLUGINS
+            .iter()
+            .find(|p| p.name == "providers")
+            .expect("providers plugin bundled")
+            .dir;
+        for sub in dir.dirs() {
+            let slug = match sub.path().file_name().and_then(|n| n.to_str()) {
                 Some(s) => s,
                 None => continue,
             };
-            let init = match dir
+            let init = match sub
                 .files()
                 .find(|f| f.path().file_name() == Some(std::ffi::OsStr::new("init.lua")))
             {
