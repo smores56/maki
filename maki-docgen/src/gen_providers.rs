@@ -74,7 +74,11 @@ zai/glm-4.7
 If the model name is unique across providers, the prefix can be omitted."#;
 
 fn dynamic_providers_section() -> String {
-    let valid_values: Vec<String> = ProviderKind::iter().map(|k| format!("`{k}`")).collect();
+    let mut valid_values: Vec<String> = ManifestRegistry::builtins()
+        .iter()
+        .map(|m| format!("`{}`", m.slug))
+        .collect();
+    valid_values.sort();
 
     format!(
         r#"## Dynamic Providers

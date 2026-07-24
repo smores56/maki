@@ -200,7 +200,7 @@ impl ManifestRegistry {
     /// inheriting a zeroed manifest.
     pub fn for_slug(slug: &str) -> Option<&'static ProviderManifest> {
         Self::get(slug)
-            .or_else(|| dynamic::base_for_slug(slug).and_then(|base| Self::get(&base.to_string())))
+            .or_else(|| dynamic::base_for_slug(slug).and_then(|base| Self::get(base)))
             .or_else(|| custom::base_kind(slug).and_then(|base| Self::get(&base.to_string())))
     }
 

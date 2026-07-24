@@ -10,11 +10,12 @@ use maki_config::providers::ProvidersConfig;
 use maki_storage::id::SessionRef;
 use serde::Deserialize;
 use serde_json::Value;
-use strum::IntoEnumIterator;
 use tracing::{debug, warn};
 
 use crate::manifest::ManifestRegistry;
-use crate::model::{Model, ModelPricing, ModelTier};
+use crate::manifest::ProviderManifest;
+use crate::manifest_provider::{ManifestCompat, engine_spec};
+use crate::model::{Model, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider, ProviderKind};
 use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
 
@@ -35,10 +36,32 @@ const INFO_TIMEOUT: Duration = Duration::from_secs(5);
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVIDERS_DIR: &str = "providers";
 
+#[derive(Clone, Copy)]
+enum Base {
+    Kind(ProviderKind),
+    Manifest(&'static ProviderManifest),
+}
+
+impl Base {
+    fn family(self) -> ModelFamily {
+        match self {
+            Base::Kind(k) => k.family(),
+            Base::Manifest(m) => m.family,
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Base::Kind(k) => k.slug(),
+            Base::Manifest(m) => m.slug,
+        }
+    }
+}
+
 struct DynamicProviderMeta {
     slug: String,
     display_name: String,
-    base: ProviderKind,
+    base: Base,
     system_prefix: Option<String>,
     has_auth: bool,
     script_path: PathBuf,
@@ -74,7 +97,7 @@ struct ScriptModel {
 }
 
 impl ScriptModel {
-    fn to_model(&self, slug: &str, base: ProviderKind, id: String, tier: ModelTier) -> Model {
+    fn to_model(&self, slug: &str, base: Base, id: String, tier: ModelTier) -> Model {
         Model {
             id,
             provider: Arc::from(slug),
@@ -125,7 +148,10 @@ fn is_valid_slug(s: &str) -> bool {
 }
 
 fn builtin_slugs() -> Vec<String> {
-    ProviderKind::iter().map(|k| k.to_string()).collect()
+    ManifestRegistry::builtins()
+        .iter()
+        .map(|m| m.slug.to_string())
+        .collect()
 }
 
 fn providers_dir() -> Option<PathBuf> {
@@ -295,11 +321,14 @@ fn discover_in(dir: &Path) -> Vec<DynamicProviderMeta> {
         };
 
         let base = match ProviderKind::from_str(&info.base) {
-            Ok(k) => k,
-            Err(_) => {
-                warn!(slug, base = info.base, "unknown base provider, skipping");
-                continue;
-            }
+            Ok(k) => Base::Kind(k),
+            Err(_) => match ManifestRegistry::get(&info.base) {
+                Some(m) => Base::Manifest(m),
+                None => {
+                    warn!(slug, base = info.base, "unknown base provider, skipping");
+                    continue;
+                }
+            },
         };
 
         let models = match run_script(&path, "models", INFO_TIMEOUT) {
@@ -394,50 +423,61 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
     let auth = Arc::new(Mutex::new(resolved));
 
     let inner: Box<dyn Provider> = match meta.base {
-        ProviderKind::Anthropic => Box::new(
+        Base::Kind(ProviderKind::Anthropic) => Box::new(
             Anthropic::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::OpenAi => Box::new(
+        Base::Kind(ProviderKind::OpenAi) => Box::new(
             OpenAi::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::Google => Box::new(Google::with_auth(auth.clone(), timeouts)),
-        ProviderKind::Copilot => Box::new(
+        Base::Kind(ProviderKind::Google) => Box::new(Google::with_auth(auth.clone(), timeouts)),
+        Base::Kind(ProviderKind::Copilot) => Box::new(
             Copilot::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::Ollama => Box::new(
+        Base::Kind(ProviderKind::Ollama) => Box::new(
             LocalEndpoint::with_auth(&OLLAMA, auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::LlamaCpp => Box::new(
+        Base::Kind(ProviderKind::LlamaCpp) => Box::new(
             LocalEndpoint::with_auth(&LLAMACPP, auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::Mistral => Box::new(
+        Base::Kind(ProviderKind::Mistral) => Box::new(
             Mistral::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::Zai => Box::new(
+        Base::Kind(ProviderKind::Zai) => Box::new(
             Zai::with_auth(auth.clone(), timeouts).with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::Synthetic => Box::new(
+        Base::Kind(ProviderKind::Synthetic) => Box::new(
             Synthetic::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::OpenRouter => Box::new(
+        Base::Kind(ProviderKind::OpenRouter) => Box::new(
             OpenRouter::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::TensorX => Box::new(
+        Base::Kind(ProviderKind::TensorX) => Box::new(
             TensorX::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::Opencode => Box::new(
+        Base::Kind(ProviderKind::Opencode) => Box::new(
             Opencode::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
+        Base::Manifest(m) => {
+            let spec = engine_spec(m.slug).ok_or_else(|| AgentError::Config {
+                message: format!("no engine spec for base manifest '{}'", m.slug),
+            })?;
+            Box::new(ManifestCompat::new(
+                &spec,
+                auth.clone(),
+                timeouts,
+                meta.system_prefix.clone(),
+            ))
+        }
     };
 
     Ok(Box::new(DynamicProvider {
@@ -457,8 +497,8 @@ pub fn dynamic_model_specs_for(slug: &str) -> Vec<String> {
         return Vec::new();
     };
     if meta.models.is_empty() {
-        let base_slug = meta.base.to_string();
-        ManifestRegistry::get(&base_slug)
+        let base_slug = meta.base.slug();
+        ManifestRegistry::get(base_slug)
             .map(|m| m.models)
             .unwrap_or(&[])
             .iter()
@@ -477,8 +517,8 @@ pub fn discovered_slugs() -> Vec<&'static str> {
     discover().iter().map(|m| m.slug.as_str()).collect()
 }
 
-pub fn base_for_slug(slug: &str) -> Option<ProviderKind> {
-    find_meta(slug).map(|m| m.base)
+pub fn base_for_slug(slug: &str) -> Option<&'static str> {
+    find_meta(slug).map(|m| m.base.slug())
 }
 
 pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
@@ -676,7 +716,7 @@ mod tests {
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].slug, "test-provider");
         assert_eq!(providers[0].display_name, "Test");
-        assert_eq!(providers[0].base, ProviderKind::Anthropic);
+        assert_eq!(providers[0].base.slug(), ProviderKind::Anthropic.slug());
         assert!(providers[0].has_auth);
         assert!(providers[0].models.is_empty());
     }
@@ -744,6 +784,31 @@ esac
         write_script(tmp.path(), "custom-test", &info);
         let providers = discover_in(tmp.path());
         assert_eq!(providers.len(), 1);
-        assert_eq!(providers[0].base, expected);
+        assert_eq!(providers[0].base.slug(), expected.slug());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_accepts_manifest_base() {
+        const FAKE_BASE: &str = "fake-manifest-base";
+        ManifestRegistry::register_owned_manifest(ProviderManifest {
+            slug: FAKE_BASE,
+            display_name: "Fake",
+            family: ModelFamily::Generic,
+            supports_thinking: false,
+            accepts_arbitrary_models: false,
+            fallback_max_output: None,
+            fallback_context_window: 0,
+            models: &[],
+        });
+        let tmp = TempDir::new().unwrap();
+        write_script(
+            tmp.path(),
+            "custom-manifest",
+            r#"{"display_name": "Custom", "base": "fake-manifest-base", "has_auth": false}"#,
+        );
+        let providers = discover_in(tmp.path());
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].base.slug(), FAKE_BASE);
     }
 }

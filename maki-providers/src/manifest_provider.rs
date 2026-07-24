@@ -132,37 +132,35 @@ impl ModelInfoDescriptor {
     }
 }
 
-pub struct ManifestProvider {
+pub struct ManifestCompat {
     compat: OpenAiCompatProvider,
-    auth: Arc<LuaAuthSource>,
     auth_handle: Arc<Mutex<ResolvedAuth>>,
     thinking: Option<ThinkingMode>,
     system_prefix: Option<String>,
 }
 
-impl ManifestProvider {
-    /// Eager auth resolution: a missing key fails here. Used by
-    /// `provider_for_slug` for env-key providers loaded from a manifest.
+impl ManifestCompat {
     pub fn new(
-        _slug: Arc<str>,
-        engine_spec: EngineSpec,
-        auth: Arc<LuaAuthSource>,
+        engine_spec: &EngineSpec,
+        auth_handle: Arc<Mutex<ResolvedAuth>>,
         timeouts: Timeouts,
-    ) -> Result<Self, AgentError> {
-        let auth_handle = Arc::new(Mutex::new(ResolvedAuth::bearer("")));
-        auth.resolve(&auth_handle)?;
-        let (thinking, config) = leak_openai_compat_config(&engine_spec);
-        Ok(Self {
+        system_prefix: Option<String>,
+    ) -> Self {
+        let (thinking, config) = leak_openai_compat_config(engine_spec);
+        Self {
             compat: OpenAiCompatProvider::new(config, timeouts),
-            auth,
             auth_handle,
             thinking,
-            system_prefix: None,
-        })
+            system_prefix,
+        }
+    }
+
+    pub(crate) fn auth_handle(&self) -> &Arc<Mutex<ResolvedAuth>> {
+        &self.auth_handle
     }
 }
 
-impl Provider for ManifestProvider {
+impl Provider for ManifestCompat {
     fn stream_message<'a>(
         &'a self,
         model: &'a Model,
@@ -192,28 +190,73 @@ impl Provider for ManifestProvider {
         })
     }
 
+    fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+pub struct ManifestProvider {
+    engine: ManifestCompat,
+    auth: Arc<LuaAuthSource>,
+}
+
+impl ManifestProvider {
+    /// Eager auth resolution: a missing key fails here. Used by
+    /// `provider_for_slug` for env-key providers loaded from a manifest.
+    pub fn new(
+        _slug: Arc<str>,
+        engine_spec: EngineSpec,
+        auth: Arc<LuaAuthSource>,
+        timeouts: Timeouts,
+    ) -> Result<Self, AgentError> {
+        let auth_handle = Arc::new(Mutex::new(ResolvedAuth::bearer("")));
+        auth.resolve(&auth_handle)?;
+        let engine = ManifestCompat::new(&engine_spec, auth_handle, timeouts, None);
+        Ok(Self { engine, auth })
+    }
+}
+
+impl Provider for ManifestProvider {
+    fn stream_message<'a>(
+        &'a self,
+        model: &'a Model,
+        messages: &'a [Message],
+        system: &'a str,
+        tools: &'a Value,
+        event_tx: &'a Sender<ProviderEvent>,
+        opts: RequestOptions,
+        _session_id: Option<&'a SessionRef>,
+    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+        self.engine
+            .stream_message(model, messages, system, tools, event_tx, opts, _session_id)
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
+        self.engine.list_models()
+    }
+
     /// TODO: DeepSeek exposes a `/user/balance` usage endpoint; route it through
     /// a manifest hook in a later PR. For now manifest-managed providers report
     /// no programmatic usage, the same default as the trait.
     fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
-        Box::pin(async { Ok(None) })
+        self.engine.fetch_usage()
     }
 
     fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         let auth = Arc::clone(&self.auth);
-        let handle = Arc::clone(&self.auth_handle);
+        let handle = Arc::clone(self.engine.auth_handle());
         Box::pin(async move { auth.refresh(&handle).await })
     }
 
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         let auth = Arc::clone(&self.auth);
-        let handle = Arc::clone(&self.auth_handle);
+        let handle = Arc::clone(self.engine.auth_handle());
         Box::pin(async move { auth.reload(&handle) })
     }
 
     fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
         let auth = Arc::clone(&self.auth);
-        let handle = Arc::clone(&self.auth_handle);
+        let handle = Arc::clone(self.engine.auth_handle());
         Box::pin(async move { auth.rotate_key(&handle) })
     }
 }

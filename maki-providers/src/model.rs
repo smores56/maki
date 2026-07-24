@@ -390,7 +390,7 @@ impl Model {
         }
 
         if let Some(base) = dynamic::base_for_slug(slug)
-            && let Some(manifest) = ManifestRegistry::get(&base.to_string())
+            && let Some(manifest) = ManifestRegistry::get(base)
         {
             return Ok(Self::from_base(manifest, slug, model_id));
         }

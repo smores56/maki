@@ -49,6 +49,23 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
+            Self::Google => "google",
+            Self::Copilot => "copilot",
+            Self::Ollama => "ollama",
+            Self::LlamaCpp => "llama-cpp",
+            Self::Mistral => "mistral",
+            Self::Zai => "zai",
+            Self::OpenRouter => "openrouter",
+            Self::Synthetic => "synthetic",
+            Self::TensorX => "tensorx",
+            Self::Opencode => "opencode",
+        }
+    }
+
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Anthropic => "Anthropic",

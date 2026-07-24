@@ -232,7 +232,7 @@ To add a custom provider or proxy, drop an executable script into `~/.config/mak
 
 `resolve` is called each time a new agent spawns, so scripts should read tokens from disk instead of caching them in memory. That way auth changes from other processes get picked up.
 
-The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `zai`, `openrouter`, `synthetic`, `tensorx`, `opencode`.
+The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `copilot`, `deepseek`, `google`, `llama-cpp`, `mistral`, `ollama`, `openai`, `opencode`, `openrouter`, `synthetic`, `tensorx`, `zai`.
 
 If your provider serves models not in the base catalog, add a `models` subcommand returning:
 
