@@ -629,10 +629,6 @@ mod tests {
             }
             let slug: Arc<str> = Arc::from(manifest.slug);
             for &tier in &TIERS {
-                // DeepSeek has no Weak tier model
-                if manifest.slug == "deepseek" && tier == ModelTier::Weak {
-                    continue;
-                }
                 // Compaction is user-assigned only, not in static registry
                 if tier == ModelTier::Compaction {
                     continue;
@@ -667,9 +663,6 @@ mod tests {
             }
             let entries = manifest.models;
             for &tier in &TIERS {
-                if manifest.slug == "deepseek" && tier == ModelTier::Weak {
-                    continue;
-                }
                 // Compaction is user-assigned only, not in static registry
                 if tier == ModelTier::Compaction {
                     continue;
@@ -692,7 +685,6 @@ mod tests {
     #[test_case("openai/gpt-99", "openai", "gpt-99" ; "unknown_openai_model_accepted")]
     #[test_case("synthetic/hf:nonexistent", "synthetic", "hf:nonexistent" ; "unknown_synthetic_model_accepted")]
     #[test_case("ollama/my-custom-model", "ollama", "my-custom-model" ; "unknown_ollama_model_accepted")]
-    #[test_case("deepseek/my-custom-model", "deepseek", "my-custom-model" ; "unknown_deepseek_model_accepted")]
     fn unknown_model_accepted(spec: &str, expected_slug: &str, expected_id: &str) {
         let model = Model::from_spec(spec).unwrap();
         assert_eq!(model.provider, Arc::<str>::from(expected_slug));
@@ -727,11 +719,9 @@ mod tests {
     #[test_case("google/gemini-2.5-pro",            true  ; "gemini")]
     #[test_case("copilot/claude-opus-4.7",          true  ; "copilot_entry_beats_generic_family")]
     #[test_case("zai/glm-5-code",                   false ; "glm_code_text_only")]
-    #[test_case("deepseek/deepseek-v4-pro",         false ; "deepseek_text_only")]
     #[test_case("mistral/mistral-medium-latest",    true  ; "mistral_medium")]
     #[test_case("mistral/ministral-14b-latest",     false ; "ministral_text_only")]
     #[test_case("anthropic/claude-nonexistent-99",  true  ; "unknown_model_uses_family_fallback")]
-    #[test_case("deepseek/my-custom-model",         false ; "unknown_generic_defaults_off")]
     fn vision_resolved_from_entry_or_family(spec: &str, expected: bool) {
         assert_eq!(Model::from_spec(spec).unwrap().supports_vision(), expected);
     }

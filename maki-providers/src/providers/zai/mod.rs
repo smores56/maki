@@ -108,6 +108,7 @@ inventory::submit!(BuiltInProvider {
     ]),
     login_url: Some("https://z.ai/manage-apikey/apikey-list"),
     needs_url: false,
+    manifest_owned: false,
 });
 
 pub(crate) const fn models() -> &'static [ModelEntry] {

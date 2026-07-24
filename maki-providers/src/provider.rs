@@ -15,7 +15,6 @@ use crate::providers::Timeouts;
 use crate::providers::anthropic::Anthropic;
 use crate::providers::anthropic::bedrock;
 use crate::providers::copilot::Copilot;
-use crate::providers::deepseek::DeepSeek;
 use crate::providers::dynamic;
 use crate::providers::google::Google;
 use crate::providers::local::{LLAMACPP, LocalEndpoint, OLLAMA};
@@ -211,7 +210,7 @@ impl ProviderKind {
             Self::LlamaCpp => Ok(Box::new(LocalEndpoint::new(&LLAMACPP, timeouts)?)),
             Self::Mistral => Ok(Box::new(Mistral::new(timeouts)?)),
             Self::Zai => Ok(Box::new(Zai::new(timeouts)?)),
-            Self::DeepSeek => Ok(Box::new(DeepSeek::new(timeouts)?)),
+            Self::DeepSeek => crate::manifest_provider::deepseek_provider(timeouts),
             Self::OpenRouter => Ok(Box::new(OpenRouter::new(timeouts)?)),
             Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
             Self::TensorX => Ok(Box::new(TensorX::new(timeouts)?)),
@@ -259,6 +258,9 @@ pub trait Provider: Send + Sync {
 }
 
 pub fn provider_for_slug(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
+    if crate::manifest_provider::has_manifest_provider(slug) {
+        return crate::manifest_provider::manifest_provider(slug, timeouts);
+    }
     if let Ok(kind) = ProviderKind::from_str(slug) {
         return kind.create(timeouts);
     }

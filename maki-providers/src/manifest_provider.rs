@@ -1,0 +1,822 @@
+use std::collections::HashMap;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use flume::Sender;
+use maki_storage::id::SessionRef;
+use mlua::{Function, Value as LuaValue};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tracing::warn;
+
+use crate::manifest::ManifestRegistry;
+use crate::manifest::ProviderManifest;
+use crate::model::{Model, ModelEntry, ModelFamily, ModelInfo, ModelPricing, ModelTier};
+use crate::model_registry::model_registry;
+use crate::provider::{BoxFuture, Provider};
+use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
+use crate::providers::{KeyPool, ResolvedAuth, Timeouts, with_prefix};
+use crate::types::{ProviderUsage, ThinkingConfig, dialect};
+use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
+
+const V4_MARKER: &str = "deepseek-v4";
+const DEEPSEEK_SLUG: &str = "deepseek";
+const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
+const DEEPSEEK_PROVIDER_NAME: &str = "DeepSeek";
+const MAX_TOKENS_FIELD: &str = "max_tokens";
+
+pub trait AuthSource: Send + Sync {
+    fn resolve(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError>;
+    fn reload(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
+        Ok(())
+    }
+    fn refresh(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> BoxFuture<'_, Result<(), AgentError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn rotate_key(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> Result<bool, AgentError> {
+        Ok(false)
+    }
+}
+
+/// Authoritative description of a manifest provider's engine. Built by the
+/// Lua loader from a `maki.provider.openai_compat{...}` descriptor (or, for
+/// the non-Lua fallback, `deepseek_engine_spec`).
+#[derive(Debug, Clone)]
+pub enum EngineSpec {
+    OpenaiCompat {
+        slug: String,
+        base_url: String,
+        api_key_env: String,
+        max_tokens_field: String,
+        include_stream_usage: bool,
+        provider_name: String,
+        thinking: Option<ThinkingMode>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingMode {
+    /// DeepSeek's `{"type":"enabled"|"disabled"}` toggle, `dialect::DEEPSEEK`
+    /// reasoning effort, and V4 `reasoning_content` padding.
+    DeepSeek,
+}
+
+/// Serde-friendly shape of the table a Lua manifest returns (minus its `auth`
+/// field, which is a function-table the loader extracts as `mlua::Function`s
+/// before this deserialization). `ModelInfo` itself is not `Deserialize` (it
+/// carries `provider_info`), so models round-trip through `ModelInfoDescriptor`.
+#[derive(Deserialize)]
+pub struct ManifestDescriptor {
+    pub slug: String,
+    pub display_name: String,
+    pub engine: EngineDescriptor,
+    #[serde(default)]
+    pub family: Option<String>,
+    #[serde(default)]
+    pub supports_thinking: Option<bool>,
+    #[serde(default)]
+    pub accepts_arbitrary_models: Option<bool>,
+    #[serde(default)]
+    pub fallback_max_output: Option<u32>,
+    #[serde(default)]
+    pub fallback_context_window: Option<u32>,
+    #[serde(default)]
+    pub models: Vec<ModelInfoDescriptor>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EngineDescriptor {
+    OpenaiCompat {
+        base_url: String,
+        api_key_env: String,
+        max_tokens_field: String,
+        #[serde(default)]
+        include_stream_usage: bool,
+        provider_name: String,
+        #[serde(default)]
+        thinking: Option<String>,
+    },
+}
+
+#[derive(Deserialize)]
+pub struct ModelInfoDescriptor {
+    pub id: String,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub default: Option<bool>,
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub pricing: Option<ModelPricing>,
+    #[serde(default)]
+    pub supports_thinking: Option<bool>,
+    #[serde(default)]
+    pub supports_vision: Option<bool>,
+}
+
+impl ModelInfoDescriptor {
+    fn into_model_info(self) -> ModelInfo {
+        ModelInfo {
+            id: self.id,
+            context_window: self.context_window,
+            max_output_tokens: self.max_output_tokens,
+            pricing: self.pricing,
+            supports_thinking: self.supports_thinking,
+            supports_vision: self.supports_vision,
+            provider_info: None,
+        }
+    }
+}
+
+pub struct ManifestProvider {
+    compat: OpenAiCompatProvider,
+    auth: Arc<dyn AuthSource>,
+    auth_handle: Arc<Mutex<ResolvedAuth>>,
+    thinking: Option<ThinkingMode>,
+    system_prefix: Option<String>,
+}
+
+impl ManifestProvider {
+    /// Eager auth resolution: a missing key fails here, matching the old
+    /// `DeepSeek::new` precondition. Used by `provider_for_slug` for
+    /// env-key providers loaded from a manifest.
+    pub fn new(
+        _slug: Arc<str>,
+        engine_spec: EngineSpec,
+        auth: Arc<dyn AuthSource>,
+        timeouts: Timeouts,
+    ) -> Result<Self, AgentError> {
+        let auth_handle = Arc::new(Mutex::new(ResolvedAuth::bearer("")));
+        auth.resolve(&auth_handle)?;
+        Ok(Self::from_parts(
+            engine_spec,
+            auth,
+            auth_handle,
+            None,
+            timeouts,
+        ))
+    }
+
+    /// Auth already resolved by an outer owner (dynamic providers resolve via
+    /// their script and mutate the shared handle themselves); the auth source
+    /// is a no-op and only the handle + system prefix matter.
+    pub(crate) fn with_resolved_auth(
+        engine_spec: EngineSpec,
+        auth_handle: Arc<Mutex<ResolvedAuth>>,
+        system_prefix: Option<String>,
+        timeouts: Timeouts,
+    ) -> Self {
+        Self::from_parts(
+            engine_spec,
+            Arc::new(NoopAuthSource),
+            auth_handle,
+            system_prefix,
+            timeouts,
+        )
+    }
+
+    fn from_parts(
+        engine_spec: EngineSpec,
+        auth: Arc<dyn AuthSource>,
+        auth_handle: Arc<Mutex<ResolvedAuth>>,
+        system_prefix: Option<String>,
+        timeouts: Timeouts,
+    ) -> Self {
+        let (thinking, config) = leak_openai_compat_config(&engine_spec);
+        Self {
+            compat: OpenAiCompatProvider::new(config, timeouts),
+            auth,
+            auth_handle,
+            thinking,
+            system_prefix,
+        }
+    }
+}
+
+impl Provider for ManifestProvider {
+    fn stream_message<'a>(
+        &'a self,
+        model: &'a Model,
+        messages: &'a [Message],
+        system: &'a str,
+        tools: &'a Value,
+        event_tx: &'a Sender<ProviderEvent>,
+        opts: RequestOptions,
+        _session_id: Option<&'a SessionRef>,
+    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
+        Box::pin(async move {
+            let auth = self.auth_handle.lock().unwrap().clone();
+            let mut buf = String::new();
+            let system = with_prefix(&self.system_prefix, system, &mut buf);
+            let mut body = self.compat.build_body(model, messages, system, tools);
+            apply_thinking(&mut body, opts.thinking, model, self.thinking);
+            self.compat
+                .do_stream(model, &[], &body, event_tx, &auth)
+                .await
+        })
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
+        Box::pin(async move {
+            let auth = self.auth_handle.lock().unwrap().clone();
+            self.compat.do_list_models(&auth).await
+        })
+    }
+
+    /// TODO: DeepSeek exposes a `/user/balance` usage endpoint; route it through
+    /// a manifest hook in a later PR. For now manifest-managed providers report
+    /// no programmatic usage, the same default as the trait.
+    fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
+        let auth = Arc::clone(&self.auth);
+        let handle = Arc::clone(&self.auth_handle);
+        Box::pin(async move { auth.refresh(&handle).await })
+    }
+
+    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
+        let auth = Arc::clone(&self.auth);
+        let handle = Arc::clone(&self.auth_handle);
+        Box::pin(async move { auth.reload(&handle) })
+    }
+
+    fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
+        let auth = Arc::clone(&self.auth);
+        let handle = Arc::clone(&self.auth_handle);
+        Box::pin(async move { auth.rotate_key(&handle) })
+    }
+}
+
+fn apply_thinking(
+    body: &mut Value,
+    thinking: ThinkingConfig,
+    model: &Model,
+    mode: Option<ThinkingMode>,
+) {
+    match mode {
+        None => {
+            if matches!(thinking, ThinkingConfig::Off) {
+                body["thinking"] = json!({"type": "disabled"});
+            }
+        }
+        Some(ThinkingMode::DeepSeek) => {
+            if thinking.is_enabled() {
+                body["thinking"] = json!({"type": "enabled"});
+                thinking.apply_reasoning_effort(body, &dialect::DEEPSEEK, model);
+                if matches!(thinking, ThinkingConfig::Budget(_)) {
+                    warn!("DeepSeek reasoning does not support token budgets");
+                }
+                pad_reasoning_content(&model.id, body);
+            } else {
+                body["thinking"] = json!({"type": "disabled"});
+            }
+        }
+    }
+}
+
+/// DeepSeek's two reasoning models disagree about `reasoning_content`: V4 in
+/// thinking mode wants it on every assistant turn (missing = 400), R1 refuses
+/// it as input. So we gate on the V4 substring, same trick Vercel's AI SDK
+/// uses, and back-fill the turns that have none (plain replies, tool-only
+/// turns). The API only checks the field exists, so `""` is enough.
+///
+/// Ref: <https://api-docs.deepseek.com/guides/thinking_mode>
+fn pad_reasoning_content(model_id: &str, body: &mut Value) {
+    if !model_id.contains(V4_MARKER) {
+        return;
+    }
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for msg in messages {
+        if msg.get("role").and_then(Value::as_str) != Some("assistant")
+            || msg
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .is_some()
+        {
+            continue;
+        }
+        msg["reasoning_content"] = Value::String(String::new());
+    }
+}
+
+fn leak_str(s: &str) -> &'static str {
+    Box::leak(s.to_string().into_boxed_str())
+}
+
+fn leak_openai_compat_config(
+    spec: &EngineSpec,
+) -> (Option<ThinkingMode>, &'static OpenAiCompatConfig) {
+    match spec {
+        EngineSpec::OpenaiCompat {
+            slug,
+            base_url,
+            api_key_env,
+            max_tokens_field,
+            include_stream_usage,
+            provider_name,
+            thinking,
+        } => {
+            let config = OpenAiCompatConfig {
+                slug: leak_str(slug),
+                api_key_env: leak_str(api_key_env),
+                base_url: leak_str(base_url),
+                max_tokens_field: leak_str(max_tokens_field),
+                include_stream_usage: *include_stream_usage,
+                provider_name: leak_str(provider_name),
+            };
+            (*thinking, Box::leak(Box::new(config)))
+        }
+    }
+}
+
+/// Pure-Rust env-key auth for the no-Lua-host paths (`ProviderKind::DeepSeek
+/// .create`, which never boots the Lua runtime) and a unit-test fixture. The
+/// manifest/LuaAuthSource path is the real one — kept only so those paths
+/// resolve without a Lua instance.
+struct EnvKeyAuthSource {
+    slug: String,
+    env_var: String,
+    pool: Mutex<Option<KeyPool>>,
+}
+
+impl EnvKeyAuthSource {
+    pub fn new(slug: String, env_var: String) -> Self {
+        Self {
+            slug,
+            env_var,
+            pool: Mutex::new(None),
+        }
+    }
+}
+
+impl AuthSource for EnvKeyAuthSource {
+    fn resolve(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
+        let pool = KeyPool::resolve(&self.slug, &self.env_var)?;
+        *auth.lock().unwrap() = ResolvedAuth::bearer(pool.current());
+        *self.pool.lock().unwrap() = Some(pool);
+        Ok(())
+    }
+
+    fn rotate_key(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<bool, AgentError> {
+        let guard = self.pool.lock().unwrap();
+        Ok(guard
+            .as_ref()
+            .is_some_and(|p| p.rotate_auth(auth, ResolvedAuth::bearer)))
+    }
+}
+
+struct NoopAuthSource;
+
+impl AuthSource for NoopAuthSource {
+    fn resolve(&self, _auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
+        Ok(())
+    }
+}
+
+/// Auth source backed by Lua function-tables pulled from a manifest's `auth`
+/// field (`resolve`, optional `rotate`/`refresh`). Built by the `maki-lua`
+/// loader; `maki.auth.env_key` (and future `maki.auth.*`) produce the tables.
+///
+/// `resolve`/`rotate`/`reload` call into Lua synchronously from whatever
+/// thread constructs the `ManifestProvider`. Under mlua's `send` feature a
+/// synchronous `Function::call` from a non-owner thread serializes on the
+/// global reentrant Lua mutex — the runtime thread is idle post-boot, so the
+/// only hazard is a sync call overlapping an in-flight async Lua call. Today
+/// no async refresh ships (env_key has none), so the overlap is empty; the
+/// first real async refresh lands in the oauth follow-up PR.
+pub struct LuaAuthSource {
+    slug: String,
+    resolve: Function,
+    rotate: Option<Function>,
+    refresh: Option<Function>,
+}
+
+impl LuaAuthSource {
+    pub fn new(
+        slug: String,
+        resolve: Function,
+        rotate: Option<Function>,
+        refresh: Option<Function>,
+    ) -> Self {
+        Self {
+            slug,
+            resolve,
+            rotate,
+            refresh,
+        }
+    }
+
+    fn config_err(&self, op: &str, e: mlua::Error) -> AgentError {
+        AgentError::Config {
+            message: format!("{} auth {op}: {e}", self.slug),
+        }
+    }
+}
+
+impl AuthSource for LuaAuthSource {
+    fn resolve(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
+        let key = self
+            .resolve
+            .call::<String>(LuaValue::Nil)
+            .map_err(|e| self.config_err("resolve", e))?;
+        *auth.lock().unwrap() = ResolvedAuth::bearer(&key);
+        Ok(())
+    }
+
+    fn reload(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
+        self.resolve(auth)
+    }
+
+    fn rotate_key(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<bool, AgentError> {
+        let Some(rotate) = &self.rotate else {
+            return Ok(false);
+        };
+        let next = rotate
+            .call::<Option<String>>(LuaValue::Nil)
+            .map_err(|e| self.config_err("rotate", e))?;
+        match next {
+            Some(key) => {
+                *auth.lock().unwrap() = ResolvedAuth::bearer(&key);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn refresh(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> BoxFuture<'_, Result<(), AgentError>> {
+        let auth = Arc::clone(auth);
+        Box::pin(async move {
+            let Some(refresh) = &self.refresh else {
+                return Ok(());
+            };
+            // `resolve` may later return a table for multi-header flows (the
+            // copilot follow-up PR); for env_key a bearer string suffices.
+            let next = refresh
+                .call_async::<Option<String>>(LuaValue::Nil)
+                .await
+                .map_err(|e| AgentError::Config {
+                    message: format!("{} auth refresh: {e}", self.slug),
+                })?;
+            if let Some(key) = next {
+                *auth.lock().unwrap() = ResolvedAuth::bearer(&key);
+            }
+            Ok(())
+        })
+    }
+}
+
+type Registry = HashMap<Arc<str>, (EngineSpec, Arc<dyn AuthSource>)>;
+
+static MANIFEST_PROVIDERS: OnceLock<Mutex<Registry>> = OnceLock::new();
+
+fn registry() -> &'static Mutex<Registry> {
+    MANIFEST_PROVIDERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a Lua-loaded provider: store its engine spec, already-built auth
+/// source, and static models for `provider_for_slug` routing and model picking,
+/// AND own its capability manifest so `ManifestRegistry::get` resolves the
+/// slug at runtime. All `'static` data is leaked once at boot.
+pub fn register_manifest_provider(
+    slug: Arc<str>,
+    engine_spec: EngineSpec,
+    auth: Arc<dyn AuthSource>,
+    models: Vec<ModelInfo>,
+    manifest: ProviderManifest,
+) {
+    registry()
+        .lock()
+        .unwrap()
+        .insert(Arc::clone(&slug), (engine_spec, auth));
+    model_registry()
+        .write()
+        .unwrap()
+        .set_known_models(&slug, models);
+    ManifestRegistry::register_owned_manifest(manifest);
+}
+
+fn family_from_str(s: Option<&str>) -> ModelFamily {
+    match s {
+        Some("claude") => ModelFamily::Claude,
+        Some("gpt") => ModelFamily::Gpt,
+        Some("gemini") => ModelFamily::Gemini,
+        Some("glm") => ModelFamily::Glm,
+        Some("synthetic") => ModelFamily::Synthetic,
+        _ => ModelFamily::Generic,
+    }
+}
+
+fn thinking_mode_from_str(s: &str) -> Option<ThinkingMode> {
+    match s {
+        "deepseek" => Some(ThinkingMode::DeepSeek),
+        _ => None,
+    }
+}
+
+impl ManifestDescriptor {
+    /// Split a decoded manifest into everything the registry needs: the
+    /// `(slug, engine, models)` parts plus the capability `ProviderManifest`
+    /// (single-sourced here, leaked to `'static` so `ManifestRegistry` can own
+    /// it without a lifetime parameter). `auth` is not part of this: the loader
+    /// already pulled it out as `mlua::Function`s and built a `LuaAuthSource`.
+    pub fn into_manifest_parts(self) -> (Arc<str>, EngineSpec, Vec<ModelInfo>, ProviderManifest) {
+        let slug_arc: Arc<str> = Arc::from(self.slug.as_str());
+        let slug_str = leak_str(&self.slug);
+        let display_name = leak_str(&self.display_name);
+        let family = family_from_str(self.family.as_deref());
+        let supports_thinking = self.supports_thinking.unwrap_or(false);
+        let accepts_arbitrary_models = self.accepts_arbitrary_models.unwrap_or(false);
+        let fallback_max_output = self.fallback_max_output;
+        let fallback_context_window = self.fallback_context_window.unwrap_or(0);
+
+        let engine_spec = match self.engine {
+            EngineDescriptor::OpenaiCompat {
+                base_url,
+                api_key_env,
+                max_tokens_field,
+                include_stream_usage,
+                provider_name,
+                thinking,
+            } => EngineSpec::OpenaiCompat {
+                slug: slug_arc.to_string(),
+                base_url,
+                api_key_env,
+                max_tokens_field,
+                include_stream_usage,
+                provider_name,
+                thinking: thinking.as_deref().and_then(thinking_mode_from_str),
+            },
+        };
+
+        let (entries, model_infos): (Vec<ModelEntry>, Vec<ModelInfo>) = self
+            .models
+            .into_iter()
+            .map(|d| {
+                let id = leak_str(&d.id);
+                let entry = ModelEntry {
+                    prefixes: Box::leak(Box::new([id])),
+                    tier: d
+                        .tier
+                        .as_deref()
+                        .and_then(|t| ModelTier::from_str(t).ok())
+                        .unwrap_or(ModelTier::Medium),
+                    family,
+                    vision: d.supports_vision.unwrap_or(false),
+                    default: d.default.unwrap_or(false),
+                    pricing: d.pricing.clone().unwrap_or_default(),
+                    max_output_tokens: d.max_output_tokens.or(fallback_max_output).unwrap_or(0),
+                    context_window: d.context_window.unwrap_or(fallback_context_window),
+                };
+                (entry, d.into_model_info())
+            })
+            .unzip();
+
+        let manifest = ProviderManifest {
+            slug: slug_str,
+            display_name,
+            family,
+            supports_thinking,
+            accepts_arbitrary_models,
+            fallback_max_output,
+            fallback_context_window,
+            models: Box::leak(entries.into_boxed_slice()),
+        };
+        (slug_arc, engine_spec, model_infos, manifest)
+    }
+}
+
+pub fn has_manifest_provider(slug: &str) -> bool {
+    registry().lock().unwrap().contains_key(slug)
+}
+
+pub(crate) fn manifest_provider(
+    slug: &str,
+    timeouts: Timeouts,
+) -> Result<Box<dyn Provider>, AgentError> {
+    let (engine_spec, auth) = registry()
+        .lock()
+        .unwrap()
+        .get(slug)
+        .cloned()
+        .ok_or_else(|| AgentError::Config {
+            message: format!("no manifest provider registered for '{slug}'"),
+        })?;
+    let slug_arc: Arc<str> = Arc::from(slug);
+    Ok(Box::new(ManifestProvider::new(
+        slug_arc,
+        engine_spec,
+        auth,
+        timeouts,
+    )?))
+}
+
+pub fn deepseek_engine_spec() -> EngineSpec {
+    EngineSpec::OpenaiCompat {
+        slug: DEEPSEEK_SLUG.to_string(),
+        base_url: DEEPSEEK_BASE_URL.to_string(),
+        api_key_env: DEEPSEEK_API_KEY_ENV.to_string(),
+        max_tokens_field: MAX_TOKENS_FIELD.to_string(),
+        include_stream_usage: true,
+        provider_name: DEEPSEEK_PROVIDER_NAME.to_string(),
+        thinking: Some(ThinkingMode::DeepSeek),
+    }
+}
+
+inventory::submit!(maki_config::providers::BuiltInProvider {
+    slug: DEEPSEEK_SLUG,
+    display_name: DEEPSEEK_PROVIDER_NAME,
+    protocol: maki_config::providers::Protocol::Openai,
+    default_base_url: DEEPSEEK_BASE_URL,
+    default_api_key_env: DEEPSEEK_API_KEY_ENV,
+    default_model: "deepseek/deepseek-v4-flash",
+    plans: None,
+    login_url: Some("https://platform.deepseek.com/api_keys"),
+    needs_url: false,
+    manifest_owned: true,
+});
+
+/// Pure-Rust fallback for `ProviderKind::DeepSeek.create` and other non-Lua
+/// paths: the same `ManifestProvider` the Lua manifest would build. In
+/// practice the Lua loader registers DeepSeek first, so `provider_for_slug`
+/// short-circuits here before this arm; it stays so those paths
+/// (capability/login subcommands) never boot the Lua host yet still compile.
+pub fn deepseek_provider(timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
+    let slug: Arc<str> = Arc::from(DEEPSEEK_SLUG);
+    let auth: Arc<dyn AuthSource> = Arc::new(EnvKeyAuthSource::new(
+        DEEPSEEK_SLUG.to_string(),
+        DEEPSEEK_API_KEY_ENV.to_string(),
+    ));
+    Ok(Box::new(ManifestProvider::new(
+        slug,
+        deepseek_engine_spec(),
+        auth,
+        timeouts,
+    )?))
+}
+
+/// Dynamic providers with `base = "deepseek"` resolve auth via their own
+/// script into a shared handle; this wraps that handle with the DeepSeek
+/// engine (thinking + system prefix), replacing the deleted `DeepSeek::with_auth`.
+pub(crate) fn deepseek_provider_with_auth(
+    auth_handle: Arc<Mutex<ResolvedAuth>>,
+    system_prefix: Option<String>,
+    timeouts: Timeouts,
+) -> Box<dyn Provider> {
+    Box::new(ManifestProvider::with_resolved_auth(
+        deepseek_engine_spec(),
+        auth_handle,
+        system_prefix,
+        timeouts,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use test_case::test_case;
+
+    const V4: &str = "deepseek-v4-pro";
+    const R1: &str = "deepseek-reasoner";
+
+    #[test]
+    fn engine_spec_carries_deepseek_thinking_mode() {
+        let spec = deepseek_engine_spec();
+        let EngineSpec::OpenaiCompat {
+            thinking, base_url, ..
+        } = spec;
+        assert_eq!(thinking, Some(ThinkingMode::DeepSeek));
+        assert_eq!(base_url, DEEPSEEK_BASE_URL);
+    }
+
+    #[test]
+    fn env_key_auth_source_resolves_from_env() {
+        let env_var = format!("MAKI_TEST_DS_KEY_{}", fastrand::u32(..));
+        unsafe { std::env::set_var(&env_var, "sk-from-env") };
+        let source = EnvKeyAuthSource::new(DEEPSEEK_SLUG.into(), env_var.clone());
+        let handle = Arc::new(Mutex::new(ResolvedAuth::bearer("")));
+        source.resolve(&handle).unwrap();
+        unsafe { std::env::remove_var(&env_var) };
+        let auth = handle.lock().unwrap().clone();
+        assert_eq!(auth.headers[0].1, "Bearer sk-from-env");
+    }
+
+    #[test]
+    fn env_key_auth_source_fails_when_unset() {
+        let env_var = format!("MAKI_TEST_DS_NONE_{}", fastrand::u32(..));
+        let source = EnvKeyAuthSource::new(format!("deepseek-none-{}", fastrand::u32(..)), env_var);
+        let handle = Arc::new(Mutex::new(ResolvedAuth::bearer("")));
+        let err = source.resolve(&handle).unwrap_err();
+        assert!(matches!(err, AgentError::Config { .. }));
+    }
+
+    /// Guards the no-Lua-host `EnvKeyAuthSource` fallback (the `ProviderKind::
+    /// DeepSeek` arm). `LuaAuthSource` needs a full Lua host, so its overlap
+    /// with an in-flight async Lua call can't be unit-tested standalone here;
+    /// the end-to-end loader tests (`load_builtins_loads_deepseek_manifest_provider`,
+    /// `manifest_routes_deepseek_provider`) exercise the Lua path. The real
+    /// sync-vs-async overlap first occurs when an auth `refresh` ships — left
+    /// for the oauth follow-up PR.
+    /// TODO(first real async refresh): stress `LuaAuthSource::resolve`
+    /// concurrent with an async Lua call on the runtime executor.
+    #[test]
+    #[ignore = "lua auth sync/async overlap deferred to the first real async refresh"]
+    fn lua_auth_source_no_deadlock_under_concurrent_async() {}
+
+    #[test_case(true  ; "thinking_enabled_pads")]
+    #[test_case(false ; "thinking_disabled_no_pad")]
+    fn deepseek_thinking_body_shape(enabled: bool) {
+        let model = Model {
+            id: V4.to_string(),
+            provider: Arc::from(DEEPSEEK_SLUG),
+            ..test_model()
+        };
+        let mut body = json!({"messages": [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+        ]});
+        let thinking = if enabled {
+            ThinkingConfig::Adaptive
+        } else {
+            ThinkingConfig::Off
+        };
+        apply_thinking(&mut body, thinking, &model, Some(ThinkingMode::DeepSeek));
+        assert_eq!(
+            body["thinking"]["type"],
+            if enabled { "enabled" } else { "disabled" }
+        );
+        if enabled {
+            assert_eq!(body["messages"][0]["reasoning_content"], "");
+        } else {
+            assert!(body["messages"][0].get("reasoning_content").is_none());
+        }
+    }
+
+    #[test]
+    fn none_mode_only_disables_when_off() {
+        let model = Model {
+            id: V4.to_string(),
+            ..test_model()
+        };
+        let mut body = json!({"messages": []});
+        apply_thinking(&mut body, ThinkingConfig::Adaptive, &model, None);
+        assert!(body.get("thinking").is_none());
+
+        let mut body = json!({"messages": []});
+        apply_thinking(&mut body, ThinkingConfig::Off, &model, None);
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    fn test_model() -> Model {
+        use crate::model::{ModelFamily, ModelPricing, ModelTier};
+        Model {
+            id: "deepseek-v4-pro".to_string(),
+            provider: Arc::from(DEEPSEEK_SLUG),
+            tier: ModelTier::Strong,
+            family: ModelFamily::Generic,
+            supports_tool_examples_override: None,
+            supports_thinking_override: None,
+            supports_vision_override: None,
+            pricing: ModelPricing::ZERO,
+            max_output_tokens: Some(384_000),
+            context_window: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn v4_pads_only_assistant_turns_without_reasoning() {
+        let mut body = json!({"messages": [
+            {"role": "system",    "content": "sys"},
+            {"role": "user",      "content": "hi"},
+            {"role": "assistant", "content": "ok", "reasoning_content": "kept"},
+            {"role": "assistant", "content": "",   "tool_calls": [{"id": "c1"}]},
+            {"role": "tool",      "tool_call_id": "c1", "content": "out"},
+        ]});
+        pad_reasoning_content(V4, &mut body);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[2]["reasoning_content"], "kept");
+        assert_eq!(msgs[3]["reasoning_content"], "");
+        for i in [0, 1, 4] {
+            assert!(msgs[i].get("reasoning_content").is_none());
+        }
+    }
+
+    #[test]
+    fn non_v4_model_is_untouched() {
+        let input = json!({"messages": [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+            {"role": "assistant", "content": "hi"},
+        ]});
+        let mut body = input.clone();
+        pad_reasoning_content(R1, &mut body);
+        assert_eq!(body, input);
+    }
+}

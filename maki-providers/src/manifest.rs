@@ -1,7 +1,9 @@
+use std::sync::{Mutex, OnceLock};
+
 use crate::model::{ModelEntry, ModelFamily, ModelTier};
 use crate::providers::{
-    anthropic, copilot, custom, deepseek, dynamic, google, llama_cpp, mistral, ollama, openai,
-    openrouter, synthetic, tensorx, zai,
+    anthropic, copilot, custom, dynamic, google, llama_cpp, mistral, ollama, openai, openrouter,
+    synthetic, tensorx, zai,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -104,17 +106,6 @@ const ZAI: ProviderManifest = ProviderManifest {
     models: zai::models(),
 };
 
-const DEEPSEEK: ProviderManifest = ProviderManifest {
-    slug: "deepseek",
-    display_name: "DeepSeek",
-    family: ModelFamily::Generic,
-    supports_thinking: true,
-    accepts_arbitrary_models: false,
-    fallback_max_output: Some(384_000),
-    fallback_context_window: 1_000_000,
-    models: deepseek::models(),
-};
-
 const OPENROUTER: ProviderManifest = ProviderManifest {
     slug: "openrouter",
     display_name: "OpenRouter",
@@ -160,15 +151,46 @@ const OPENCODE: ProviderManifest = ProviderManifest {
 };
 
 const BUILTINS: &[ProviderManifest] = &[
-    ANTHROPIC, OPENAI, GOOGLE, COPILOT, OLLAMA, LLAMA_CPP, MISTRAL, ZAI, DEEPSEEK, OPENROUTER,
-    SYNTHETIC, TENSORX, OPENCODE,
+    ANTHROPIC, OPENAI, GOOGLE, COPILOT, OLLAMA, LLAMA_CPP, MISTRAL, ZAI, OPENROUTER, SYNTHETIC,
+    TENSORX, OPENCODE,
 ];
+
+/// Runtime-owned manifests registered by the Lua loader at boot (e.g.
+/// DeepSeek). Stored as leaked `&'static ProviderManifest` shells pointing at
+/// leaked `'static` field data, so `get`/`builtins` keep their `&'static`
+/// return types without borrowing through the mutex guard. Deduped by slug so
+/// re-registration never duplicates.
+static OWNED_MANIFESTS: OnceLock<Mutex<Vec<&'static ProviderManifest>>> = OnceLock::new();
+
+fn owned_manifests() -> &'static Mutex<Vec<&'static ProviderManifest>> {
+    OWNED_MANIFESTS.get_or_init(|| Mutex::new(Vec::new()))
+}
 
 pub struct ManifestRegistry;
 
 impl ManifestRegistry {
+    pub fn register_owned_manifest(m: ProviderManifest) {
+        let manifest: &'static ProviderManifest = Box::leak(Box::new(m));
+        let mut guard = owned_manifests().lock().unwrap();
+        if let Some(slot) = guard
+            .iter_mut()
+            .find(|existing| existing.slug == manifest.slug)
+        {
+            *slot = manifest;
+        } else {
+            guard.push(manifest);
+        }
+    }
+
     pub fn get(slug: &str) -> Option<&'static ProviderManifest> {
-        BUILTINS.iter().find(|m| m.slug == slug)
+        BUILTINS.iter().find(|m| m.slug == slug).or_else(|| {
+            owned_manifests()
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .find(|m| m.slug == slug)
+        })
     }
 
     /// Like `get`, but resolves dynamic and custom (providers.toml) slugs to
@@ -182,8 +204,11 @@ impl ManifestRegistry {
             .or_else(|| custom::base_kind(slug).and_then(|base| Self::get(&base.to_string())))
     }
 
-    pub fn builtins() -> &'static [ProviderManifest] {
+    pub fn builtins() -> Vec<&'static ProviderManifest> {
         BUILTINS
+            .iter()
+            .chain(owned_manifests().lock().unwrap().iter().copied())
+            .collect()
     }
 
     pub fn find_default_for_tier(slug: &str, tier: ModelTier) -> Option<&'static ModelEntry> {
@@ -200,7 +225,6 @@ mod tests {
     use crate::provider::ProviderKind;
     use maki_config::providers::BuiltInProvider;
     use std::str::FromStr;
-    use strum::IntoEnumIterator;
 
     #[test]
     fn every_builtin_manifest_matches_provider_kind_for_mirrored_fields() {
@@ -245,20 +269,22 @@ mod tests {
     }
 
     #[test]
-    fn builtin_count_matches_provider_kind_count() {
-        let kind_count = ProviderKind::iter().count();
-        assert_eq!(
-            BUILTINS.len(),
-            kind_count,
-            "BUILTINS has {} manifests but ProviderKind has {} variants",
-            BUILTINS.len(),
-            kind_count,
-        );
+    fn every_builtin_manifest_has_provider_kind() {
+        for manifest in BUILTINS {
+            assert!(
+                ProviderKind::from_str(manifest.slug).is_ok(),
+                "manifest slug {} has no matching ProviderKind",
+                manifest.slug,
+            );
+        }
     }
 
     #[test]
     fn every_builtin_provider_inventory_entry_has_matching_manifest() {
         for builtin in inventory::iter::<BuiltInProvider>() {
+            if builtin.manifest_owned {
+                continue;
+            }
             let manifest = ManifestRegistry::get(builtin.slug).unwrap_or_else(|| {
                 panic!(
                     "BuiltInProvider slug {:?} has no ProviderManifest",

@@ -21,7 +21,6 @@ use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, S
 use super::ResolvedAuth;
 use super::anthropic::Anthropic;
 use super::copilot::Copilot;
-use super::deepseek::DeepSeek;
 use super::google::Google;
 use super::local::{LLAMACPP, LocalEndpoint, OLLAMA};
 use super::mistral::Mistral;
@@ -427,9 +426,10 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
             Synthetic::with_auth(auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
-        ProviderKind::DeepSeek => Box::new(
-            DeepSeek::with_auth(auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
+        ProviderKind::DeepSeek => crate::manifest_provider::deepseek_provider_with_auth(
+            auth.clone(),
+            meta.system_prefix.clone(),
+            timeouts,
         ),
         ProviderKind::OpenRouter => Box::new(
             OpenRouter::with_auth(auth.clone(), timeouts)

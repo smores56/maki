@@ -31,6 +31,7 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     plans: None,
     login_url: Some("https://github.com/settings/copilot"),
     needs_url: false,
+    manifest_owned: false,
 });
 const GRAPHQL_QUERY: &str = "query { viewer { copilotEndpoints { api } } }";
 const API_VERSION_HEADER: &str = "2025-10-01";

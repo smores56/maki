@@ -49,6 +49,7 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     ]),
     login_url: Some("https://admin.mistral.ai/organization/api-keys"),
     needs_url: false,
+    manifest_owned: false,
 });
 
 pub(crate) const fn models() -> &'static [ModelEntry] {

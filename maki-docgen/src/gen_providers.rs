@@ -1,7 +1,11 @@
+use std::fmt::Write;
+use std::sync::Arc;
+
+use maki_agent::tools::ToolRegistry;
+use maki_lua::PluginHost;
 use maki_providers::manifest::ManifestRegistry;
 use maki_providers::model::{ModelEntry, ModelTier};
 use maki_providers::provider::ProviderKind;
-use std::fmt::Write;
 use strum::IntoEnumIterator;
 
 const FRONT_MATTER: &str = r#"+++
@@ -342,6 +346,13 @@ pub fn generate() -> String {
     let _ = writeln!(out, "{AUTH_RELOADING}\n");
     let _ = writeln!(out, "{BASE_URL_OVERRIDES}\n");
     let _ = writeln!(out, "## Built-in Providers\n");
+
+    // Boot the Lua host so runtime-owned manifests (DeepSeek) register into
+    // `ManifestRegistry` before `build_sections` reads them. The leaked
+    // `'static` manifest data outlives the host, but we keep it alive across
+    // generation to mirror the live `maki models` flow.
+    let _host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new()))
+        .expect("loading builtin plugins");
 
     for section in &build_sections() {
         write_section(&mut out, section);

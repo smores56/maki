@@ -12,7 +12,7 @@ use maki_config::providers::{
     ProviderDef, ProvidersConfig, all_builtins, builtin_provider, resolve_api_key_env,
     resolve_base_url, resolve_default_model, resolve_display_name, resolve_login_url, slugify,
 };
-use maki_config::{load_env_files, load_permissions};
+use maki_config::{PluginsConfig, load_env_files, load_permissions};
 use maki_lua::PluginHost;
 use maki_providers::provider::fetch_all_models;
 use maki_providers::{ProviderData, catalog_providers};
@@ -533,7 +533,21 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
     Ok(())
 }
 
-pub fn models() {
+pub fn models(no_plugins: bool) -> Result<()> {
+    // Keep the plugin host alive across `fetch_all_models`: owned manifest
+    // providers (DeepSeek) hold `mlua::Function`s whose Lua state lives in the
+    // host's runtime thread, and `provider_for_slug` eager-resolves auth via
+    // those functions. With `no_plugins` the host is skipped, so owned
+    // manifests (DeepSeek) are absent from the listing.
+    let _host = (!no_plugins)
+        .then(|| {
+            let mut host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), true)
+                .context("initialize lua plugin host")?;
+            host.load_builtins(&PluginsConfig::default())
+                .context("load builtin plugins")?;
+            Ok::<PluginHost, color_eyre::Report>(host)
+        })
+        .transpose()?;
     smol::block_on(fetch_all_models(
         |batch| {
             for model in batch.models {
@@ -545,6 +559,7 @@ pub fn models() {
         },
         None,
     ));
+    Ok(())
 }
 
 pub fn index(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {

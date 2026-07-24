@@ -1,5 +1,6 @@
 pub(crate) mod error;
 pub mod manifest;
+pub mod manifest_provider;
 pub mod model;
 pub mod model_registry;
 pub mod provider;
@@ -12,6 +13,7 @@ pub use model::{
     FastPricing, Model, ModelEntry, ModelError, ModelFamily, ModelInfo, ModelPricing, ModelTier,
     TokenUsage,
 };
+pub use providers::KeyPool;
 pub use providers::Timeouts;
 pub use providers::copilot::auth as copilot_auth;
 pub use providers::dynamic;

@@ -113,6 +113,11 @@ pub(crate) fn lib_dir() -> &'static Dir<'static> {
         .dir
 }
 
+static BUNDLED_PROVIDERS: &[BundledPlugin] = &[BundledPlugin {
+    name: "deepseek",
+    dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/providers/deepseek"),
+}];
+
 static BUNDLED_DIRS: LazyLock<&'static [&'static Dir<'static>]> = LazyLock::new(|| {
     let dirs: Vec<&'static Dir<'static>> = BUNDLED_PLUGINS.iter().map(|p| &p.dir).collect();
     Vec::leak(dirs)
@@ -276,6 +281,37 @@ impl PluginHost {
                 None,
                 PluginPermissions::trusted(),
                 opts,
+            )?;
+        }
+        self.load_bundled_providers()?;
+        Ok(())
+    }
+
+    /// Load every embedded `plugins/providers/<slug>/init.lua` manifest. Each
+    /// manifest calls `maki.provider.register` as a side-effect on the Lua
+    /// thread, registering into the static manifest registry so
+    /// `provider_for_slug("<slug>", ...)` routes through the `ManifestProvider`
+    /// envelope. No-op when the host is disabled.
+    fn load_bundled_providers(&self) -> Result<(), PluginError> {
+        if self.inner.is_none() {
+            return Ok(());
+        }
+        for plugin in BUNDLED_PROVIDERS {
+            let init = plugin
+                .dir
+                .get_file("init.lua")
+                .and_then(|f| f.contents_utf8())
+                .ok_or_else(|| PluginError::Lua {
+                    plugin: plugin.name.to_string(),
+                    source: mlua::Error::runtime("bundled provider missing init.lua"),
+                })?;
+            let name: Arc<str> = Arc::from(plugin.name);
+            self.send_load(
+                name,
+                init.to_owned(),
+                None,
+                PluginPermissions::trusted(),
+                PluginOpts::default(),
             )?;
         }
         Ok(())
@@ -595,6 +631,41 @@ mod tests {
     #[test]
     fn begin_shutdown_on_disabled_host_is_noop() {
         PluginHost::disabled().begin_shutdown();
+    }
+
+    /// `load_builtins` folds in the embedded `plugins/providers/*/init.lua`
+    /// manifests. DeepSeek is the first migrated provider, so its manifest must
+    /// land in the static manifest registry and make `provider_for_slug` route
+    /// through the `ManifestProvider` envelope.
+    #[test]
+    fn load_builtins_loads_deepseek_manifest_provider() {
+        let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).unwrap();
+        assert!(
+            maki_providers::manifest_provider::has_manifest_provider("deepseek"),
+            "deepseek manifest provider not registered"
+        );
+        drop(host);
+    }
+
+    /// End-to-end: after the manifest registers, `provider_for_slug("deepseek")`
+    /// hits the manifest-first check and resolves through the `ManifestProvider`
+    /// envelope (env-key auth). nextest isolates the process, so setting the key
+    /// here cannot leak into other tests.
+    #[test]
+    fn manifest_routes_deepseek_provider() {
+        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "sk-manifest-route") };
+        let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).unwrap();
+        let provider = maki_providers::provider::provider_for_slug(
+            "deepseek",
+            maki_providers::Timeouts::default(),
+        );
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+        drop(host);
+        assert!(
+            provider.is_ok(),
+            "deepseek routing failed: {:?}",
+            provider.err()
+        );
     }
 
     /// Regression for the exit drain in `runtime::spawn`. An `EventHandle`

@@ -2682,6 +2682,7 @@ dependencies = [
  "jiff",
  "maki-config",
  "maki-storage",
+ "mlua",
  "serde",
  "serde_json",
  "serde_yaml",

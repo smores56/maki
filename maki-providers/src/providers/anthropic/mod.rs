@@ -46,6 +46,7 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     plans: None,
     login_url: Some("https://console.anthropic.com/settings/keys"),
     needs_url: false,
+    manifest_owned: false,
 });
 
 pub(crate) use shared::models;

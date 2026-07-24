@@ -61,6 +61,7 @@ a string belongs.
 | [`maki.async`](#maki-async) | Tools for running things concurrently in Lua plugins. |
 | [`maki.async.Semaphore`](#maki-async-Semaphore) | A counting semaphore for limiting how many tasks run at once. |
 | [`maki.async.Permit`](#maki-async-Permit) | One slot in a semaphore, obtained from `Semaphore:acquire()`. |
+| [`maki.auth`](#maki-auth) | Auth source constructors for provider manifests. |
 | [`maki.base64`](#maki-base64) | Base64 encoding and decoding, modelled after `vim.base64`. |
 | [`maki.env`](#maki-env) | Paths to maki's own directories (config, state, logs, legacy). |
 | [`maki.fn`](#maki-fn) | Process and environment helpers, modeled after Neovim's `vim.fn` job |
@@ -73,6 +74,7 @@ a string belongs.
 | [`maki.keymap`](#maki-keymap) | Key mappings, modeled after `vim.keymap`. |
 | [`maki.log`](#maki-log) | Structured logging for plugins. |
 | [`maki.net`](#maki-net) | HTTP client for fetching web content. |
+| [`maki.provider`](#maki-provider) | Engine constructors for provider manifests, plus `register` which loads |
 | [`maki.session`](#maki-session) | Host session primitives. |
 | [`maki.text`](#maki-text) | Text transformation utilities. |
 | [`maki.treesitter`](#maki-treesitter) | Tree-sitter parsing and query API. |
@@ -1092,6 +1094,44 @@ Permit:release()
 
 Give the permit back to the semaphore so another task can acquire it.
 Throws if you already released this permit.
+
+
+## maki.auth {#maki-auth}
+
+Auth source constructors for provider manifests. Each function returns a
+function-table of `{ resolve = fn, rotate = fn?, refresh = fn? }` whose
+members are Rust-backed closures; `maki.provider.register` pulls them out
+as functions and hands them to a `LuaAuthSource`.
+
+```lua
+maki.auth.env_key { slug = "deepseek", env_var = "DEEPSEEK_API_KEY" }
+```
+
+---
+
+### `maki.auth.env_key()` {#maki-auth-env_key}
+
+```lua
+maki.auth.env_key({opts})
+```
+
+Build an env-var API-key auth function-table from {opts}. Return it as a
+manifest's `auth` field.
+
+`resolve(_ctx)` reads the key from the environment (with rotation and saved
+credential support via `KeyPool`) and returns it as a string. `rotate(_ctx)`
+cycles the pool and returns the next key or nil. The closures are
+Rust-backed, so the auth strategy stays in Lua: no Rust strategy string is
+added per auth kind.
+
+**Parameters:**
+
+- `{opts}` (`table`) Auth options: `slug` (provider slug) and `env_var`
+
+  (the environment variable holding the API key, comma-separated for rotation).
+
+
+**Returns:** (`table`) `{ resolve = fn, rotate = fn? }`.
 
 
 ## maki.base64 {#maki-base64}
@@ -2370,6 +2410,68 @@ else
   print(res.status, res.body)
 end
 ```
+
+
+## maki.provider {#maki-provider}
+
+Engine constructors for provider manifests, plus `register` which loads
+a manifest into the static provider registry. Each constructor tags an
+options table with an engine `kind` and returns it; `register` pulls the
+auth functions out of `opts.auth`, deserializes the rest into a manifest
+descriptor, and registers the engine + auth + models.
+
+```lua
+maki.provider.register {
+  slug = "deepseek",
+  engine = maki.provider.openai_compat { base_url = "...", api_key_env = "..." },
+  auth = maki.auth.env_key { slug = "deepseek", env_var = "DEEPSEEK_API_KEY" },
+  models = { { id = "..." } },
+}
+```
+
+---
+
+### `maki.provider.openai_compat()` {#maki-provider-openai_compat}
+
+```lua
+maki.provider.openai_compat({opts})
+```
+
+Tag {opts} as an OpenAI-compatible engine descriptor and return it.
+Use the result as a manifest's `engine` field.
+
+The tagged table is plain data: it serializes cleanly into the Rust
+`EngineDescriptor` enum when `maki.provider.register` runs. Supported
+keys: `base_url`, `api_key_env`, `max_tokens_field`,
+`include_stream_usage`, `provider_name`, `thinking` (e.g. "deepseek").
+
+**Parameters:**
+
+- `{opts}` (`table`) Engine options.
+
+**Returns:** (`table`) Tagged engine descriptor.
+
+---
+
+### `maki.provider.register()` {#maki-provider-register}
+
+```lua
+maki.provider.register({opts})
+```
+
+Register a provider manifest from {opts}. A manifest wires a slug to an
+engine descriptor, an auth function-table, and a static model list.
+
+`opts.engine` comes from `maki.provider.openai_compat{...}`. `opts.auth`
+is a function-table (e.g. from `maki.auth.env_key`): this pulls out its
+`resolve` (required), `rotate`, and `refresh` functions before dropping the
+table, so only plain data serializes into the manifest descriptor. The
+functions are held by a `LuaAuthSource` and reused per agent session, so
+`provider_for_slug("<slug>", ...)` routes through the manifest provider.
+
+**Parameters:**
+
+- `{opts}` (`table`) Manifest: `{ slug, engine, auth, models }`.
 
 
 ## maki.session {#maki-session}

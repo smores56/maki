@@ -14,7 +14,6 @@ use crate::AgentError;
 pub(crate) mod anthropic;
 pub(crate) mod copilot;
 pub mod custom;
-pub(crate) mod deepseek;
 pub mod dynamic;
 pub(crate) mod google;
 pub(crate) mod llama_cpp;
@@ -274,6 +273,10 @@ impl KeyPool {
 
     pub fn len(&self) -> usize {
         self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
     }
 }
 

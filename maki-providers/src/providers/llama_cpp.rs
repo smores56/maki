@@ -12,6 +12,7 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     plans: None,
     login_url: None,
     needs_url: true,
+    manifest_owned: false,
 });
 
 pub(crate) const fn models() -> &'static [ModelEntry] {
