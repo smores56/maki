@@ -534,21 +534,29 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
     Ok(())
 }
 
-pub fn models(no_plugins: bool) -> Result<()> {
+/// Build a plugin host honoring `--no-plugins` (disabled host) and `--no-jit`
+/// (O1 interpreter). A disabled host makes `load_builtins` a no-op, so owned
+/// manifest providers (DeepSeek) stay absent from any listing under `--no-plugins`.
+fn boot_plugin_host(no_plugins: bool, no_jit: bool) -> Result<PluginHost> {
+    if no_plugins {
+        return Ok(PluginHost::disabled());
+    }
+    PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !no_jit)
+        .context("initialize lua plugin host")
+}
+
+pub fn models(no_plugins: bool, no_jit: bool) -> Result<()> {
     // Keep the plugin host alive across `fetch_all_models`: owned manifest
     // providers (DeepSeek) hold `mlua::Function`s whose Lua state lives in the
     // host's runtime thread, and `provider_for_slug` eager-resolves auth via
-    // those functions. With `no_plugins` the host is skipped, so owned
-    // manifests (DeepSeek) are absent from the listing.
-    let _host = (!no_plugins)
-        .then(|| {
-            let mut host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), true)
-                .context("initialize lua plugin host")?;
-            host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
-                .context("load builtin plugins")?;
-            Ok::<PluginHost, color_eyre::Report>(host)
-        })
-        .transpose()?;
+    // those functions. The host is boxed to stay live for the whole listing;
+    // under `--no-plugins` it is disabled and the manifests stay absent.
+    let _host = {
+        let mut host = boot_plugin_host(no_plugins, no_jit)?;
+        host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
+            .context("load builtin plugins")?;
+        host
+    };
     smol::block_on(fetch_all_models(
         |batch| {
             for model in batch.models {
@@ -567,12 +575,7 @@ pub fn index(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let mut host = if no_plugins {
-        PluginHost::disabled()
-    } else {
-        PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !no_jit)
-            .context("initialize lua plugin host")?
-    };
+    let mut host = boot_plugin_host(no_plugins, no_jit)?;
 
     let raw_config = host.load_init_files(&cwd).context("load init.lua files")?;
 
@@ -657,8 +660,7 @@ pub fn prompt(
 
     let vars = template::env_vars();
     let reg = ToolRegistry::global_arc();
-    let mut host =
-        PluginHost::with_jit(Arc::clone(reg), !no_jit).context("initialize lua plugin host")?;
+    let mut host = boot_plugin_host(false, no_jit)?;
     let raw_config = host.load_init_files(&cwd).context("load init.lua files")?;
     let config = raw_config
         .unwrap_or_default()
