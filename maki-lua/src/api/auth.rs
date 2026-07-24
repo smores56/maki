@@ -7,11 +7,9 @@ use mlua::{Lua, Result as LuaResult, Table, Value as LuaValue};
 /// Build an env-var API-key auth function-table from {opts}. Return it as a
 /// manifest's `auth` field.
 ///
-/// `resolve(_ctx)` reads the key from the environment (with rotation and saved
-/// credential support via `KeyPool`) and returns it as a string. `rotate(_ctx)`
-/// cycles the pool and returns the next key or nil. The closures are
-/// Rust-backed, so the auth strategy stays in Lua: no Rust strategy string is
-/// added per auth kind.
+/// `resolve` reads the key from {opts.env_var} (with rotation and saved
+/// credential support); `rotate` cycles the key pool. Use the result as the
+/// `auth` field of a `maki.provider.register` call.
 ///
 /// @param opts table Auth options: `slug` (provider slug) and `env_var`
 /// (the environment variable holding the API key, comma-separated for rotation).

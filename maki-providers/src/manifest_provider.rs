@@ -1,3 +1,20 @@
+//! Provider manifests loaded by the Lua host.
+//!
+//! A manifest wires a slug (e.g. `"deepseek"`) to an OpenAI-compatible engine,
+//! an auth function-table, and a static model list. Each `plugins/providers/<slug>/init.lua`
+//! calls `maki.provider.register` as a side-effect of plugin load; `register`
+//! pulls the `resolve`/`rotate`/`refresh` `mlua::Function`s out of `opts.auth`
+//! (so they stay first-class and don't go through serde), nulls the field,
+//! deserializes the rest of `opts` into a [`ManifestDescriptor`], and hands the
+//! engine spec, the functions (wrapped in a [`LuaAuthSource`]), the model list,
+//! and a leaked `&'static ProviderManifest` to [`register_manifest_provider`].
+//!
+//! `provider_for_slug` then short-circuits through [`has_manifest_provider`]
+//! before reaching the `ProviderKind` fallback, so a Lua-registered manifest
+//! wins over the static built-in enum. Capability lookups
+//! (`ManifestRegistry::get`/`for_slug`) resolve the same owned manifest, so no
+//! provider's display name, family, or fallback windows live in two places.
+
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};

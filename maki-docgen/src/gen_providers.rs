@@ -361,6 +361,52 @@ pub fn generate() -> String {
 
     let _ = writeln!(out, "{MODEL_IDENTIFIERS}\n");
     let _ = writeln!(out, "{}", dynamic_providers_section());
+    let _ = writeln!(out, "{AUTHORING_GUIDE}");
 
     out
 }
+
+const AUTHORING_GUIDE: &str = r#"## Authoring a Provider
+
+Built-in providers like DeepSeek ship as Lua manifests under `plugins/providers/<slug>/init.lua`. Each manifest is plain Lua that calls `maki.provider.register` to wire a slug to an engine, an auth function-table, and a static model list. The host discovers every `plugins/providers/*/init.lua` at boot and runs it as a trusted builtin plugin, so adding a provider is a drop-in folder with no Rust change.
+
+A manifest has four pieces:
+
+- **`slug`** (string): the identifier used in model specs (`<slug>/<model_id>`) and `maki auth login`.
+- **`engine`** (table from `maki.provider.openai_compat{...}`): the OpenAI-compatible endpoint. Keys: `base_url`, `api_key_env`, `max_tokens_field`, `include_stream_usage`, `provider_name`, `thinking` (e.g. `"deepseek"`, for the reasoning toggle shape).
+- **`auth`** (table from `maki.auth.env_key{...}`): exposes `resolve`, `rotate`, `refresh`. `resolve` must return the current API key as a string.
+- **`models`** (list): static model entries with `id`, `tier`, `default`, `pricing`, `context_window`, `max_output_tokens`, `supports_thinking`, `supports_vision`.
+
+```lua
+maki.provider.register({
+  slug = "my-provider",
+  display_name = "My Provider",
+  family = "generic",
+  supports_thinking = false,
+  accepts_arbitrary_models = false,
+  fallback_max_output = 8192,
+  fallback_context_window = 128000,
+  engine = maki.provider.openai_compat({
+    base_url = "https://api.my-provider.com",
+    api_key_env = "MY_PROVIDER_API_KEY",
+    max_tokens_field = "max_tokens",
+    include_stream_usage = false,
+    provider_name = "MyProvider",
+  }),
+  auth = maki.auth.env_key({ slug = "my-provider", env_var = "MY_PROVIDER_API_KEY" }),
+  models = {
+    {
+      id = "my-model-v2",
+      tier = "strong",
+      default = true,
+      pricing = { input = 1.0, output = 2.0, cache_write = 0.0, cache_read = 0.0 },
+      max_output_tokens = 16384,
+      context_window = 200000,
+    },
+  },
+})
+```
+
+Only `slug`, `engine`, `auth`, and `models` are required; `display_name`, `family`, `supports_thinking`, `accepts_arbitrary_models`, `fallback_max_output`, and `fallback_context_window` are optional and default to generic-safe values. Because manifests run at startup as a side-effect of plugin load, no return value is needed.
+
+The `DeepSeek` bundled manifest (`plugins/providers/deepseek/init.lua`) is a complete, copy-pasteable reference, including the `thinking = "deepseek"` engine flag that wires up the deepseek reasoning toggle."#;

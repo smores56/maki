@@ -1118,11 +1118,9 @@ maki.auth.env_key({opts})
 Build an env-var API-key auth function-table from {opts}. Return it as a
 manifest's `auth` field.
 
-`resolve(_ctx)` reads the key from the environment (with rotation and saved
-credential support via `KeyPool`) and returns it as a string. `rotate(_ctx)`
-cycles the pool and returns the next key or nil. The closures are
-Rust-backed, so the auth strategy stays in Lua: no Rust strategy string is
-added per auth kind.
+`resolve` reads the key from {opts.env_var} (with rotation and saved
+credential support); `rotate` cycles the key pool. Use the result as the
+`auth` field of a `maki.provider.register` call.
 
 **Parameters:**
 
@@ -2415,10 +2413,8 @@ end
 ## maki.provider {#maki-provider}
 
 Engine constructors for provider manifests, plus `register` which loads
-a manifest into the static provider registry. Each constructor tags an
-options table with an engine `kind` and returns it; `register` pulls the
-auth functions out of `opts.auth`, deserializes the rest into a manifest
-descriptor, and registers the engine + auth + models.
+a manifest into the provider registry. See the "Authoring a provider"
+guide for a full walkthrough.
 
 ```lua
 maki.provider.register {
@@ -2440,9 +2436,7 @@ maki.provider.openai_compat({opts})
 Tag {opts} as an OpenAI-compatible engine descriptor and return it.
 Use the result as a manifest's `engine` field.
 
-The tagged table is plain data: it serializes cleanly into the Rust
-`EngineDescriptor` enum when `maki.provider.register` runs. Supported
-keys: `base_url`, `api_key_env`, `max_tokens_field`,
+Supported keys: `base_url`, `api_key_env`, `max_tokens_field`,
 `include_stream_usage`, `provider_name`, `thinking` (e.g. "deepseek").
 
 **Parameters:**
@@ -2462,12 +2456,9 @@ maki.provider.register({opts})
 Register a provider manifest from {opts}. A manifest wires a slug to an
 engine descriptor, an auth function-table, and a static model list.
 
-`opts.engine` comes from `maki.provider.openai_compat{...}`. `opts.auth`
-is a function-table (e.g. from `maki.auth.env_key`): this pulls out its
-`resolve` (required), `rotate`, and `refresh` functions before dropping the
-table, so only plain data serializes into the manifest descriptor. The
-functions are held by a `LuaAuthSource` and reused per agent session, so
-`provider_for_slug("<slug>", ...)` routes through the manifest provider.
+`opts.engine` comes from `maki.provider.openai_compat{...}` and `opts.auth`
+from `maki.auth.env_key{...}` (or any table exposing `resolve`/`rotate`/
+`refresh`). `opts.models` is a list of model entries.
 
 **Parameters:**
 

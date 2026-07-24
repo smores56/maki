@@ -297,11 +297,18 @@ impl PluginHost {
     /// `PluginsConfig` (a provider manifest isn't a user-visible plugin).
     fn load_bundled_providers(&self) -> Result<(), PluginError> {
         for dir in PROVIDERS_DIR.dirs() {
-            let Some(slug) = dir.path().file_name().and_then(|n| n.to_str()) else {
-                continue;
+            let slug = match dir.path().file_name().and_then(|n| n.to_str()) {
+                Some(s) => s,
+                None => continue,
             };
-            let Some(init) = dir.get_file("init.lua").and_then(|f| f.contents_utf8()) else {
-                continue;
+            let init = match dir.files().find(|f| {
+                f.path().file_name() == Some(std::ffi::OsStr::new("init.lua"))
+            }) {
+                Some(f) => match f.contents_utf8() {
+                    Some(s) => s,
+                    None => continue,
+                },
+                None => continue,
             };
             let name: Arc<str> = Arc::from(format!("providers/{slug}"));
             self.send_load(
