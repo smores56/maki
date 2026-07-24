@@ -370,6 +370,8 @@ pub struct LuaAuthSource {
     resolve: Function,
     rotate: Option<Function>,
     refresh: Option<Function>,
+    login_url: Option<String>,
+    needs_url: bool,
 }
 
 impl LuaAuthSource {
@@ -378,12 +380,16 @@ impl LuaAuthSource {
         resolve: Function,
         rotate: Option<Function>,
         refresh: Option<Function>,
+        login_url: Option<String>,
+        needs_url: bool,
     ) -> Self {
         Self {
             slug,
             resolve,
             rotate,
             refresh,
+            login_url,
+            needs_url,
         }
     }
 
@@ -573,6 +579,45 @@ impl ManifestDescriptor {
 
 pub fn has_manifest_provider(slug: &str) -> bool {
     registry().lock().unwrap().contains_key(slug)
+}
+
+/// Login/onboarding metadata for a Lua-registered manifest provider, projecting
+/// the engine spec (api_key_env/base_url), capability manifest (display_name,
+/// default model via the default-true medium-tier entry), and auth source
+/// (login_url/needs_url) into the same `LoginInfo` shape builtins use. The auth
+/// surface (`maki auth login`/`status`/picker) reads this; callers must have
+/// booted the Lua host so the registry is populated.
+pub fn login_info(slug: &str) -> Option<maki_config::providers::LoginInfo> {
+    let guard = registry().lock().unwrap();
+    let (spec, auth) = guard.get(slug)?;
+    let EngineSpec::OpenaiCompat {
+        api_key_env,
+        base_url,
+        ..
+    } = spec;
+    let manifest = ManifestRegistry::get(slug)?;
+    let default_model =
+        ManifestRegistry::find_default_for_tier(slug, crate::model::ModelTier::Medium)
+            .and_then(|entry| entry.prefixes.first())
+            .map(|prefix| format!("{slug}/{prefix}"));
+    Some(maki_config::providers::LoginInfo {
+        slug: manifest.slug,
+        display_name: manifest.display_name.to_string(),
+        api_key_env: api_key_env.clone(),
+        base_url: Some(base_url.clone()),
+        default_model,
+        login_url: auth.login_url.clone(),
+        needs_url: auth.needs_url,
+        plans: None,
+    })
+}
+
+/// `login_info` for every registered manifest provider, for the auth picker /
+/// `maki auth status` listing. Order follows registry insertion (stable per
+/// boot); `BuiltInProvider` entries are excluded here — the caller merges them.
+pub fn login_infos() -> Vec<maki_config::providers::LoginInfo> {
+    let slugs: Vec<Arc<str>> = registry().lock().unwrap().keys().cloned().collect();
+    slugs.iter().filter_map(|slug| login_info(slug)).collect()
 }
 
 /// Engine spec for a Lua-registered manifest provider, looked up by slug.

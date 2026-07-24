@@ -129,6 +129,45 @@ pub struct BuiltInProvider {
 
 inventory::collect!(BuiltInProvider);
 
+/// Login/onboarding metadata for a provider, the read path the auth surface
+/// (`maki auth login`/`status`/picker) uses. Builtins project from
+/// [`BuiltInProvider`]; Lua-managed manifest providers project from
+/// `manifest_provider::login_info` (engine spec + manifest + auth source).
+/// `plans` stays builtin-only (manifest providers have none yet).
+#[derive(Debug, Clone)]
+pub struct LoginInfo {
+    pub slug: &'static str,
+    pub display_name: String,
+    pub api_key_env: String,
+    pub base_url: Option<String>,
+    pub default_model: Option<String>,
+    pub login_url: Option<String>,
+    pub needs_url: bool,
+    pub plans: Option<&'static [(&'static str, ProviderPlan)]>,
+}
+
+impl BuiltInProvider {
+    pub fn login_info(&self) -> LoginInfo {
+        LoginInfo {
+            slug: self.slug,
+            display_name: self.display_name.to_string(),
+            api_key_env: self.default_api_key_env.to_string(),
+            base_url: (!self.default_base_url.is_empty())
+                .then(|| self.default_base_url.to_string()),
+            default_model: Some(self.default_model.to_string()),
+            login_url: self.login_url.map(|u| u.to_string()),
+            needs_url: self.needs_url,
+            plans: self.plans,
+        }
+    }
+}
+
+pub fn builtin_login_infos() -> Vec<LoginInfo> {
+    inventory::iter::<BuiltInProvider>()
+        .map(|b| b.login_info())
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderDef {
     #[serde(skip_serializing_if = "Option::is_none")]

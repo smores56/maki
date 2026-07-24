@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::{self, Write};
 use std::path::Path;
@@ -10,8 +10,8 @@ use color_eyre::eyre::{Context, bail};
 use maki_agent::mcp::{config as mcp_config, oauth as mcp_oauth};
 use maki_agent::tools::ToolRegistry;
 use maki_config::providers::{
-    ProviderDef, ProvidersConfig, all_builtins, builtin_provider, resolve_api_key_env,
-    resolve_base_url, resolve_default_model, resolve_display_name, resolve_login_url, slugify,
+    LoginInfo, ProviderDef, ProviderPlan, ProvidersConfig, builtin_login_infos, builtin_provider,
+    resolve_base_url, resolve_default_model, resolve_display_name, slugify,
 };
 use maki_config::{PluginsConfig, load_env_files, load_permissions};
 use maki_lua::PluginHost;
@@ -25,49 +25,46 @@ use maki_storage::auth::{
 };
 use maki_storage::model::persist_model;
 
-pub fn auth_login(provider: Option<&str>, storage: &StateDir) -> Result<()> {
+pub fn auth_login(
+    provider: Option<&str>,
+    no_plugins: bool,
+    no_jit: bool,
+    storage: &StateDir,
+) -> Result<()> {
     match provider {
         Some("openai") => openai_auth::login(storage)?,
         Some("copilot") => copilot_auth::login(storage)?,
         Some(slug) => {
             let slug = slugify(slug);
-            if builtin_provider(&slug).is_none()
+            if dynamic::auth_providers().iter().any(|(s, _)| *s == slug) {
+                dynamic::login(&slug)?;
+            } else if let Some(provider_data) = maki_providers::catalog_provider(&slug)
+                && builtin_provider(&slug).is_none()
                 && dynamic::display_name(&slug).is_none()
                 && ProvidersConfig::load().get(&slug).is_none()
-                && let Some(provider_data) = maki_providers::catalog_provider(&slug)
             {
                 login_catalog_provider(&provider_data, storage)?;
             } else {
-                login_provider(&slug, storage)?;
+                let info = auth_login_info(&slug, no_plugins, no_jit)?;
+                login_provider(&slug, info.as_ref(), storage)?;
             }
         }
-        None => login_interactive(storage)?,
+        None => login_interactive(no_plugins, no_jit, storage)?,
     }
     Ok(())
 }
 
-fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
-    let builtin = builtin_provider(slug);
-    let is_custom = ProvidersConfig::load().get(slug).is_some();
-    if builtin.is_none() && dynamic::display_name(slug).is_none() && !is_custom {
-        bail!("unknown provider '{slug}'");
-    }
-
-    if builtin.is_none() && dynamic::auth_providers().iter().any(|(s, _)| *s == slug) {
-        dynamic::login(slug)?;
-        return Ok(());
-    }
-
+fn login_provider(slug: &str, info: Option<&LoginInfo>, storage: &StateDir) -> Result<()> {
     let mut config = ProvidersConfig::load();
     let def = config.get(slug).cloned();
 
-    let plan = select_plan(slug, builtin, def.as_ref())?;
+    let plan = select_plan(slug, info.and_then(|i| i.plans), def.as_ref())?;
 
-    let needs_url = builtin.is_some_and(|b| b.needs_url);
+    let needs_url = info.is_some_and(|i| i.needs_url);
     let host_url = if needs_url {
         Some(prompt_host_url(
             slug,
-            &resolve_display_name(slug, def.as_ref()),
+            &login_display(info, def.as_ref(), slug),
             def.as_ref(),
         )?)
     } else {
@@ -75,10 +72,10 @@ fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
     };
 
     let api_key_optional = needs_url;
-    let login_url = resolve_login_url(slug, plan.as_deref());
+    let login_url = info.and_then(|i| i.login_url.clone());
     let api_key = prompt_api_key(
         login_url.as_deref(),
-        &resolve_display_name(slug, def.as_ref()),
+        &login_display(info, def.as_ref(), slug),
         api_key_optional,
     )?;
 
@@ -99,7 +96,9 @@ fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
         save_provider_credentials(storage, slug, &creds).context("save credentials")?;
     }
 
-    if plan.is_some() || needs_url || host_url.is_some() || builtin.is_none() {
+    let info_is_manifest = builtin_provider(slug).is_none();
+    let persists_config = plan.is_some() || needs_url || host_url.is_some() || info_is_manifest;
+    if persists_config {
         config.upsert(slug.to_string(), provider_def);
         config.save().context("save providers.toml")?;
     }
@@ -108,15 +107,18 @@ fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
         None
     } else {
         resolve_default_model(slug, config.get(slug))
+            .or_else(|| info.and_then(|i| i.default_model.clone()))
     };
     if let Some(model) = &default_model {
         persist_model(storage, model);
     }
 
     println!();
-    let display = resolve_display_name(slug, config.get(slug));
+    let display = login_display(info, config.get(slug), slug);
     println!("  \x1b[32m✓\x1b[0m Configured: {}", display);
-    if let Some(url) = resolve_base_url(slug, config.get(slug)) {
+    if let Some(url) =
+        resolve_base_url(slug, config.get(slug)).or_else(|| info.and_then(|i| i.base_url.clone()))
+    {
         println!("  Endpoint: {}", url);
     }
     if let Some(model) = &default_model {
@@ -125,7 +127,11 @@ fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
     if has_key {
         println!("  Credentials: ~/.local/state/maki/auth/{}.json", slug);
     } else {
-        let env_var = resolve_api_key_env(slug, config.get(slug));
+        let env_var = config
+            .get(slug)
+            .and_then(|d| d.api_key_env.clone())
+            .or_else(|| info.map(|i| i.api_key_env.clone()))
+            .unwrap_or_else(|| format!("{}_API_KEY", slug.to_uppercase().replace('-', "_")));
         println!(
             "  Set API key via: {} or run: maki auth login {}",
             env_var, slug
@@ -135,29 +141,45 @@ fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
     Ok(())
 }
 
-fn login_interactive(storage: &StateDir) -> Result<()> {
-    let builtins = all_builtins();
+fn login_display(info: Option<&LoginInfo>, def: Option<&ProviderDef>, slug: &str) -> String {
+    if let Some(d) = def
+        && let Some(name) = &d.display_name
+    {
+        return name.clone();
+    }
+    info.map(|i| i.display_name.clone())
+        .unwrap_or_else(|| slug.to_string())
+}
+
+fn login_interactive(no_plugins: bool, no_jit: bool, storage: &StateDir) -> Result<()> {
+    let infos = auth_login_infos(no_plugins, no_jit)?;
     let config = ProvidersConfig::load();
     let custom_slugs: Vec<&String> = config
         .providers
         .keys()
-        .filter(|s| builtin_provider(s).is_none() && *s != "opencode")
+        .filter(|s| infos.iter().all(|i| i.slug != s.as_str()) && *s != "opencode")
         .collect();
 
     println!();
     println!("  Available providers:");
     println!();
-    for (i, b) in builtins.iter().enumerate() {
-        let status = if load_provider_credentials(storage, b.slug).is_some() {
+    for (i, info) in infos.iter().enumerate() {
+        let status = if load_provider_credentials(storage, info.slug).is_some() {
             "\x1b[32m✓\x1b[0m"
-        } else if env::var(b.default_api_key_env).is_ok() {
+        } else if env::var(&info.api_key_env).is_ok() {
             "\x1b[33m~\x1b[0m"
         } else {
             " "
         };
-        println!("  {} {}. {:<14} {}", status, i + 1, b.slug, b.display_name);
+        println!(
+            "  {} {}. {:<14} {}",
+            status,
+            i + 1,
+            info.slug,
+            info.display_name
+        );
     }
-    let mut idx = builtins.len();
+    let mut idx = infos.len();
     for slug in &custom_slugs {
         idx += 1;
         let status = if load_provider_credentials(storage, slug).is_some() {
@@ -202,14 +224,14 @@ fn login_interactive(storage: &StateDir) -> Result<()> {
 
     if choice == custom_idx {
         login_custom(storage)?;
-    } else if choice <= builtins.len() {
-        let slug = builtins[choice - 1].slug;
-        login_provider(slug, storage)?;
-    } else if choice <= builtins.len() + custom_slugs.len() {
-        let slug = custom_slugs[choice - builtins.len() - 1];
-        login_provider(slug, storage)?;
+    } else if choice <= infos.len() {
+        let info = &infos[choice - 1];
+        login_provider(info.slug, Some(info), storage)?;
+    } else if choice <= infos.len() + custom_slugs.len() {
+        let slug = custom_slugs[choice - infos.len() - 1];
+        login_provider(slug, None, storage)?;
     } else {
-        let provider = &catalog_entries[choice - builtins.len() - custom_slugs.len() - 1];
+        let provider = &catalog_entries[choice - infos.len() - custom_slugs.len() - 1];
         login_catalog_provider(provider, storage)?;
     }
 
@@ -340,10 +362,9 @@ fn login_custom(storage: &StateDir) -> Result<()> {
 
 fn select_plan(
     slug: &str,
-    builtin: Option<&'static maki_config::providers::BuiltInProvider>,
+    plans: Option<&'static [(&'static str, ProviderPlan)]>,
     def: Option<&ProviderDef>,
 ) -> Result<Option<String>> {
-    let plans = builtin.and_then(|b| b.plans);
     if plans.is_none_or(|p| p.len() <= 1) {
         if let Some(d) = def {
             return Ok(d.plan.clone());
@@ -408,7 +429,13 @@ fn prompt_api_key(url: Option<&str>, display_name: &str, optional: bool) -> Resu
     Ok(api_key)
 }
 
-pub fn auth_logout(provider: &str, storage: &StateDir) -> Result<()> {
+pub fn auth_logout(
+    provider: &str,
+    no_plugins: bool,
+    no_jit: bool,
+    storage: &StateDir,
+) -> Result<()> {
+    let _ = (no_plugins, no_jit);
     let slug = slugify(provider);
     match provider {
         "openai" => openai_auth::logout(storage)?,
@@ -423,7 +450,10 @@ pub fn auth_logout(provider: &str, storage: &StateDir) -> Result<()> {
             if config.remove(&slug) {
                 config.save().context("save providers.toml")?;
             }
-            if !deleted && builtin_provider(&slug).is_none() {
+            if !deleted
+                && builtin_provider(&slug).is_none()
+                && dynamic::display_name(&slug).is_some()
+            {
                 dynamic::logout(&slug)?;
             }
         }
@@ -431,16 +461,18 @@ pub fn auth_logout(provider: &str, storage: &StateDir) -> Result<()> {
     Ok(())
 }
 
-pub fn auth_status(storage: &StateDir) -> Result<()> {
+pub fn auth_status(no_plugins: bool, no_jit: bool, storage: &StateDir) -> Result<()> {
     let config = ProvidersConfig::load();
-    let builtins = all_builtins();
+    let infos = auth_login_infos(no_plugins, no_jit)?;
 
     println!();
-    for b in &builtins {
-        let def = config.get(b.slug);
-        let display = resolve_display_name(b.slug, def);
+    for i in &infos {
+        let def = config.get(i.slug);
+        let display = def
+            .and_then(|d| d.display_name.as_deref())
+            .unwrap_or(&i.display_name);
 
-        if let Some(creds) = load_provider_credentials(storage, b.slug) {
+        if let Some(creds) = load_provider_credentials(storage, i.slug) {
             let plan_info = def
                 .and_then(|d| d.plan.as_deref())
                 .map(|p| format!(" ({})", p))
@@ -456,26 +488,26 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
             };
             println!(
                 "  \x1b[32m✓\x1b[0m {:<14} {} (key: {}){}",
-                b.slug, display, masked, plan_info
+                i.slug, display, masked, plan_info
             );
-        } else if env::var(b.default_api_key_env).is_ok() {
+        } else if env::var(&i.api_key_env).is_ok() {
             println!(
                 "  \x1b[33m~\x1b[0m {:<14} {} (via {})",
-                b.slug, display, b.default_api_key_env
+                i.slug, display, i.api_key_env
             );
         } else if def.is_some_and(|d| d.base_url.is_some()) {
-            println!("  \x1b[34m●\x1b[0m {:<14} {} (configured)", b.slug, display);
+            println!("  \x1b[34m●\x1b[0m {:<14} {} (configured)", i.slug, display);
         } else {
             println!(
                 "  \x1b[31m✗\x1b[0m {:<14} {} (run: maki auth login {})",
-                b.slug, display, b.slug
+                i.slug, display, i.slug
             );
         }
     }
 
     for (slug, def) in &config.providers {
         // 'opencode' could show up here, when the user configured free models on that provider.
-        if builtin_provider(slug).is_some()
+        if infos.iter().any(|i| i.slug == slug.as_str())
             || (slug == "opencode" && def.enable_free_models.is_some())
         {
             continue;
@@ -543,6 +575,39 @@ fn boot_plugin_host(no_plugins: bool, no_jit: bool) -> Result<PluginHost> {
     }
     PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !no_jit)
         .context("initialize lua plugin host")
+}
+
+/// Every provider the auth surface should list: builtins plus Lua-registered
+/// manifest providers (DeepSeek). Manifest providers require the Lua host
+/// booted so their registry is populated; under `--no-plugins` the host is
+/// disabled and only builtins are returned. Manifest slugs that collide with a
+/// builtin slug are dropped (builtins win) so a builtin never lists twice.
+fn auth_login_infos(no_plugins: bool, no_jit: bool) -> Result<Vec<LoginInfo>> {
+    let mut infos = builtin_login_infos();
+    if !no_plugins {
+        let manifest_infos = {
+            let mut host = boot_plugin_host(no_plugins, no_jit)?;
+            host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
+                .context("load builtin plugins")?;
+            maki_providers::manifest_provider::login_infos()
+        };
+        let builtin_slugs: HashSet<&str> = infos.iter().map(|i| i.slug).collect();
+        for m in manifest_infos {
+            if !builtin_slugs.contains(m.slug) {
+                infos.push(m);
+            }
+        }
+    }
+    Ok(infos)
+}
+
+/// Lookup a provider's login info by slug across builtins and (if the host is
+/// up) manifest providers. Booting is best-effort for the lookup path: a
+/// disabled host skips manifests.
+fn auth_login_info(slug: &str, no_plugins: bool, no_jit: bool) -> Result<Option<LoginInfo>> {
+    Ok(auth_login_infos(no_plugins, no_jit)?
+        .into_iter()
+        .find(|i| i.slug == slug))
 }
 
 pub fn models(no_plugins: bool, no_jit: bool) -> Result<()> {

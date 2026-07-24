@@ -279,7 +279,7 @@ maki.provider.register({
     include_stream_usage = false,
     provider_name = "MyProvider",
   }),
-  auth = maki.auth.env_key({ slug = "my-provider", env_var = "MY_PROVIDER_API_KEY" }),
+  auth = maki.auth.env_key({ slug = "my-provider", env_var = "MY_PROVIDER_API_KEY", login_url = "https://..." }),
   models = {
     {
       id = "my-model-v2",

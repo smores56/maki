@@ -23,6 +23,7 @@ maki.provider.register({
   auth = maki.auth.env_key({
     slug = "deepseek",
     env_var = "DEEPSEEK_API_KEY",
+    login_url = "https://platform.deepseek.com/api_keys",
   }),
   models = {
     {

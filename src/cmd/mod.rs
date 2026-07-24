@@ -17,10 +17,12 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             let storage = StateDir::resolve().context("resolve data directory")?;
             match action {
                 AuthAction::Login { provider } => {
-                    subcmd::auth_login(provider.as_deref(), &storage)?
+                    subcmd::auth_login(provider.as_deref(), cli.no_plugins, cli.no_jit, &storage)?
                 }
-                AuthAction::Logout { provider } => subcmd::auth_logout(&provider, &storage)?,
-                AuthAction::Status => subcmd::auth_status(&storage)?,
+                AuthAction::Logout { provider } => {
+                    subcmd::auth_logout(&provider, cli.no_plugins, cli.no_jit, &storage)?
+                }
+                AuthAction::Status => subcmd::auth_status(cli.no_plugins, cli.no_jit, &storage)?,
             }
         }
         Some(Command::Index { path }) => {

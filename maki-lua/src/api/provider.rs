@@ -37,13 +37,22 @@ fn register(lua: &Lua, opts: Table) -> LuaResult<()> {
     })?;
     let rotate: Option<mlua::Function> = auth_tbl.get("rotate").ok();
     let refresh: Option<mlua::Function> = auth_tbl.get("refresh").ok();
+    let login_url: Option<String> = auth_tbl.get("login_url").ok();
+    let needs_url: bool = auth_tbl.get("needs_url").unwrap_or(false);
 
     opts.set("auth", LuaValue::Nil)?;
 
     let desc: ManifestDescriptor = lua
         .from_value(LuaValue::Table(opts.clone()))
         .map_err(|e| mlua::Error::runtime(format!("provider manifest: {e}")))?;
-    let auth = LuaAuthSource::new(desc.slug.clone(), resolve, rotate, refresh);
+    let auth = LuaAuthSource::new(
+        desc.slug.clone(),
+        resolve,
+        rotate,
+        refresh,
+        login_url,
+        needs_url,
+    );
     let (slug_arc, engine_spec, models, manifest) = desc.into_manifest_parts();
     register_manifest_provider(slug_arc, engine_spec, Arc::new(auth), models, manifest);
     Ok(())

@@ -1104,7 +1104,7 @@ members are Rust-backed closures; `maki.provider.register` pulls them out
 as functions and hands them to a `LuaAuthSource`.
 
 ```lua
-maki.auth.env_key { slug = "deepseek", env_var = "DEEPSEEK_API_KEY" }
+maki.auth.env_key { slug = "deepseek", env_var = "DEEPSEEK_API_KEY", login_url = "..." }
 ```
 
 ---
@@ -1124,9 +1124,15 @@ credential support); `rotate` cycles the key pool. Use the result as the
 
 **Parameters:**
 
-- `{opts}` (`table`) Auth options: `slug` (provider slug) and `env_var`
+- `{opts}` (`table`) Auth options: `slug` (provider slug), `env_var`
 
-  (the environment variable holding the API key, comma-separated for rotation).
+  (the environment variable holding the API key, comma-separated for rotation),
+
+
+  `login_url` (optional URL the login flow points users at to acquire a key),
+
+
+  `needs_url` (optional, default false: prompt for a custom base URL during login).
 
 
 **Returns:** (`table`) `{ resolve = fn, rotate = fn? }`.

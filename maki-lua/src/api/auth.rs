@@ -11,13 +11,17 @@ use mlua::{Lua, Result as LuaResult, Table, Value as LuaValue};
 /// credential support); `rotate` cycles the key pool. Use the result as the
 /// `auth` field of a `maki.provider.register` call.
 ///
-/// @param opts table Auth options: `slug` (provider slug) and `env_var`
-/// (the environment variable holding the API key, comma-separated for rotation).
+/// @param opts table Auth options: `slug` (provider slug), `env_var`
+/// (the environment variable holding the API key, comma-separated for rotation),
+/// `login_url` (optional URL the login flow points users at to acquire a key),
+/// `needs_url` (optional, default false: prompt for a custom base URL during login).
 /// @return (table) `{ resolve = fn, rotate = fn? }`.
 #[lua_fn]
 fn env_key(lua: &Lua, opts: Table) -> LuaResult<Table> {
     let slug: String = opts.get("slug")?;
     let env_var: String = opts.get("env_var")?;
+    let login_url: Option<String> = opts.get("login_url").ok();
+    let needs_url: bool = opts.get("needs_url").unwrap_or(false);
     let pool: Arc<Mutex<Option<KeyPool>>> = Arc::new(Mutex::new(None));
 
     let resolve = {
@@ -50,18 +54,24 @@ fn env_key(lua: &Lua, opts: Table) -> LuaResult<Table> {
     let auth = lua.create_table()?;
     auth.set("resolve", resolve)?;
     auth.set("rotate", rotate)?;
+    if let Some(url) = login_url {
+        auth.set("login_url", url)?;
+    }
+    if needs_url {
+        auth.set("needs_url", true)?;
+    }
     Ok(auth)
 }
 
 lua_table! {
-    /// Auth source constructors for provider manifests. Each function returns a
-    /// function-table of `{ resolve = fn, rotate = fn?, refresh = fn? }` whose
-    /// members are Rust-backed closures; `maki.provider.register` pulls them out
-    /// as functions and hands them to a `LuaAuthSource`.
-    ///
-    /// ```lua
-    /// maki.auth.env_key { slug = "deepseek", env_var = "DEEPSEEK_API_KEY" }
-    /// ```
+/// Auth source constructors for provider manifests. Each function returns a
+/// function-table of `{ resolve = fn, rotate = fn?, refresh = fn? }` whose
+/// members are Rust-backed closures; `maki.provider.register` pulls them out
+/// as functions and hands them to a `LuaAuthSource`.
+///
+/// ```lua
+/// maki.auth.env_key { slug = "deepseek", env_var = "DEEPSEEK_API_KEY", login_url = "..." }
+/// ```
     "maki.auth" => pub(crate) fn create_auth_table(), DOCS [
         env_key,
     ]
