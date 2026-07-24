@@ -19,7 +19,35 @@ maki.provider.register({
     include_stream_usage = true,
     provider_name = "DeepSeek",
     thinking = "deepseek",
+    usage_url = "https://api.deepseek.com/user/balance",
   }),
+  usage = function(body)
+    local data = maki.json.decode(body)
+    local limits = {}
+    if data then
+      for _, b in ipairs(data.balance_infos or {}) do
+        local symbol = ""
+        if b.currency == "USD" then
+          symbol = "$"
+        elseif b.currency == "CNY" then
+          symbol = "¥"
+        end
+        table.insert(limits, {
+          label = "Balance",
+          detail = string.format(
+            "total: %s%s, topped-up: %s%s, granted: %s%s",
+            symbol,
+            b.total_balance,
+            symbol,
+            b.topped_up_balance,
+            symbol,
+            b.granted_balance
+          ),
+        })
+      end
+    end
+    return { limits = limits }
+  end,
   auth = maki.auth.env_key({
     slug = "deepseek",
     env_var = "DEEPSEEK_API_KEY",

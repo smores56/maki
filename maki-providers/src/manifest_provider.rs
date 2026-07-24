@@ -51,6 +51,10 @@ pub enum EngineSpec {
         include_stream_usage: bool,
         provider_name: String,
         thinking: Option<ThinkingMode>,
+        /// Balance/quota endpoint fetched via `OpenAiCompatProvider::get_text`;
+        /// paired with a manifest-level `usage` parse callback. `None` disables
+        /// usage reporting for this engine.
+        usage_url: Option<String>,
     },
 }
 
@@ -98,6 +102,8 @@ pub enum EngineDescriptor {
         provider_name: String,
         #[serde(default)]
         thinking: Option<String>,
+        #[serde(default)]
+        usage_url: Option<String>,
     },
 }
 
@@ -134,10 +140,21 @@ impl ModelInfoDescriptor {
     }
 }
 
+/// Parse a provider's raw usage/balance response body into a [`ProviderUsage`].
+/// Implemented by the `maki-lua` loader for a manifest's `usage` callback: Rust
+/// fetches the `EngineSpec::usage_url` and hands the response body string here,
+/// so the hook performs pure parsing (no I/O) and may call back into Lua via the
+/// captured `Lua` handle (the host is idle except for this call).
+pub trait UsageParseHook: Send + Sync {
+    fn parse_usage(&self, body: String) -> BoxFuture<'static, Result<ProviderUsage, AgentError>>;
+}
+
 pub struct ManifestCompat {
     compat: OpenAiCompatProvider,
     auth_handle: Arc<Mutex<ResolvedAuth>>,
     thinking: Option<ThinkingMode>,
+    usage_url: Option<String>,
+    parse_usage: Option<Arc<dyn UsageParseHook>>,
     system_prefix: Option<String>,
 }
 
@@ -145,14 +162,17 @@ impl ManifestCompat {
     pub fn new(
         engine_spec: &EngineSpec,
         auth_handle: Arc<Mutex<ResolvedAuth>>,
+        parse_usage: Option<Arc<dyn UsageParseHook>>,
         timeouts: Timeouts,
         system_prefix: Option<String>,
     ) -> Self {
-        let (thinking, config) = leak_openai_compat_config(engine_spec);
+        let (thinking, config, usage_url) = leak_openai_compat_config(engine_spec);
         Self {
             compat: OpenAiCompatProvider::new(config, timeouts),
             auth_handle,
             thinking,
+            usage_url,
+            parse_usage,
             system_prefix,
         }
     }
@@ -193,7 +213,17 @@ impl Provider for ManifestCompat {
     }
 
     fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
-        Box::pin(async { Ok(None) })
+        Box::pin(async move {
+            let Some(url) = self.usage_url.as_deref() else {
+                return Ok(None);
+            };
+            let Some(parse) = self.parse_usage.as_ref() else {
+                return Ok(None);
+            };
+            let auth = self.auth_handle.lock().unwrap().clone();
+            let body = self.compat.get_text(&auth, url).await?;
+            Ok(Some(parse.parse_usage(body).await?))
+        })
     }
 }
 
@@ -208,11 +238,12 @@ impl ManifestProvider {
     pub fn new(
         engine_spec: EngineSpec,
         auth: Arc<LuaAuthSource>,
+        parse_usage: Option<Arc<dyn UsageParseHook>>,
         timeouts: Timeouts,
     ) -> Result<Self, AgentError> {
         let auth_handle = Arc::new(Mutex::new(ResolvedAuth::bearer("")));
         auth.resolve(&auth_handle)?;
-        let engine = ManifestCompat::new(&engine_spec, auth_handle, timeouts, None);
+        let engine = ManifestCompat::new(&engine_spec, auth_handle, parse_usage, timeouts, None);
         Ok(Self { engine, auth })
     }
 }
@@ -236,9 +267,6 @@ impl Provider for ManifestProvider {
         self.engine.list_models()
     }
 
-    /// TODO: DeepSeek exposes a `/user/balance` usage endpoint; route it through
-    /// a manifest hook in a later PR. For now manifest-managed providers report
-    /// no programmatic usage, the same default as the trait.
     fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
         self.engine.fetch_usage()
     }
@@ -330,7 +358,11 @@ fn leak_qualities(q: Option<Vec<String>>) -> Option<&'static [&'static str]> {
 
 fn leak_openai_compat_config(
     spec: &EngineSpec,
-) -> (Option<ThinkingMode>, &'static OpenAiCompatConfig) {
+) -> (
+    Option<ThinkingMode>,
+    &'static OpenAiCompatConfig,
+    Option<String>,
+) {
     match spec {
         EngineSpec::OpenaiCompat {
             slug,
@@ -340,6 +372,7 @@ fn leak_openai_compat_config(
             include_stream_usage,
             provider_name,
             thinking,
+            usage_url,
         } => {
             let config = OpenAiCompatConfig {
                 slug: leak_str(slug),
@@ -349,7 +382,7 @@ fn leak_openai_compat_config(
                 include_stream_usage: *include_stream_usage,
                 provider_name: leak_str(provider_name),
             };
-            (*thinking, Box::leak(Box::new(config)))
+            (*thinking, Box::leak(Box::new(config)), usage_url.clone())
         }
     }
 }
@@ -450,7 +483,14 @@ impl LuaAuthSource {
     }
 }
 
-type Registry = HashMap<Arc<str>, (EngineSpec, Arc<LuaAuthSource>)>;
+type Registry = HashMap<
+    Arc<str>,
+    (
+        EngineSpec,
+        Arc<LuaAuthSource>,
+        Option<Arc<dyn UsageParseHook>>,
+    ),
+>;
 
 static MANIFEST_PROVIDERS: OnceLock<Mutex<Registry>> = OnceLock::new();
 
@@ -466,13 +506,14 @@ pub fn register_manifest_provider(
     slug: Arc<str>,
     engine_spec: EngineSpec,
     auth: Arc<LuaAuthSource>,
+    parse_usage: Option<Arc<dyn UsageParseHook>>,
     models: Vec<ModelInfo>,
     manifest: ProviderManifest,
 ) {
     registry()
         .lock()
         .unwrap()
-        .insert(Arc::clone(&slug), (engine_spec, auth));
+        .insert(Arc::clone(&slug), (engine_spec, auth, parse_usage));
     model_registry()
         .write()
         .unwrap()
@@ -522,6 +563,7 @@ impl ManifestDescriptor {
                 include_stream_usage,
                 provider_name,
                 thinking,
+                usage_url,
             } => EngineSpec::OpenaiCompat {
                 slug: slug_arc.to_string(),
                 base_url,
@@ -530,6 +572,7 @@ impl ManifestDescriptor {
                 include_stream_usage,
                 provider_name,
                 thinking: thinking.as_deref().and_then(thinking_mode_from_str),
+                usage_url,
             },
         };
 
@@ -589,7 +632,7 @@ pub fn has_manifest_provider(slug: &str) -> bool {
 /// booted the Lua host so the registry is populated.
 pub fn login_info(slug: &str) -> Option<maki_config::providers::LoginInfo> {
     let guard = registry().lock().unwrap();
-    let (spec, auth) = guard.get(slug)?;
+    let (spec, auth, _) = guard.get(slug)?;
     let EngineSpec::OpenaiCompat {
         api_key_env,
         base_url,
@@ -629,14 +672,27 @@ pub fn engine_spec(slug: &str) -> Option<EngineSpec> {
         .lock()
         .unwrap()
         .get(slug)
-        .map(|(spec, _)| spec.clone())
+        .map(|(spec, _, _)| spec.clone())
+}
+
+/// Usage-parse callback for a Lua-registered manifest provider, looked up by
+/// slug. `None` when the manifest declared no `usage` function; the `EngineSpec`
+/// carries the matching `usage_url` for the fetch half. `provider_from_base`
+/// (dynamic `Base::Manifest`) pulls both so a custom provider whose engine is
+/// a manifest provider inherits its usage endpoint.
+pub fn parse_usage(slug: &str) -> Option<Arc<dyn UsageParseHook>> {
+    registry()
+        .lock()
+        .unwrap()
+        .get(slug)
+        .and_then(|(_, _, parse)| parse.clone())
 }
 
 pub(crate) fn manifest_provider(
     slug: &str,
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    let (engine_spec, auth) = registry()
+    let (engine_spec, auth, parse_usage) = registry()
         .lock()
         .unwrap()
         .get(slug)
@@ -647,6 +703,7 @@ pub(crate) fn manifest_provider(
     Ok(Box::new(ManifestProvider::new(
         engine_spec,
         auth,
+        parse_usage,
         timeouts,
     )?))
 }
@@ -746,5 +803,33 @@ mod tests {
         let mut body = input.clone();
         pad_reasoning_content(R1, &mut body);
         assert_eq!(body, input);
+    }
+
+    #[test_case(Some("https://x/balance") ; "usage_url_threaded")]
+    #[test_case(None                       ; "usage_url_defaults_none")]
+    fn into_manifest_parts_threads_usage_url(usage_url: Option<&str>) {
+        let mut engine = json!({
+            "kind": "openai_compat",
+            "base_url": "https://x",
+            "api_key_env": "X",
+            "max_tokens_field": "max_tokens",
+            "provider_name": "X",
+        });
+        if let Some(u) = usage_url {
+            engine["usage_url"] = json!(u);
+        }
+        let desc: ManifestDescriptor = serde_json::from_value(json!({
+            "slug": "test-url-p",
+            "display_name": "Test",
+            "engine": engine,
+            "models": [],
+        }))
+        .unwrap();
+        let (_, engine_spec, _, _) = desc.into_manifest_parts();
+        let EngineSpec::OpenaiCompat {
+            usage_url: spec_url,
+            ..
+        } = engine_spec;
+        assert_eq!(spec_url.as_deref(), usage_url);
     }
 }

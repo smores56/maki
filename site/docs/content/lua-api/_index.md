@@ -2443,7 +2443,9 @@ Tag {opts} as an OpenAI-compatible engine descriptor and return it.
 Use the result as a manifest's `engine` field.
 
 Supported keys: `base_url`, `api_key_env`, `max_tokens_field`,
-`include_stream_usage`, `provider_name`, `thinking` (e.g. "deepseek").
+`include_stream_usage`, `provider_name`, `thinking` (e.g. "deepseek"),
+and `usage_url` (optional balance/quota endpoint fetched by Rust before
+the manifest's `usage` parse callback runs).
 
 **Parameters:**
 
@@ -2466,9 +2468,15 @@ engine descriptor, an auth function-table, and a static model list.
 from `maki.auth.env_key{...}` (or any table exposing `resolve`/`rotate`/
 `refresh`). `opts.models` is a list of model entries.
 
+`opts.usage` (optional) is a `function(body) -> { plan = string?, limits =
+table }` parse callback. Rust fetches `opts.engine.usage_url` with the
+provider's auth and hands the response body string to this callback; it
+returns a `{ plan, limits }` table mirroring the Rust `ProviderUsage`
+shape (`limits` is a list of `{ label, percentage?, reset_at?, detail? }`).
+
 **Parameters:**
 
-- `{opts}` (`table`) Manifest: `{ slug, engine, auth, models }`.
+- `{opts}` (`table`) Manifest: `{ slug, engine, auth, models, usage? }`.
 
 
 ## maki.session {#maki-session}
