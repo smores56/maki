@@ -164,7 +164,7 @@ fn login_interactive(no_plugins: bool, no_jit: bool, storage: &StateDir) -> Resu
     println!("  Available providers:");
     println!();
     for (i, info) in infos.iter().enumerate() {
-        let status = if load_provider_credentials(storage, info.slug).is_some() {
+        let status = if load_provider_credentials(storage, &info.slug).is_some() {
             "\x1b[32m✓\x1b[0m"
         } else if env::var(&info.api_key_env).is_ok() {
             "\x1b[33m~\x1b[0m"
@@ -226,7 +226,7 @@ fn login_interactive(no_plugins: bool, no_jit: bool, storage: &StateDir) -> Resu
         login_custom(storage)?;
     } else if choice <= infos.len() {
         let info = &infos[choice - 1];
-        login_provider(info.slug, Some(info), storage)?;
+        login_provider(&info.slug, Some(info), storage)?;
     } else if choice <= infos.len() + custom_slugs.len() {
         let slug = custom_slugs[choice - infos.len() - 1];
         login_provider(slug, None, storage)?;
@@ -467,12 +467,12 @@ pub fn auth_status(no_plugins: bool, no_jit: bool, storage: &StateDir) -> Result
 
     println!();
     for i in &infos {
-        let def = config.get(i.slug);
+        let def = config.get(&i.slug);
         let display = def
             .and_then(|d| d.display_name.as_deref())
             .unwrap_or(&i.display_name);
 
-        if let Some(creds) = load_provider_credentials(storage, i.slug) {
+        if let Some(creds) = load_provider_credentials(storage, &i.slug) {
             let plan_info = def
                 .and_then(|d| d.plan.as_deref())
                 .map(|p| format!(" ({})", p))
@@ -591,9 +591,9 @@ fn auth_login_infos(no_plugins: bool, no_jit: bool) -> Result<Vec<LoginInfo>> {
                 .context("load builtin plugins")?;
             maki_providers::manifest_provider::login_infos()
         };
-        let builtin_slugs: HashSet<&str> = infos.iter().map(|i| i.slug).collect();
+        let builtin_slugs: HashSet<String> = infos.iter().map(|i| i.slug.clone()).collect();
         for m in manifest_infos {
-            if !builtin_slugs.contains(m.slug) {
+            if !builtin_slugs.contains(m.slug.as_str()) {
                 infos.push(m);
             }
         }

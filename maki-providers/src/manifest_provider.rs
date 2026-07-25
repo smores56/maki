@@ -166,7 +166,7 @@ impl ManifestCompat {
         timeouts: Timeouts,
         system_prefix: Option<String>,
     ) -> Self {
-        let (thinking, config, usage_url) = leak_openai_compat_config(engine_spec);
+        let (thinking, config, usage_url) = build_openai_compat_config(engine_spec);
         Self {
             compat: OpenAiCompatProvider::new(config, timeouts),
             auth_handle,
@@ -348,15 +348,7 @@ fn leak_str(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }
 
-fn leak_qualities(q: Option<Vec<String>>) -> Option<&'static [&'static str]> {
-    q.map(|vec| {
-        let leaked: Vec<&'static str> = vec.iter().map(|s| leak_str(s)).collect();
-        let boxed: Box<[&'static str]> = leaked.into_boxed_slice();
-        &*Box::leak(boxed)
-    })
-}
-
-fn leak_openai_compat_config(
+fn build_openai_compat_config(
     spec: &EngineSpec,
 ) -> (
     Option<ThinkingMode>,
@@ -547,8 +539,7 @@ impl ManifestDescriptor {
     /// already pulled it out as `mlua::Function`s and built a `LuaAuthSource`.
     pub fn into_manifest_parts(self) -> (Arc<str>, EngineSpec, Vec<ModelInfo>, ProviderManifest) {
         let slug_arc: Arc<str> = Arc::from(self.slug.as_str());
-        let slug_str = leak_str(&self.slug);
-        let display_name = leak_str(&self.display_name);
+        let display_name = Arc::from(self.display_name.as_str());
         let family = family_from_str(self.family.as_deref());
         let supports_thinking = self.supports_thinking.unwrap_or(false);
         let accepts_arbitrary_models = self.accepts_arbitrary_models.unwrap_or(false);
@@ -606,7 +597,7 @@ impl ManifestDescriptor {
             .unzip();
 
         let manifest = ProviderManifest {
-            slug: slug_str,
+            slug: Arc::clone(&slug_arc),
             display_name,
             family,
             supports_thinking,
@@ -614,7 +605,11 @@ impl ManifestDescriptor {
             fallback_max_output,
             fallback_context_window,
             models: Box::leak(entries.into_boxed_slice()),
-            qualities: leak_qualities(self.qualities),
+            qualities: self.qualities.map(|vec| {
+                vec.into_iter()
+                    .map(|s| Arc::from(s.as_str()))
+                    .collect::<Box<[Arc<str>]>>()
+            }),
         };
         (slug_arc, engine_spec, model_infos, manifest)
     }
@@ -644,7 +639,7 @@ pub fn login_info(slug: &str) -> Option<maki_config::providers::LoginInfo> {
             .and_then(|entry| entry.prefixes.first())
             .map(|prefix| format!("{slug}/{prefix}"));
     Some(maki_config::providers::LoginInfo {
-        slug: manifest.slug,
+        slug: manifest.slug.to_string(),
         display_name: manifest.display_name.to_string(),
         api_key_env: api_key_env.clone(),
         base_url: Some(base_url.clone()),

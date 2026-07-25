@@ -224,7 +224,7 @@ impl Model {
         // custom slug reads positional tiers and metadata through its base.
         let tier = model_registry().read().unwrap().tier_for(
             &spec,
-            manifest.slug,
+            manifest.slug.as_ref(),
             static_entry.map(|e| e.tier),
         );
         let (family, pricing, max_output_tokens, context_window) = match static_entry {
@@ -236,7 +236,7 @@ impl Model {
             ),
             None => {
                 let guard = model_registry().read().unwrap();
-                let discovered = guard.discovered(manifest.slug, model_id);
+                let discovered = guard.discovered(manifest.slug.as_ref(), model_id);
                 (
                     manifest.family,
                     discovered
@@ -277,7 +277,7 @@ impl Model {
         model_registry()
             .read()
             .unwrap()
-            .discovered(manifest.slug, &self.id)
+            .discovered(manifest.slug.as_ref(), &self.id)
             .and_then(|d| d.supports_thinking)
             .unwrap_or(manifest.supports_thinking)
     }
@@ -292,7 +292,7 @@ impl Model {
                 model_registry()
                     .read()
                     .unwrap()
-                    .discovered(m.slug, &self.id)
+                    .discovered(m.slug.as_ref(), &self.id)
                     .and_then(|d| d.supports_vision)
             })
             .or_else(|| {
@@ -324,7 +324,8 @@ impl Model {
     /// time.
     pub fn supports_fast(&self) -> bool {
         self.pricing.fast.is_some()
-            && ManifestRegistry::for_slug(&self.provider).is_some_and(|m| m.slug == FAST_PROVIDER)
+            && ManifestRegistry::for_slug(&self.provider)
+                .is_some_and(|m| m.slug.as_ref() == FAST_PROVIDER)
     }
 
     pub fn spec(&self) -> String {
@@ -332,7 +333,7 @@ impl Model {
     }
 
     pub fn provider_display_name(&self) -> &'static str {
-        ManifestRegistry::for_slug(&self.provider).map_or("Unknown", |m| m.display_name)
+        ManifestRegistry::for_slug(&self.provider).map_or("Unknown", |m| m.display_name.as_ref())
     }
 
     pub fn from_tier(slug: &str, tier: ModelTier) -> Result<Self, ModelError> {
@@ -583,7 +584,7 @@ mod tests {
                 assert!(
                     fast.input >= entry.pricing.input && fast.output >= entry.pricing.output,
                     "{}/{}: fast pricing must not be cheaper than standard",
-                    manifest.slug,
+                    manifest.slug.as_ref(),
                     entry.prefixes[0],
                 );
             }
@@ -596,7 +597,7 @@ mod tests {
             if manifest.accepts_arbitrary_models {
                 continue;
             }
-            let model = Model::from_tier(manifest.slug, ModelTier::Medium).unwrap();
+            let model = Model::from_tier(manifest.slug.as_ref(), ModelTier::Medium).unwrap();
             let round = Model::from_spec(&model.spec()).unwrap();
             assert_eq!(round.id, model.id);
             assert_eq!(round.provider, model.provider);
@@ -627,13 +628,13 @@ mod tests {
             if manifest.accepts_arbitrary_models {
                 continue;
             }
-            let slug: Arc<str> = Arc::from(manifest.slug);
+            let slug: Arc<str> = Arc::clone(&manifest.slug);
             for &tier in &TIERS {
                 // Compaction is user-assigned only, not in static registry
                 if tier == ModelTier::Compaction {
                     continue;
                 }
-                let model = Model::from_tier(manifest.slug, tier).unwrap();
+                let model = Model::from_tier(manifest.slug.as_ref(), tier).unwrap();
                 assert_eq!(model.provider, slug);
                 assert_eq!(model.tier, tier);
                 let max_output = model.max_output_tokens.unwrap();

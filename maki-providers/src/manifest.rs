@@ -1,4 +1,4 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use crate::model::{ModelEntry, ModelFamily, ModelTier};
 use crate::providers::{
@@ -6,22 +6,29 @@ use crate::providers::{
     synthetic, tensorx, zai,
 };
 
-#[derive(Debug, Clone, Copy)]
+/// Capability contract for a provider. The string fields (`slug`,
+/// `display_name`, `qualities`) are owned `Arc<str>` so runtime manifests
+/// built by the Lua loader allocate instead of leaking their prose into
+/// `'static`. The manifest *shell* is leaked once at boot (see
+/// `ManifestRegistry::register_owned_manifest` and the `static` builtin
+/// tables) so the `get`/`builtins` API keeps returning `&'static` — the
+/// `Arc<str>` payloads live as long as that leaked shell.
+#[derive(Debug, Clone)]
 pub struct ProviderManifest {
-    pub slug: &'static str,
-    pub display_name: &'static str,
+    pub slug: Arc<str>,
+    pub display_name: Arc<str>,
     pub family: ModelFamily,
     pub supports_thinking: bool,
     pub accepts_arbitrary_models: bool,
     pub fallback_max_output: Option<u32>,
     pub fallback_context_window: u32,
     pub models: &'static [ModelEntry],
-    pub qualities: Option<&'static [&'static str]>,
+    pub qualities: Option<Box<[Arc<str>]>>,
 }
 
-const ANTHROPIC: ProviderManifest = ProviderManifest {
-    slug: "anthropic",
-    display_name: "Anthropic",
+static ANTHROPIC: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("anthropic"),
+    display_name: Arc::from("Anthropic"),
     family: ModelFamily::Claude,
     supports_thinking: true,
     accepts_arbitrary_models: false,
@@ -29,11 +36,11 @@ const ANTHROPIC: ProviderManifest = ProviderManifest {
     fallback_context_window: 200_000,
     models: anthropic::models(),
     qualities: None,
-};
+});
 
-const OPENAI: ProviderManifest = ProviderManifest {
-    slug: "openai",
-    display_name: "OpenAI",
+static OPENAI: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("openai"),
+    display_name: Arc::from("OpenAI"),
     family: ModelFamily::Gpt,
     supports_thinking: true,
     accepts_arbitrary_models: false,
@@ -41,11 +48,11 @@ const OPENAI: ProviderManifest = ProviderManifest {
     fallback_context_window: 200_000,
     models: openai::models(),
     qualities: None,
-};
+});
 
-const GOOGLE: ProviderManifest = ProviderManifest {
-    slug: "google",
-    display_name: "Google",
+static GOOGLE: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("google"),
+    display_name: Arc::from("Google"),
     family: ModelFamily::Gemini,
     supports_thinking: true,
     accepts_arbitrary_models: true,
@@ -53,11 +60,11 @@ const GOOGLE: ProviderManifest = ProviderManifest {
     fallback_context_window: 1_000_000,
     models: google::models(),
     qualities: None,
-};
+});
 
-const COPILOT: ProviderManifest = ProviderManifest {
-    slug: "copilot",
-    display_name: "Copilot",
+static COPILOT: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("copilot"),
+    display_name: Arc::from("Copilot"),
     family: ModelFamily::Generic,
     supports_thinking: false,
     accepts_arbitrary_models: true,
@@ -65,11 +72,11 @@ const COPILOT: ProviderManifest = ProviderManifest {
     fallback_context_window: 200_000,
     models: copilot::models(),
     qualities: None,
-};
+});
 
-const OLLAMA: ProviderManifest = ProviderManifest {
-    slug: "ollama",
-    display_name: "Ollama",
+static OLLAMA: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("ollama"),
+    display_name: Arc::from("Ollama"),
     family: ModelFamily::Generic,
     supports_thinking: false,
     accepts_arbitrary_models: true,
@@ -77,11 +84,11 @@ const OLLAMA: ProviderManifest = ProviderManifest {
     fallback_context_window: 128_000,
     models: ollama::models(),
     qualities: None,
-};
+});
 
-const LLAMA_CPP: ProviderManifest = ProviderManifest {
-    slug: "llama-cpp",
-    display_name: "LlamaCpp",
+static LLAMA_CPP: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("llama-cpp"),
+    display_name: Arc::from("LlamaCpp"),
     family: ModelFamily::Generic,
     supports_thinking: true,
     accepts_arbitrary_models: true,
@@ -89,11 +96,11 @@ const LLAMA_CPP: ProviderManifest = ProviderManifest {
     fallback_context_window: 128_000,
     models: llama_cpp::models(),
     qualities: None,
-};
+});
 
-const MISTRAL: ProviderManifest = ProviderManifest {
-    slug: "mistral",
-    display_name: "Mistral",
+static MISTRAL: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("mistral"),
+    display_name: Arc::from("Mistral"),
     family: ModelFamily::Generic,
     supports_thinking: true,
     accepts_arbitrary_models: true,
@@ -101,11 +108,11 @@ const MISTRAL: ProviderManifest = ProviderManifest {
     fallback_context_window: 128_000,
     models: mistral::models(),
     qualities: None,
-};
+});
 
-const ZAI: ProviderManifest = ProviderManifest {
-    slug: "zai",
-    display_name: "Z.AI",
+static ZAI: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("zai"),
+    display_name: Arc::from("Z.AI"),
     family: ModelFamily::Glm,
     supports_thinking: false,
     accepts_arbitrary_models: false,
@@ -113,11 +120,11 @@ const ZAI: ProviderManifest = ProviderManifest {
     fallback_context_window: 128_000,
     models: zai::models(),
     qualities: None,
-};
+});
 
-const OPENROUTER: ProviderManifest = ProviderManifest {
-    slug: "openrouter",
-    display_name: "OpenRouter",
+static OPENROUTER: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("openrouter"),
+    display_name: Arc::from("OpenRouter"),
     family: ModelFamily::Generic,
     supports_thinking: true,
     accepts_arbitrary_models: true,
@@ -125,11 +132,11 @@ const OPENROUTER: ProviderManifest = ProviderManifest {
     fallback_context_window: 200_000,
     models: openrouter::models(),
     qualities: None,
-};
+});
 
-const SYNTHETIC: ProviderManifest = ProviderManifest {
-    slug: "synthetic",
-    display_name: "Synthetic",
+static SYNTHETIC: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("synthetic"),
+    display_name: Arc::from("Synthetic"),
     family: ModelFamily::Synthetic,
     supports_thinking: true,
     accepts_arbitrary_models: false,
@@ -137,11 +144,11 @@ const SYNTHETIC: ProviderManifest = ProviderManifest {
     fallback_context_window: 128_000,
     models: synthetic::models(),
     qualities: None,
-};
+});
 
-const TENSORX: ProviderManifest = ProviderManifest {
-    slug: "tensorx",
-    display_name: "TensorX",
+static TENSORX: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("tensorx"),
+    display_name: Arc::from("TensorX"),
     family: ModelFamily::Generic,
     supports_thinking: true,
     accepts_arbitrary_models: true,
@@ -149,11 +156,11 @@ const TENSORX: ProviderManifest = ProviderManifest {
     fallback_context_window: 200_000,
     models: tensorx::models(),
     qualities: None,
-};
+});
 
-const OPENCODE: ProviderManifest = ProviderManifest {
-    slug: "opencode",
-    display_name: "Opencode",
+static OPENCODE: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
+    slug: Arc::from("opencode"),
+    display_name: Arc::from("Opencode"),
     family: ModelFamily::Generic,
     supports_thinking: true,
     accepts_arbitrary_models: true,
@@ -161,18 +168,30 @@ const OPENCODE: ProviderManifest = ProviderManifest {
     fallback_context_window: 256_000,
     models: &[],
     qualities: None,
-};
+});
 
-const BUILTINS: &[ProviderManifest] = &[
-    ANTHROPIC, OPENAI, GOOGLE, COPILOT, OLLAMA, LLAMA_CPP, MISTRAL, ZAI, OPENROUTER, SYNTHETIC,
-    TENSORX, OPENCODE,
-];
+static BUILTINS: LazyLock<Vec<&'static ProviderManifest>> = LazyLock::new(|| {
+    vec![
+        &*ANTHROPIC,
+        &*OPENAI,
+        &*GOOGLE,
+        &*COPILOT,
+        &*OLLAMA,
+        &*LLAMA_CPP,
+        &*MISTRAL,
+        &*ZAI,
+        &*OPENROUTER,
+        &*SYNTHETIC,
+        &*TENSORX,
+        &*OPENCODE,
+    ]
+});
 
 /// Runtime-owned manifests registered by the Lua loader at boot (e.g.
-/// DeepSeek). Stored as leaked `&'static ProviderManifest` shells pointing at
-/// leaked `'static` field data, so `get`/`builtins` keep their `&'static`
-/// return types without borrowing through the mutex guard. Deduped by slug so
-/// re-registration never duplicates.
+/// DeepSeek). Stored as leaked `&'static ProviderManifest` shells whose
+/// `Arc<str>` field data stays alive for as long as the shell, so `get`/
+/// `builtins` keep their `&'static` return types without borrowing through
+/// the mutex guard. Deduped by slug so re-registration never duplicates.
 static OWNED_MANIFESTS: OnceLock<Mutex<Vec<&'static ProviderManifest>>> = OnceLock::new();
 
 fn owned_manifests() -> &'static Mutex<Vec<&'static ProviderManifest>> {
@@ -196,14 +215,18 @@ impl ManifestRegistry {
     }
 
     pub fn get(slug: &str) -> Option<&'static ProviderManifest> {
-        BUILTINS.iter().find(|m| m.slug == slug).or_else(|| {
-            owned_manifests()
-                .lock()
-                .unwrap()
-                .iter()
-                .copied()
-                .find(|m| m.slug == slug)
-        })
+        BUILTINS
+            .iter()
+            .copied()
+            .find(|m| m.slug.as_ref() == slug)
+            .or_else(|| {
+                owned_manifests()
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .find(|m| m.slug.as_ref() == slug)
+            })
     }
 
     /// Like `get`, but resolves dynamic and custom (providers.toml) slugs to
@@ -220,6 +243,7 @@ impl ManifestRegistry {
     pub fn builtins() -> Vec<&'static ProviderManifest> {
         BUILTINS
             .iter()
+            .copied()
             .chain(owned_manifests().lock().unwrap().iter().copied())
             .collect()
     }
@@ -241,30 +265,17 @@ mod tests {
 
     #[test]
     fn every_builtin_manifest_matches_provider_kind_for_mirrored_fields() {
-        for manifest in BUILTINS {
-            let kind = ProviderKind::from_str(manifest.slug)
-                .unwrap_or_else(|_| panic!("manifest slug {} has no ProviderKind", manifest.slug));
-            // Slug must equal `ProviderKind`'s `Display`, or slug-based routing
-            // and spec formatting would silently diverge.
-            assert_eq!(kind.to_string(), manifest.slug, "{}", manifest.slug);
-            assert_eq!(
-                manifest.display_name,
-                kind.display_name(),
-                "{}",
-                manifest.slug
-            );
-            assert_eq!(manifest.family, kind.family(), "{}", manifest.slug);
-            assert_eq!(
-                manifest.fallback_max_output,
-                kind.fallback_max_output(),
-                "{}",
-                manifest.slug,
-            );
+        for manifest in BUILTINS.iter().copied() {
+            let slug = manifest.slug.as_ref();
+            let kind = ProviderKind::from_str(slug)
+                .unwrap_or_else(|_| panic!("manifest slug {slug} has no ProviderKind"));
+            assert_eq!(kind.to_string(), slug);
+            assert_eq!(manifest.display_name.as_ref(), kind.display_name());
+            assert_eq!(manifest.family, kind.family());
+            assert_eq!(manifest.fallback_max_output, kind.fallback_max_output());
             assert_eq!(
                 manifest.fallback_context_window,
-                kind.fallback_context_window(),
-                "{}",
-                manifest.slug,
+                kind.fallback_context_window()
             );
         }
     }
@@ -290,17 +301,17 @@ mod tests {
     #[test]
     fn for_slug_returns_builtin_directly() {
         let manifest = ManifestRegistry::for_slug("anthropic").unwrap();
-        assert_eq!(manifest.slug, "anthropic");
-        assert_eq!(manifest.display_name, "Anthropic");
+        assert_eq!(manifest.slug.as_ref(), "anthropic");
+        assert_eq!(manifest.display_name.as_ref(), "Anthropic");
     }
 
     #[test]
     fn every_builtin_manifest_has_provider_kind() {
-        for manifest in BUILTINS {
+        for manifest in BUILTINS.iter().copied() {
+            let slug = manifest.slug.as_ref();
             assert!(
-                ProviderKind::from_str(manifest.slug).is_ok(),
-                "manifest slug {} has no matching ProviderKind",
-                manifest.slug,
+                ProviderKind::from_str(slug).is_ok(),
+                "manifest slug {slug} has no matching ProviderKind",
             );
         }
     }
@@ -315,7 +326,8 @@ mod tests {
                 )
             });
             assert_eq!(
-                manifest.display_name, builtin.display_name,
+                manifest.display_name.as_ref(),
+                builtin.display_name,
                 "display_name mismatch between manifest and BuiltInProvider for slug {:?}",
                 builtin.slug,
             );

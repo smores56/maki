@@ -352,12 +352,12 @@ pub struct ModelBatch {
 pub fn available_model_specs() -> Vec<String> {
     let mut specs: Vec<String> = crate::manifest::ManifestRegistry::builtins()
         .iter()
-        .filter(|m| provider_available(m.slug))
+        .filter(|m| provider_available(m.slug.as_ref()))
         .flat_map(|m| {
             m.models
                 .iter()
                 .flat_map(|entry| entry.prefixes.iter())
-                .map(move |p| format!("{}/{}", m.slug, p))
+                .map(move |p| format!("{}/{}", m.slug.as_ref(), p))
         })
         .collect();
     for slug in dynamic::discovered_slugs() {
@@ -379,12 +379,12 @@ pub async fn fetch_all_models(
     let timeouts = Timeouts::default();
 
     for manifest in crate::manifest::ManifestRegistry::builtins() {
-        let slug = manifest.slug;
+        let slug: &'static str = manifest.slug.as_ref();
         let Ok(provider) = smol::unblock(move || provider_for_slug(slug, timeouts)).await else {
             warn!(provider = slug, "failed to create provider, skipping");
             continue;
         };
-        let display_name = manifest.display_name;
+        let display_name: &'static str = manifest.display_name.as_ref();
         let tx = tx.clone();
         smol::spawn(async move {
             let batch = match provider.list_models().await {

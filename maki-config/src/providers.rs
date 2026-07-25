@@ -136,7 +136,7 @@ inventory::collect!(BuiltInProvider);
 /// `plans` stays builtin-only (manifest providers have none yet).
 #[derive(Debug, Clone)]
 pub struct LoginInfo {
-    pub slug: &'static str,
+    pub slug: String,
     pub display_name: String,
     pub api_key_env: String,
     pub base_url: Option<String>,
@@ -149,7 +149,7 @@ pub struct LoginInfo {
 impl BuiltInProvider {
     pub fn login_info(&self) -> LoginInfo {
         LoginInfo {
-            slug: self.slug,
+            slug: self.slug.to_string(),
             display_name: self.display_name.to_string(),
             api_key_env: self.default_api_key_env.to_string(),
             base_url: (!self.default_base_url.is_empty())

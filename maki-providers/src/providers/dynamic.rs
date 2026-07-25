@@ -53,7 +53,7 @@ impl Base {
     fn slug(self) -> &'static str {
         match self {
             Base::Kind(k) => k.slug(),
-            Base::Manifest(m) => m.slug,
+            Base::Manifest(m) => m.slug.as_ref(),
         }
     }
 }
@@ -468,13 +468,13 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         Base::Manifest(m) => {
-            let spec = engine_spec(m.slug).ok_or_else(|| AgentError::Config {
-                message: format!("no engine spec for base manifest '{}'", m.slug),
+            let spec = engine_spec(m.slug.as_ref()).ok_or_else(|| AgentError::Config {
+                message: format!("no engine spec for base manifest '{}'", m.slug.as_ref()),
             })?;
             Box::new(ManifestCompat::new(
                 &spec,
                 auth.clone(),
-                parse_usage(m.slug),
+                parse_usage(m.slug.as_ref()),
                 timeouts,
                 meta.system_prefix.clone(),
             ))
@@ -793,8 +793,8 @@ esac
     fn discover_accepts_manifest_base() {
         const FAKE_BASE: &str = "fake-manifest-base";
         ManifestRegistry::register_owned_manifest(ProviderManifest {
-            slug: FAKE_BASE,
-            display_name: "Fake",
+            slug: Arc::from(FAKE_BASE),
+            display_name: Arc::from("Fake"),
             family: ModelFamily::Generic,
             supports_thinking: false,
             accepts_arbitrary_models: false,

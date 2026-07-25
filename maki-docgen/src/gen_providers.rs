@@ -76,7 +76,7 @@ If the model name is unique across providers, the prefix can be omitted."#;
 fn dynamic_providers_section() -> String {
     let mut valid_values: Vec<String> = ManifestRegistry::builtins()
         .iter()
-        .map(|m| format!("`{}`", m.slug))
+        .map(|m| format!("`{}`", m.slug.as_ref()))
         .collect();
     valid_values.sort();
 
@@ -341,7 +341,7 @@ fn write_section(out: &mut String, section: &ProviderSection) {
 /// present; otherwise the line is derived from capability fields (thinking,
 /// vision, arbitrary models). Mirrors the prose style of `ProviderKind::features`.
 fn derive_manifest_features(manifest: &ProviderManifest) -> Option<String> {
-    if let Some(qs) = manifest.qualities
+    if let Some(qs) = &manifest.qualities
         && !qs.is_empty()
     {
         let mut s = qs.join(", ");
@@ -373,19 +373,19 @@ fn derive_manifest_features(manifest: &ProviderManifest) -> Option<String> {
 fn write_manifest_sections(out: &mut String) {
     let mut owned: Vec<&ProviderManifest> = ManifestRegistry::builtins()
         .into_iter()
-        .filter(|m| ProviderKind::from_str(m.slug).is_err())
+        .filter(|m| ProviderKind::from_str(m.slug.as_ref()).is_err())
         .collect();
-    owned.sort_by_key(|m| m.slug);
+    owned.sort_by(|a, b| a.slug.cmp(&b.slug));
 
     for manifest in owned {
-        let _ = writeln!(out, "### {}\n", manifest.display_name);
+        let _ = writeln!(out, "### {}\n", manifest.display_name.as_ref());
         let mut auth_lines: Vec<String> = Vec::new();
         let mut urls: Vec<String> = Vec::new();
         if let Some(EngineSpec::OpenaiCompat {
             api_key_env,
             base_url,
             ..
-        }) = manifest_provider::engine_spec(manifest.slug)
+        }) = manifest_provider::engine_spec(manifest.slug.as_ref())
         {
             auth_lines.push(format!("`{api_key_env}`"));
             urls.push(base_url);
