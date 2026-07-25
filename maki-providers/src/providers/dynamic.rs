@@ -437,11 +437,11 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         Base::Kind(ProviderKind::Ollama) => Box::new(
-            LocalEndpoint::with_auth(&OLLAMA, auth.clone(), timeouts)
+            LocalEndpoint::with_auth(&*OLLAMA, auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         Base::Kind(ProviderKind::LlamaCpp) => Box::new(
-            LocalEndpoint::with_auth(&LLAMACPP, auth.clone(), timeouts)
+            LocalEndpoint::with_auth(&*LLAMACPP, auth.clone(), timeouts)
                 .with_system_prefix(meta.system_prefix.clone()),
         ),
         Base::Kind(ProviderKind::Mistral) => Box::new(

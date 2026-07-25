@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flume::Sender;
@@ -14,23 +15,24 @@ use crate::{
 
 const STREAM_DONE: &str = "[DONE]";
 
+#[derive(Clone)]
 pub(crate) struct OpenAiCompatConfig {
-    pub slug: &'static str,
-    pub api_key_env: &'static str,
-    pub base_url: &'static str,
-    pub max_tokens_field: &'static str,
+    pub slug: Arc<str>,
+    pub api_key_env: Arc<str>,
+    pub base_url: Arc<str>,
+    pub max_tokens_field: Arc<str>,
     pub include_stream_usage: bool,
-    pub provider_name: &'static str,
+    pub provider_name: Arc<str>,
 }
 
 pub(crate) struct OpenAiCompatProvider {
     client: HttpClient,
-    config: &'static OpenAiCompatConfig,
+    config: Arc<OpenAiCompatConfig>,
     stream_timeout: Duration,
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(config: &'static OpenAiCompatConfig, timeouts: super::Timeouts) -> Self {
+    pub fn new(config: Arc<OpenAiCompatConfig>, timeouts: super::Timeouts) -> Self {
         Self {
             client: super::http_client(timeouts),
             config,
@@ -42,8 +44,8 @@ impl OpenAiCompatProvider {
         &self.client
     }
 
-    pub(crate) fn config(&self) -> &'static OpenAiCompatConfig {
-        self.config
+    pub(crate) fn config(&self) -> &OpenAiCompatConfig {
+        &self.config
     }
 
     pub(crate) fn stream_timeout(&self) -> Duration {
@@ -110,7 +112,7 @@ impl OpenAiCompatProvider {
             "stream": true,
         });
         if let Some(max_output) = model.max_output_tokens {
-            body[self.config.max_tokens_field] = json!(max_output);
+            body[&*self.config.max_tokens_field] = json!(max_output);
         }
         if self.config.include_stream_usage {
             body["stream_options"] = json!({"include_usage": true});
@@ -127,7 +129,7 @@ impl OpenAiCompatProvider {
         if let Some(explicit) = auth.base_url.as_deref() {
             return explicit.to_string();
         }
-        maki_config::providers::base_url_override(self.config.slug)
+        maki_config::providers::base_url_override(&self.config.slug)
             .unwrap_or_else(|| self.config.base_url.to_string())
     }
 
@@ -166,7 +168,7 @@ impl OpenAiCompatProvider {
 
         debug!(
             model = %model.id,
-            provider = self.config.provider_name,
+            provider = &*self.config.provider_name,
             "sending API request"
         );
 

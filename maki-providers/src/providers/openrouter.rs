@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use flume::Sender;
 use maki_storage::id::SessionRef;
@@ -18,14 +18,16 @@ const REFERER: &str = "https://maki.sh";
 const APP_TITLE: &str = "maki";
 const PER_MILLION: f64 = 1_000_000.0;
 
-static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
-    slug: "openrouter",
-    api_key_env: "OPENROUTER_API_KEY",
-    base_url: "https://openrouter.ai/api/v1",
-    max_tokens_field: "max_tokens",
-    include_stream_usage: true,
-    provider_name: "OpenRouter",
-};
+static CONFIG: LazyLock<Arc<OpenAiCompatConfig>> = LazyLock::new(|| {
+    Arc::new(OpenAiCompatConfig {
+        slug: "openrouter".into(),
+        api_key_env: "OPENROUTER_API_KEY".into(),
+        base_url: "https://openrouter.ai/api/v1".into(),
+        max_tokens_field: "max_tokens".into(),
+        include_stream_usage: true,
+        provider_name: "OpenRouter".into(),
+    })
+});
 
 pub(crate) const fn models() -> &'static [ModelEntry] {
     &[]
@@ -47,9 +49,9 @@ pub struct OpenRouter {
 
 impl OpenRouter {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::from_env(CONFIG.api_key_env)?;
+        let pool = KeyPool::from_env(&CONFIG.api_key_env)?;
         Ok(Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
+            compat: OpenAiCompatProvider::new(CONFIG.clone(), timeouts),
             auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
             key_pool: Some(pool),
             system_prefix: None,
@@ -58,7 +60,7 @@ impl OpenRouter {
 
     pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Self {
         Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
+            compat: OpenAiCompatProvider::new(CONFIG.clone(), timeouts),
             auth,
             key_pool: None,
             system_prefix: None,

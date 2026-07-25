@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use flume::Sender;
@@ -412,14 +412,16 @@ impl CatalogData {
     }
 }
 
-static CATALOG_CHAT_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
-    slug: "opencode",
-    api_key_env: "",
-    base_url: "",
-    max_tokens_field: "max_tokens",
-    include_stream_usage: true,
-    provider_name: "Opencode (Catalog)",
-};
+static CATALOG_CHAT_CONFIG: LazyLock<Arc<OpenAiCompatConfig>> = LazyLock::new(|| {
+    Arc::new(OpenAiCompatConfig {
+        slug: "opencode".into(),
+        api_key_env: "".into(),
+        base_url: "".into(),
+        max_tokens_field: "max_tokens".into(),
+        include_stream_usage: true,
+        provider_name: "Opencode (Catalog)".into(),
+    })
+});
 
 pub struct Opencode {
     client: HttpClient,
@@ -439,7 +441,7 @@ impl Opencode {
     fn new_impl(timeouts: super::Timeouts, auth: Option<Arc<Mutex<ResolvedAuth>>>) -> Self {
         Self {
             client: http_client(timeouts),
-            chat_compat: OpenAiCompatProvider::new(&CATALOG_CHAT_CONFIG, timeouts),
+            chat_compat: OpenAiCompatProvider::new(CATALOG_CHAT_CONFIG.clone(), timeouts),
             auth,
             system_prefix: None,
             stream_timeout: timeouts.stream,

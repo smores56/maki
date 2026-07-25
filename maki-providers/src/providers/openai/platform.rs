@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use flume::Sender;
 use maki_storage::StateDir;
@@ -14,14 +14,16 @@ use super::auth;
 use crate::providers::ResolvedAuth;
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 
-static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
-    slug: "openai",
-    api_key_env: "OPENAI_API_KEY",
-    base_url: "https://api.openai.com/v1",
-    max_tokens_field: "max_completion_tokens",
-    include_stream_usage: true,
-    provider_name: "OpenAI",
-};
+static CONFIG: LazyLock<Arc<OpenAiCompatConfig>> = LazyLock::new(|| {
+    Arc::new(OpenAiCompatConfig {
+        slug: "openai".into(),
+        api_key_env: "OPENAI_API_KEY".into(),
+        base_url: "https://api.openai.com/v1".into(),
+        max_tokens_field: "max_completion_tokens".into(),
+        include_stream_usage: true,
+        provider_name: "OpenAI".into(),
+    })
+});
 
 // Non-codex models OpenAI offers for subscription usage via the Coding Plan.
 // Codex models are matched by their `-codex` substring in
@@ -71,7 +73,7 @@ impl OpenAi {
     pub fn new(timeouts: crate::providers::Timeouts) -> Result<Self, AgentError> {
         let storage = StateDir::resolve()?;
         let resolved = auth::resolve(&storage)?;
-        let compat = OpenAiCompatProvider::new(&CONFIG, timeouts);
+        let compat = OpenAiCompatProvider::new(CONFIG.clone(), timeouts);
         Ok(Self {
             compat,
             auth: Arc::new(Mutex::new(resolved)),
@@ -85,7 +87,7 @@ impl OpenAi {
         timeouts: crate::providers::Timeouts,
     ) -> Self {
         Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
+            compat: OpenAiCompatProvider::new(CONFIG.clone(), timeouts),
             auth,
             storage: None,
             system_prefix: None,
@@ -162,7 +164,7 @@ impl OpenAi {
         let mut auth = self.current_auth();
         if auth.base_url.is_none() {
             auth.base_url = maki_config::providers::base_url_override("openai")
-                .or_else(|| Some(CONFIG.base_url.into()));
+                .or_else(|| Some(CONFIG.base_url.to_string()));
         }
         Ok(auth)
     }

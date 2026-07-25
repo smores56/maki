@@ -360,7 +360,7 @@ fn leak_openai_compat_config(
     spec: &EngineSpec,
 ) -> (
     Option<ThinkingMode>,
-    &'static OpenAiCompatConfig,
+    Arc<OpenAiCompatConfig>,
     Option<String>,
 ) {
     match spec {
@@ -375,14 +375,14 @@ fn leak_openai_compat_config(
             usage_url,
         } => {
             let config = OpenAiCompatConfig {
-                slug: leak_str(slug),
-                api_key_env: leak_str(api_key_env),
-                base_url: leak_str(base_url),
-                max_tokens_field: leak_str(max_tokens_field),
+                slug: Arc::from(slug.as_str()),
+                api_key_env: Arc::from(api_key_env.as_str()),
+                base_url: Arc::from(base_url.as_str()),
+                max_tokens_field: Arc::from(max_tokens_field.as_str()),
                 include_stream_usage: *include_stream_usage,
-                provider_name: leak_str(provider_name),
+                provider_name: Arc::from(provider_name.as_str()),
             };
-            (*thinking, Box::leak(Box::new(config)), usage_url.clone())
+            (*thinking, Arc::new(config), usage_url.clone())
         }
     }
 }

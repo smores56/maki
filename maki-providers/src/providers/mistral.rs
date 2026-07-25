@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use flume::Sender;
 use maki_storage::id::SessionRef;
@@ -11,14 +11,16 @@ use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, 
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use super::{KeyPool, ResolvedAuth};
 
-static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
-    slug: "mistral",
-    api_key_env: "MISTRAL_API_KEY",
-    base_url: "https://api.mistral.ai/v1",
-    max_tokens_field: "max_tokens",
-    include_stream_usage: true,
-    provider_name: "Mistral",
-};
+static CONFIG: LazyLock<Arc<OpenAiCompatConfig>> = LazyLock::new(|| {
+    Arc::new(OpenAiCompatConfig {
+        slug: "mistral".into(),
+        api_key_env: "MISTRAL_API_KEY".into(),
+        base_url: "https://api.mistral.ai/v1".into(),
+        max_tokens_field: "max_tokens".into(),
+        include_stream_usage: true,
+        provider_name: "Mistral".into(),
+    })
+});
 
 inventory::submit!(maki_config::providers::BuiltInProvider {
     slug: "mistral",
@@ -159,9 +161,9 @@ fn convert_assistant_messages_in_place(messages: &mut Value) {
 
 impl Mistral {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
-        let pool = KeyPool::resolve("mistral", CONFIG.api_key_env)?;
+        let pool = KeyPool::resolve("mistral", &CONFIG.api_key_env)?;
         Ok(Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
+            compat: OpenAiCompatProvider::new(CONFIG.clone(), timeouts),
             auth: Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current()))),
             key_pool: Some(pool),
             system_prefix: None,
@@ -170,7 +172,7 @@ impl Mistral {
 
     pub(crate) fn with_auth(auth: Arc<Mutex<ResolvedAuth>>, timeouts: super::Timeouts) -> Self {
         Self {
-            compat: OpenAiCompatProvider::new(&CONFIG, timeouts),
+            compat: OpenAiCompatProvider::new(CONFIG.clone(), timeouts),
             auth,
             key_pool: None,
             system_prefix: None,

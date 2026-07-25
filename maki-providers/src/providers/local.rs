@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use flume::Sender;
 use futures::future::join_all;
@@ -19,11 +19,8 @@ use super::{KeyPool, ResolvedAuth};
 
 pub(crate) struct LocalEndpointConfig {
     pub slug: &'static str,
-    pub display_name: &'static str,
     pub host_env: &'static str,
     pub api_key_env: &'static str,
-    pub default_host: &'static str,
-    pub default_model: &'static str,
     pub cloud_fallback_url: Option<&'static str>,
     pub discovery_mode: DiscoveryMode,
     pub compat: OpenAiCompatConfig,
@@ -48,10 +45,7 @@ pub(crate) struct LocalEndpoint {
 }
 
 impl LocalEndpoint {
-    pub fn new(
-        cfg: &'static LocalEndpointConfig,
-        timeouts: super::Timeouts,
-    ) -> Result<Self, AgentError> {
+    pub fn new(cfg: &LocalEndpointConfig, timeouts: super::Timeouts) -> Result<Self, AgentError> {
         let key_pool = KeyPool::resolve(cfg.slug, cfg.api_key_env).ok();
         let host = maki_config::providers::ProvidersConfig::load()
             .get(cfg.slug)
@@ -67,12 +61,12 @@ impl LocalEndpoint {
     }
 
     pub(crate) fn with_auth(
-        cfg: &'static LocalEndpointConfig,
+        cfg: &LocalEndpointConfig,
         auth: Arc<Mutex<ResolvedAuth>>,
         timeouts: super::Timeouts,
     ) -> Self {
         Self {
-            compat: OpenAiCompatProvider::new(&cfg.compat, timeouts),
+            compat: OpenAiCompatProvider::new(Arc::new(cfg.compat.clone()), timeouts),
             auth,
             key_pool: None,
             system_prefix: None,
@@ -88,7 +82,7 @@ impl LocalEndpoint {
     }
 
     fn build(
-        cfg: &'static LocalEndpointConfig,
+        cfg: &LocalEndpointConfig,
         timeouts: super::Timeouts,
         key_pool: Option<KeyPool>,
         host: Option<String>,
@@ -110,9 +104,8 @@ impl LocalEndpoint {
             Some(key) => vec![("authorization".into(), format!("Bearer {key}"))],
             None => Vec::new(),
         };
-        let compat_config = &cfg.compat;
         Ok(Self {
-            compat: OpenAiCompatProvider::new(compat_config, timeouts),
+            compat: OpenAiCompatProvider::new(Arc::new(cfg.compat.clone()), timeouts),
             auth: Arc::new(Mutex::new(ResolvedAuth {
                 base_url: Some(base_url),
                 headers,
@@ -256,7 +249,7 @@ impl LocalEndpoint {
         let base = auth
             .base_url
             .as_deref()
-            .unwrap_or(self.compat.config().base_url);
+            .unwrap_or(&self.compat.config().base_url);
         let root = base.strip_suffix("/v1").unwrap_or(base);
 
         let props: serde_json::Value = serde_json::from_str(
@@ -388,7 +381,7 @@ impl LocalEndpoint {
         let base = auth
             .base_url
             .as_deref()
-            .unwrap_or(self.compat.config().base_url);
+            .unwrap_or(&self.compat.config().base_url);
         let root = base.strip_suffix("/v1").unwrap_or(base);
 
         let models_text = self
@@ -493,45 +486,47 @@ fn ollama_extract_num_ctx(params: &str) -> Option<u32> {
     None
 }
 
-pub(crate) const OLLAMA: LocalEndpointConfig = LocalEndpointConfig {
+pub(crate) const OLLAMA_DISPLAY_NAME: &str = "Ollama";
+pub(crate) const OLLAMA_DEFAULT_HOST: &str = "http://localhost:11434";
+pub(crate) const OLLAMA_DEFAULT_MODEL: &str = "ollama/qwen3";
+
+pub(crate) static OLLAMA: LazyLock<LocalEndpointConfig> = LazyLock::new(|| LocalEndpointConfig {
     slug: "ollama",
-    display_name: "Ollama",
     host_env: "OLLAMA_HOST",
     api_key_env: "OLLAMA_API_KEY",
-    default_host: "http://localhost:11434",
-    default_model: "ollama/qwen3",
     cloud_fallback_url: Some("https://ollama.com/v1"),
     discovery_mode: DiscoveryMode::Ollama,
     compat: OpenAiCompatConfig {
-        slug: "ollama",
-        api_key_env: "",
-        base_url: "http://localhost:11434/v1",
-        max_tokens_field: "max_tokens",
+        slug: "ollama".into(),
+        api_key_env: "".into(),
+        base_url: "http://localhost:11434/v1".into(),
+        max_tokens_field: "max_tokens".into(),
         include_stream_usage: true,
-        provider_name: "Ollama",
+        provider_name: "Ollama".into(),
     },
     thinking_budget_field: false,
-};
+});
 
-pub(crate) const LLAMACPP: LocalEndpointConfig = LocalEndpointConfig {
+pub(crate) const LLAMACPP_DISPLAY_NAME: &str = "LlamaCpp";
+pub(crate) const LLAMACPP_DEFAULT_HOST: &str = "http://localhost:8080";
+pub(crate) const LLAMACPP_DEFAULT_MODEL: &str = "llama-cpp/default";
+
+pub(crate) static LLAMACPP: LazyLock<LocalEndpointConfig> = LazyLock::new(|| LocalEndpointConfig {
     slug: "llama-cpp",
-    display_name: "LlamaCpp",
     host_env: "LLAMA_CPP_HOST",
     api_key_env: "LLAMA_CPP_API_KEY",
-    default_host: "http://localhost:8080",
-    default_model: "llama-cpp/default",
     cloud_fallback_url: None,
     discovery_mode: DiscoveryMode::LlamaCpp,
     compat: OpenAiCompatConfig {
-        slug: "llama-cpp",
-        api_key_env: "",
-        base_url: "http://localhost:8080/v1",
-        max_tokens_field: "max_tokens",
+        slug: "llama-cpp".into(),
+        api_key_env: "".into(),
+        base_url: "http://localhost:8080/v1".into(),
+        max_tokens_field: "max_tokens".into(),
         include_stream_usage: true,
-        provider_name: "LlamaCpp",
+        provider_name: "LlamaCpp".into(),
     },
     thinking_budget_field: true,
-};
+});
 
 #[cfg(test)]
 mod tests {
@@ -597,7 +592,7 @@ mod tests {
 
     #[test]
     fn llamacpp_without_host_errors() {
-        match LocalEndpoint::build(&LLAMACPP, TEST_TIMEOUTS, None, None, None) {
+        match LocalEndpoint::build(&*LLAMACPP, TEST_TIMEOUTS, None, None, None) {
             Err(AgentError::Config { message }) => {
                 assert_eq!(message, "LLAMA_CPP_HOST not set");
             }
@@ -608,7 +603,7 @@ mod tests {
     #[test]
     fn llamacpp_with_host_builds_auth() {
         let ep = LocalEndpoint::build(
-            &LLAMACPP,
+            &*LLAMACPP,
             TEST_TIMEOUTS,
             None,
             Some("http://x:1234".into()),
@@ -623,7 +618,7 @@ mod tests {
     #[test]
     fn llamacpp_no_cloud_fallback() {
         let pool = KeyPool::from_keys(vec!["key".into()]);
-        match LocalEndpoint::build(&LLAMACPP, TEST_TIMEOUTS, Some(pool), None, None) {
+        match LocalEndpoint::build(&*LLAMACPP, TEST_TIMEOUTS, Some(pool), None, None) {
             Err(AgentError::Config { message }) => {
                 assert_eq!(message, "LLAMA_CPP_HOST not set");
             }
@@ -647,7 +642,7 @@ mod tests {
     #[test]
     fn llamacpp_uses_llamacpp_discovery() {
         let ep = LocalEndpoint::build(
-            &LLAMACPP,
+            &*LLAMACPP,
             TEST_TIMEOUTS,
             None,
             Some("http://x:1234".into()),

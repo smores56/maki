@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use flume::Sender;
 use serde_json::Value;
@@ -18,16 +18,18 @@ use crate::providers::Timeouts;
 use crate::types::ThinkingConfig;
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
-static CUSTOM_OPENAI_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
+static CUSTOM_OPENAI_CONFIG: LazyLock<Arc<OpenAiCompatConfig>> = LazyLock::new(|| {
     // Custom providers resolve their own base URL (including any override) from
     // config, so the compat-layer fallback slug is unused here.
-    slug: "",
-    api_key_env: "",
-    base_url: "",
-    max_tokens_field: "max_tokens",
-    include_stream_usage: true,
-    provider_name: "custom",
-};
+    Arc::new(OpenAiCompatConfig {
+        slug: "".into(),
+        api_key_env: "".into(),
+        base_url: "".into(),
+        max_tokens_field: "max_tokens".into(),
+        include_stream_usage: true,
+        provider_name: "custom".into(),
+    })
+});
 
 fn protocol_kind(protocol: Protocol) -> ProviderKind {
     match protocol {
@@ -80,7 +82,7 @@ pub fn create(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, Agent
             auth, timeouts,
         ))),
         ProviderKind::OpenAi => Ok(Box::new(CustomOpenAiProvider {
-            compat: OpenAiCompatProvider::new(&CUSTOM_OPENAI_CONFIG, timeouts),
+            compat: OpenAiCompatProvider::new(CUSTOM_OPENAI_CONFIG.clone(), timeouts),
             auth,
             protocol,
         })),

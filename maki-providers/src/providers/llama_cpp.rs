@@ -1,14 +1,12 @@
 use crate::model::ModelEntry;
 
-use super::local::LLAMACPP;
-
 inventory::submit!(maki_config::providers::BuiltInProvider {
-    slug: LLAMACPP.slug,
-    display_name: LLAMACPP.display_name,
+    slug: "llama-cpp",
+    display_name: super::local::LLAMACPP_DISPLAY_NAME,
     protocol: maki_config::providers::Protocol::Openai,
-    default_base_url: LLAMACPP.default_host,
-    default_api_key_env: LLAMACPP.api_key_env,
-    default_model: LLAMACPP.default_model,
+    default_base_url: super::local::LLAMACPP_DEFAULT_HOST,
+    default_api_key_env: "LLAMA_CPP_API_KEY",
+    default_model: super::local::LLAMACPP_DEFAULT_MODEL,
     plans: None,
     login_url: None,
     needs_url: true,
