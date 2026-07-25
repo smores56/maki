@@ -1,20 +1,22 @@
 //! Provider manifests loaded by the Lua host.
 //!
-//! A manifest wires a slug (e.g. `"deepseek"`) to an OpenAI-compatible engine,
-//! an auth function-table, and a static model list. The `providers` builtin
-//! plugin requires one module per provider (e.g. `plugins/providers/deepseek.lua`),
-//! and each calls `maki.provider.register` as a side-effect of plugin load; `register`
-//! pulls the `resolve`/`rotate`/`refresh` `mlua::Function`s out of `opts.auth`
-//! (so they stay first-class and don't go through serde), nulls the field,
-//! deserializes the rest of `opts` into a [`ManifestDescriptor`], and hands the
-//! engine spec, the functions (wrapped in a [`LuaAuthSource`]), the model list,
-//! and a leaked `&'static ProviderManifest` to [`register_manifest_provider`].
+//! A manifest wires a slug (e.g. `"deepseek"`) to an OpenAI-compatible engine
+//! and a static model list. The `providers` builtin plugin requires one module
+//! per provider (e.g. `plugins/providers/deepseek.lua`), and each calls
+//! `maki.provider.register` as a side-effect of plugin load; `register` pulls
+//! the `login_url`/`needs_url` fields out of {opts} before serde (so they stay
+//! top-level in the manifest), deserializes the rest into a [`ManifestDescriptor`],
+//! and hands the engine spec, login metadata, model list, and a leaked `&'static
+//! ProviderManifest` to [`register_manifest_provider`].
 //!
-//! `provider_for_slug` then short-circuits through [`has_manifest_provider`]
-//! before reaching the `ProviderKind` fallback, so a Lua-registered manifest
-//! wins over the static built-in enum. Capability lookups
-//! (`ManifestRegistry::get`/`for_slug`) resolve the same owned manifest, so no
-//! provider's display name, family, or fallback windows live in two places.
+//! Auth for env-key scope is resolved eagerly in Rust via `KeyPool::resolve(slug,
+//! api_key_env)` (`api_key_env` lives on [`EngineSpec`]); the manifest carries no
+//! `resolve`/`rotate`/`refresh` functions for env-key. `provider_for_slug`
+//! short-circuits through [`has_manifest_provider`] before the `ProviderKind`
+//! fallback, so a Lua-registered manifest wins over the static built-in enum.
+//! Capability lookups (`ManifestRegistry::get`/`for_slug`) resolve the same owned
+//! manifest, so no provider's display name, family, or fallback windows live in
+//! two places.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -22,7 +24,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use flume::Sender;
 use maki_storage::id::SessionRef;
-use mlua::{Function, Value as LuaValue};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::warn;
@@ -33,9 +34,19 @@ use crate::model::{Model, ModelEntry, ModelFamily, ModelInfo, ModelPricing, Mode
 use crate::model_registry::model_registry;
 use crate::provider::{BoxFuture, Provider};
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
-use crate::providers::{ResolvedAuth, Timeouts, with_prefix};
+use crate::providers::{KeyPool, ResolvedAuth, Timeouts, with_prefix};
 use crate::types::{ProviderUsage, ThinkingConfig, dialect};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
+
+/// Static login/onboarding metadata for a manifest provider, extracted from the
+/// manifest table before serde (mirrors how `usage` is pulled out). The auth
+/// surface (`maki auth login`/`status`/picker) reads `login_url`/`needs_url`
+/// here; everything else (`api_key_env`/`base_url`) comes from [`EngineSpec`].
+#[derive(Clone)]
+pub struct LoginMetadata {
+    pub login_url: Option<String>,
+    pub needs_url: bool,
+}
 
 const V4_MARKER: &str = "deepseek-v4";
 
@@ -65,10 +76,11 @@ pub enum ThinkingMode {
     DeepSeek,
 }
 
-/// Serde-friendly shape of the table a Lua manifest returns (minus its `auth`
-/// field, which is a function-table the loader extracts as `mlua::Function`s
-/// before this deserialization). `ModelInfo` itself is not `Deserialize` (it
-/// carries `provider_info`), so models round-trip through `ModelInfoDescriptor`.
+/// Serde-friendly shape of the table a Lua manifest returns (the loader pulls
+/// `login_url`/`needs_url`/`usage` out of the table before this deserialization,
+/// since `usage` is a function and the login fields are not part of the engine
+/// spec). `ModelInfo` itself is not `Deserialize` (it carries `provider_info`),
+/// so models round-trip through `ModelInfoDescriptor`.
 #[derive(Deserialize)]
 pub struct ManifestDescriptor {
     pub slug: String,
@@ -156,12 +168,14 @@ pub struct ManifestCompat {
     usage_url: Option<String>,
     parse_usage: Option<Arc<dyn UsageParseHook>>,
     system_prefix: Option<String>,
+    key_pool: Option<KeyPool>,
 }
 
 impl ManifestCompat {
     pub fn new(
         engine_spec: &EngineSpec,
         auth_handle: Arc<Mutex<ResolvedAuth>>,
+        key_pool: Option<KeyPool>,
         parse_usage: Option<Arc<dyn UsageParseHook>>,
         timeouts: Timeouts,
         system_prefix: Option<String>,
@@ -174,11 +188,8 @@ impl ManifestCompat {
             usage_url,
             parse_usage,
             system_prefix,
+            key_pool,
         }
-    }
-
-    pub(crate) fn auth_handle(&self) -> &Arc<Mutex<ResolvedAuth>> {
-        &self.auth_handle
     }
 }
 
@@ -225,68 +236,16 @@ impl Provider for ManifestCompat {
             Ok(Some(parse.parse_usage(body).await?))
         })
     }
-}
-
-pub struct ManifestProvider {
-    engine: ManifestCompat,
-    auth: Arc<LuaAuthSource>,
-}
-
-impl ManifestProvider {
-    /// Eager auth resolution: a missing key fails here. Used by
-    /// `provider_for_slug` for env-key providers loaded from a manifest.
-    pub fn new(
-        engine_spec: EngineSpec,
-        auth: Arc<LuaAuthSource>,
-        parse_usage: Option<Arc<dyn UsageParseHook>>,
-        timeouts: Timeouts,
-    ) -> Result<Self, AgentError> {
-        let auth_handle = Arc::new(Mutex::new(ResolvedAuth::bearer("")));
-        auth.resolve(&auth_handle)?;
-        let engine = ManifestCompat::new(&engine_spec, auth_handle, parse_usage, timeouts, None);
-        Ok(Self { engine, auth })
-    }
-}
-
-impl Provider for ManifestProvider {
-    fn stream_message<'a>(
-        &'a self,
-        model: &'a Model,
-        messages: &'a [Message],
-        system: &'a str,
-        tools: &'a Value,
-        event_tx: &'a Sender<ProviderEvent>,
-        opts: RequestOptions,
-        _session_id: Option<&'a SessionRef>,
-    ) -> BoxFuture<'a, Result<StreamResponse, AgentError>> {
-        self.engine
-            .stream_message(model, messages, system, tools, event_tx, opts, _session_id)
-    }
-
-    fn list_models(&self) -> BoxFuture<'_, Result<Vec<ModelInfo>, AgentError>> {
-        self.engine.list_models()
-    }
-
-    fn fetch_usage(&self) -> BoxFuture<'_, Result<Option<ProviderUsage>, AgentError>> {
-        self.engine.fetch_usage()
-    }
-
-    fn refresh_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        let auth = Arc::clone(&self.auth);
-        let handle = Arc::clone(self.engine.auth_handle());
-        Box::pin(async move { auth.refresh(&handle).await })
-    }
-
-    fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
-        let auth = Arc::clone(&self.auth);
-        let handle = Arc::clone(self.engine.auth_handle());
-        Box::pin(async move { auth.reload(&handle) })
-    }
 
     fn rotate_key(&self) -> BoxFuture<'_, Result<bool, AgentError>> {
-        let auth = Arc::clone(&self.auth);
-        let handle = Arc::clone(self.engine.auth_handle());
-        Box::pin(async move { auth.rotate_key(&handle) })
+        let pool = self.key_pool.clone();
+        let auth = Arc::clone(&self.auth_handle);
+        Box::pin(async move {
+            let Some(pool) = pool else {
+                return Ok(false);
+            };
+            Ok(pool.rotate_auth(&auth, ResolvedAuth::bearer))
+        })
     }
 }
 
@@ -379,110 +338,7 @@ fn build_openai_compat_config(
     }
 }
 
-/// Auth source backed by Lua function-tables pulled from a manifest's `auth`
-/// field (`resolve`, optional `rotate`/`refresh`). Built by the `maki-lua`
-/// loader; `maki.auth.env_key` (and future `maki.auth.*`) produce the tables.
-///
-/// `resolve`/`rotate`/`reload` call into Lua synchronously from whatever
-/// thread constructs the `ManifestProvider`. Under mlua's `send` feature a
-/// synchronous `Function::call` from a non-owner thread serializes on the
-/// global reentrant Lua mutex — the runtime thread is idle post-boot, so the
-/// only hazard is a sync call overlapping an in-flight async Lua call. Today
-/// no async refresh ships (env_key has none), so the overlap is empty; the
-/// first real async refresh lands in the oauth follow-up PR.
-pub struct LuaAuthSource {
-    slug: String,
-    resolve: Function,
-    rotate: Option<Function>,
-    refresh: Option<Function>,
-    login_url: Option<String>,
-    needs_url: bool,
-}
-
-impl LuaAuthSource {
-    pub fn new(
-        slug: String,
-        resolve: Function,
-        rotate: Option<Function>,
-        refresh: Option<Function>,
-        login_url: Option<String>,
-        needs_url: bool,
-    ) -> Self {
-        Self {
-            slug,
-            resolve,
-            rotate,
-            refresh,
-            login_url,
-            needs_url,
-        }
-    }
-
-    fn config_err(&self, op: &str, e: mlua::Error) -> AgentError {
-        AgentError::Config {
-            message: format!("{} auth {op}: {e}", self.slug),
-        }
-    }
-
-    fn resolve(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
-        let key = self
-            .resolve
-            .call::<String>(LuaValue::Nil)
-            .map_err(|e| self.config_err("resolve", e))?;
-        *auth.lock().unwrap() = ResolvedAuth::bearer(&key);
-        Ok(())
-    }
-
-    fn reload(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<(), AgentError> {
-        self.resolve(auth)
-    }
-
-    fn rotate_key(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> Result<bool, AgentError> {
-        let Some(rotate) = &self.rotate else {
-            return Ok(false);
-        };
-        let next = rotate
-            .call::<Option<String>>(LuaValue::Nil)
-            .map_err(|e| self.config_err("rotate", e))?;
-        match next {
-            Some(key) => {
-                *auth.lock().unwrap() = ResolvedAuth::bearer(&key);
-                Ok(true)
-            }
-            None => Ok(false),
-        }
-    }
-
-    fn refresh(&self, auth: &Arc<Mutex<ResolvedAuth>>) -> BoxFuture<'_, Result<(), AgentError>> {
-        let auth = Arc::clone(auth);
-        Box::pin(async move {
-            let Some(refresh) = &self.refresh else {
-                return Ok(());
-            };
-            // `resolve` may later return a table for multi-header flows (the
-            // copilot follow-up PR); for env_key a bearer string suffices.
-            let next = refresh
-                .call_async::<Option<String>>(LuaValue::Nil)
-                .await
-                .map_err(|e| AgentError::Config {
-                    message: format!("{} auth refresh: {e}", self.slug),
-                })?;
-            if let Some(key) = next {
-                *auth.lock().unwrap() = ResolvedAuth::bearer(&key);
-            }
-            Ok(())
-        })
-    }
-}
-
-type Registry = HashMap<
-    Arc<str>,
-    (
-        EngineSpec,
-        Arc<LuaAuthSource>,
-        Option<Arc<dyn UsageParseHook>>,
-    ),
->;
+type Registry = HashMap<Arc<str>, (EngineSpec, LoginMetadata, Option<Arc<dyn UsageParseHook>>)>;
 
 static MANIFEST_PROVIDERS: OnceLock<Mutex<Registry>> = OnceLock::new();
 
@@ -497,15 +353,15 @@ fn registry() -> &'static Mutex<Registry> {
 pub fn register_manifest_provider(
     slug: Arc<str>,
     engine_spec: EngineSpec,
-    auth: Arc<LuaAuthSource>,
+    login_metadata: LoginMetadata,
     parse_usage: Option<Arc<dyn UsageParseHook>>,
     models: Vec<ModelInfo>,
     manifest: ProviderManifest,
 ) {
-    registry()
-        .lock()
-        .unwrap()
-        .insert(Arc::clone(&slug), (engine_spec, auth, parse_usage));
+    registry().lock().unwrap().insert(
+        Arc::clone(&slug),
+        (engine_spec, login_metadata, parse_usage),
+    );
     model_registry()
         .write()
         .unwrap()
@@ -535,8 +391,9 @@ impl ManifestDescriptor {
     /// Split a decoded manifest into everything the registry needs: the
     /// `(slug, engine, models)` parts plus the capability `ProviderManifest`
     /// (single-sourced here, leaked to `'static` so `ManifestRegistry` can own
-    /// it without a lifetime parameter). `auth` is not part of this: the loader
-    /// already pulled it out as `mlua::Function`s and built a `LuaAuthSource`.
+    /// it without a lifetime parameter). Login metadata (`login_url`/
+    /// `needs_url`) is pulled out of the table before serde and passed
+    /// alongside this; auth is resolved eagerly in Rust from `EngineSpec`.
     pub fn into_manifest_parts(self) -> (Arc<str>, EngineSpec, Vec<ModelInfo>, ProviderManifest) {
         let slug_arc: Arc<str> = Arc::from(self.slug.as_str());
         let display_name = Arc::from(self.display_name.as_str());
@@ -621,13 +478,13 @@ pub fn has_manifest_provider(slug: &str) -> bool {
 
 /// Login/onboarding metadata for a Lua-registered manifest provider, projecting
 /// the engine spec (api_key_env/base_url), capability manifest (display_name,
-/// default model via the default-true medium-tier entry), and auth source
+/// default model via the default-true medium-tier entry), and login metadata
 /// (login_url/needs_url) into the same `LoginInfo` shape builtins use. The auth
 /// surface (`maki auth login`/`status`/picker) reads this; callers must have
 /// booted the Lua host so the registry is populated.
 pub fn login_info(slug: &str) -> Option<maki_config::providers::LoginInfo> {
     let guard = registry().lock().unwrap();
-    let (spec, auth, _) = guard.get(slug)?;
+    let (spec, login, _) = guard.get(slug)?;
     let EngineSpec::OpenaiCompat {
         api_key_env,
         base_url,
@@ -644,8 +501,8 @@ pub fn login_info(slug: &str) -> Option<maki_config::providers::LoginInfo> {
         api_key_env: api_key_env.clone(),
         base_url: Some(base_url.clone()),
         default_model,
-        login_url: auth.login_url.clone(),
-        needs_url: auth.needs_url,
+        login_url: login.login_url.clone(),
+        needs_url: login.needs_url,
         plans: None,
     })
 }
@@ -687,20 +544,26 @@ pub(crate) fn manifest_provider(
     slug: &str,
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    let (engine_spec, auth, parse_usage) = registry()
-        .lock()
-        .unwrap()
-        .get(slug)
-        .cloned()
-        .ok_or_else(|| AgentError::Config {
-            message: format!("no manifest provider registered for '{slug}'"),
-        })?;
-    Ok(Box::new(ManifestProvider::new(
-        engine_spec,
-        auth,
+    let (engine_spec, _, parse_usage) =
+        registry()
+            .lock()
+            .unwrap()
+            .get(slug)
+            .cloned()
+            .ok_or_else(|| AgentError::Config {
+                message: format!("no manifest provider registered for '{slug}'"),
+            })?;
+    let EngineSpec::OpenaiCompat { api_key_env, .. } = &engine_spec;
+    let pool = KeyPool::resolve(slug, api_key_env)?;
+    let auth_handle = Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current())));
+    Ok(Box::new(ManifestCompat::new(
+        &engine_spec,
+        auth_handle,
+        Some(pool),
         parse_usage,
         timeouts,
-    )?))
+        None,
+    )))
 }
 
 #[cfg(test)]

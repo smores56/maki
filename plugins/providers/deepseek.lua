@@ -8,6 +8,7 @@ maki.provider.register({
   accepts_arbitrary_models = false,
   fallback_max_output = 384000,
   fallback_context_window = 1000000,
+  login_url = "https://platform.deepseek.com/api_keys",
   qualities = {
     "Thinking mode toggle (on/off)",
     "open-weight models",
@@ -48,11 +49,6 @@ maki.provider.register({
     end
     return { limits = limits }
   end,
-  auth = maki.auth.env_key({
-    slug = "deepseek",
-    env_var = "DEEPSEEK_API_KEY",
-    login_url = "https://platform.deepseek.com/api_keys",
-  }),
   models = {
     {
       id = "deepseek-v4-flash",

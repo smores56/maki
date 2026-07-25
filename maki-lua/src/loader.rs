@@ -604,7 +604,7 @@ mod tests {
     /// `load_builtins` loads the `providers` builtin, whose `init.lua` requires
     /// each manifest module (e.g. `deepseek`). DeepSeek is the first migrated
     /// provider, so its manifest must land in the static manifest registry and
-    /// make `provider_for_slug` route through the `ManifestProvider` envelope.
+    /// make `provider_for_slug` route through `ManifestCompat`.
     #[test]
     fn load_builtins_loads_deepseek_manifest_provider() {
         let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new())).unwrap();
@@ -616,9 +616,9 @@ mod tests {
     }
 
     /// End-to-end: after the manifest registers, `provider_for_slug("deepseek")`
-    /// hits the manifest-first check and resolves through the `ManifestProvider`
-    /// envelope (env-key auth). nextest isolates the process, so setting the key
-    /// here cannot leak into other tests.
+    /// hits the manifest-first check and resolves env-key auth through
+    /// `ManifestCompat` (eager `KeyPool::resolve`). nextest isolates the
+    /// process, so setting the key here cannot leak into other tests.
     #[test]
     fn manifest_routes_deepseek_provider() {
         unsafe { std::env::set_var("DEEPSEEK_API_KEY", "sk-manifest-route") };

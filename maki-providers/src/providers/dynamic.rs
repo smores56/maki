@@ -474,6 +474,7 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
             Box::new(ManifestCompat::new(
                 &spec,
                 auth.clone(),
+                None,
                 parse_usage(m.slug.as_ref()),
                 timeouts,
                 meta.system_prefix.clone(),

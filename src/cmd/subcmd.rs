@@ -611,17 +611,17 @@ fn auth_login_info(slug: &str, no_plugins: bool, no_jit: bool) -> Result<Option<
 }
 
 pub fn models(no_plugins: bool, no_jit: bool) -> Result<()> {
-    // Keep the plugin host alive across `fetch_all_models`: owned manifest
-    // providers (DeepSeek) hold `mlua::Function`s whose Lua state lives in the
-    // host's runtime thread, and `provider_for_slug` eager-resolves auth via
-    // those functions. The host is boxed to stay live for the whole listing;
-    // under `--no-plugins` it is disabled and the manifests stay absent.
-    let _host = {
+    // Boot the plugin host just to populate the manifest registry (DeepSeek
+    // et al. register as a side-effect of loading builtins). The registry
+    // retains only owned Rust data plus `Arc<dyn UsageParseHook>`s whose
+    // `Lua` handles are Arc-backed and outlive the host, so the host can drop
+    // after `load_builtins`. Under `--no-plugins` it is disabled and the
+    // manifests stay absent.
+    {
         let mut host = boot_plugin_host(no_plugins, no_jit)?;
         host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
             .context("load builtin plugins")?;
-        host
-    };
+    }
     smol::block_on(fetch_all_models(
         |batch| {
             for model in batch.models {

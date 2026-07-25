@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use maki_lua_macro::{lua_fn, lua_table};
 use maki_providers::manifest_provider::{
-    LuaAuthSource, ManifestDescriptor, UsageParseHook, register_manifest_provider,
+    LoginMetadata, ManifestDescriptor, UsageParseHook, register_manifest_provider,
 };
 use maki_providers::provider::BoxFuture;
 use maki_providers::{AgentError, ProviderUsage};
@@ -25,11 +25,16 @@ fn openai_compat(_lua: &Lua, opts: Table) -> LuaResult<Table> {
 }
 
 /// Register a provider manifest from {opts}. A manifest wires a slug to an
-/// engine descriptor, an auth function-table, and a static model list.
+/// engine descriptor and a static model list.
 ///
-/// `opts.engine` comes from `maki.provider.openai_compat{...}` and `opts.auth`
-/// from `maki.auth.env_key{...}` (or any table exposing `resolve`/`rotate`/
-/// `refresh`). `opts.models` is a list of model entries.
+/// `opts.engine` comes from `maki.provider.openai_compat{...}`. `opts.models`
+/// is a list of model entries.
+///
+/// `opts.login_url` (optional) points the login flow at the page where a user
+/// acquires an API key; `opts.needs_url` (optional, default false) prompts for a
+/// custom base URL during login. Auth for env-key scope is resolved eagerly in
+/// Rust from `opts.engine.api_key_env` (no `resolve`/`rotate`/`refresh` in the
+/// manifest).
 ///
 /// `opts.usage` (optional) is a `function(body) -> { plan = string?, limits =
 /// table }` parse callback. Rust fetches `opts.engine.usage_url` with the
@@ -37,35 +42,23 @@ fn openai_compat(_lua: &Lua, opts: Table) -> LuaResult<Table> {
 /// returns a `{ plan, limits }` table mirroring the Rust `ProviderUsage`
 /// shape (`limits` is a list of `{ label, percentage?, reset_at?, detail? }`).
 ///
-/// @param opts table Manifest: `{ slug, engine, auth, models, usage? }`.
+/// @param opts table Manifest: `{ slug, engine, models, login_url?, needs_url?, usage? }`.
 /// @return
 #[lua_fn]
 fn register(lua: &Lua, opts: Table) -> LuaResult<()> {
-    let auth_tbl: Table = opts.get("auth")?;
-    let resolve: mlua::Function = auth_tbl.get("resolve").map_err(|_| {
-        mlua::Error::runtime("provider manifest: auth table must define a 'resolve' function")
-    })?;
-    let rotate: Option<mlua::Function> = auth_tbl.get("rotate").ok();
-    let refresh: Option<mlua::Function> = auth_tbl.get("refresh").ok();
-    let login_url: Option<String> = auth_tbl.get("login_url").ok();
-    let needs_url: bool = auth_tbl.get("needs_url").unwrap_or(false);
-
+    let login_url: Option<String> = opts.get("login_url").ok();
+    let needs_url: bool = opts.get("needs_url").unwrap_or(false);
     let usage: Option<mlua::Function> = opts.get("usage").ok();
 
-    opts.set("auth", LuaValue::Nil)?;
     opts.set("usage", LuaValue::Nil)?;
 
     let desc: ManifestDescriptor = lua
         .from_value(LuaValue::Table(opts.clone()))
         .map_err(|e| mlua::Error::runtime(format!("provider manifest: {e}")))?;
-    let auth = LuaAuthSource::new(
-        desc.slug.clone(),
-        resolve,
-        rotate,
-        refresh,
+    let login_metadata = LoginMetadata {
         login_url,
         needs_url,
-    );
+    };
     let (slug_arc, engine_spec, models, manifest) = desc.into_manifest_parts();
     let parse_usage = usage.map(|func| -> Arc<dyn UsageParseHook> {
         Arc::new(LuaUsageParser {
@@ -76,7 +69,7 @@ fn register(lua: &Lua, opts: Table) -> LuaResult<()> {
     register_manifest_provider(
         slug_arc,
         engine_spec,
-        Arc::new(auth),
+        login_metadata,
         parse_usage,
         models,
         manifest,
@@ -122,7 +115,7 @@ lua_table! {
     /// maki.provider.register {
     ///   slug = "deepseek",
     ///   engine = maki.provider.openai_compat { base_url = "...", api_key_env = "..." },
-    ///   auth = maki.auth.env_key { slug = "deepseek", env_var = "DEEPSEEK_API_KEY" },
+    ///   login_url = "https://platform.deepseek.com/api_keys",
     ///   models = { { id = "..." } },
     /// }
     /// ```

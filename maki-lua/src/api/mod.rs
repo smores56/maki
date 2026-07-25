@@ -1,6 +1,5 @@
 pub(crate) mod agent;
 pub(crate) mod r#async;
-pub(crate) mod auth;
 pub(crate) mod autocmd;
 pub(crate) mod base64;
 pub(crate) mod env;
@@ -52,7 +51,6 @@ pub(crate) fn create_maki_global(
     maki.set("fs", fs::create_fs_table(lua, permissions)?)?;
     maki.set("log", log::create_log_table(lua, Arc::clone(&plugin))?)?;
     maki.set("provider", provider::create_provider_table(lua)?)?;
-    maki.set("auth", auth::create_auth_table(lua)?)?;
     maki.set("treesitter", treesitter::create_treesitter_table(lua)?)?;
     maki.set("uv", uv::create_uv_table(lua, permissions)?)?;
     maki.set("base64", base64::create_base64_table(lua)?)?;

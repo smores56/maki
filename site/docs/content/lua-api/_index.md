@@ -61,7 +61,6 @@ a string belongs.
 | [`maki.async`](#maki-async) | Tools for running things concurrently in Lua plugins. |
 | [`maki.async.Semaphore`](#maki-async-Semaphore) | A counting semaphore for limiting how many tasks run at once. |
 | [`maki.async.Permit`](#maki-async-Permit) | One slot in a semaphore, obtained from `Semaphore:acquire()`. |
-| [`maki.auth`](#maki-auth) | Auth source constructors for provider manifests. |
 | [`maki.base64`](#maki-base64) | Base64 encoding and decoding, modelled after `vim.base64`. |
 | [`maki.env`](#maki-env) | Paths to maki's own directories (config, state, logs, legacy). |
 | [`maki.fn`](#maki-fn) | Process and environment helpers, modeled after Neovim's `vim.fn` job |
@@ -1094,48 +1093,6 @@ Permit:release()
 
 Give the permit back to the semaphore so another task can acquire it.
 Throws if you already released this permit.
-
-
-## maki.auth {#maki-auth}
-
-Auth source constructors for provider manifests. Each function returns a
-function-table of `{ resolve = fn, rotate = fn?, refresh = fn? }` whose
-members are Rust-backed closures; `maki.provider.register` pulls them out
-as functions and hands them to a `LuaAuthSource`.
-
-```lua
-maki.auth.env_key { slug = "deepseek", env_var = "DEEPSEEK_API_KEY", login_url = "..." }
-```
-
----
-
-### `maki.auth.env_key()` {#maki-auth-env_key}
-
-```lua
-maki.auth.env_key({opts})
-```
-
-Build an env-var API-key auth function-table from {opts}. Return it as a
-manifest's `auth` field.
-
-`resolve` reads the key from {opts.env_var} (with rotation and saved
-credential support); `rotate` cycles the key pool. Use the result as the
-`auth` field of a `maki.provider.register` call.
-
-**Parameters:**
-
-- `{opts}` (`table`) Auth options: `slug` (provider slug), `env_var`
-
-  (the environment variable holding the API key, comma-separated for rotation),
-
-
-  `login_url` (optional URL the login flow points users at to acquire a key),
-
-
-  `needs_url` (optional, default false: prompt for a custom base URL during login).
-
-
-**Returns:** (`table`) `{ resolve = fn, rotate = fn? }`.
 
 
 ## maki.base64 {#maki-base64}
@@ -2426,7 +2383,7 @@ guide for a full walkthrough.
 maki.provider.register {
   slug = "deepseek",
   engine = maki.provider.openai_compat { base_url = "...", api_key_env = "..." },
-  auth = maki.auth.env_key { slug = "deepseek", env_var = "DEEPSEEK_API_KEY" },
+  login_url = "https://platform.deepseek.com/api_keys",
   models = { { id = "..." } },
 }
 ```
@@ -2462,11 +2419,16 @@ maki.provider.register({opts})
 ```
 
 Register a provider manifest from {opts}. A manifest wires a slug to an
-engine descriptor, an auth function-table, and a static model list.
+engine descriptor and a static model list.
 
-`opts.engine` comes from `maki.provider.openai_compat{...}` and `opts.auth`
-from `maki.auth.env_key{...}` (or any table exposing `resolve`/`rotate`/
-`refresh`). `opts.models` is a list of model entries.
+`opts.engine` comes from `maki.provider.openai_compat{...}`. `opts.models`
+is a list of model entries.
+
+`opts.login_url` (optional) points the login flow at the page where a user
+acquires an API key; `opts.needs_url` (optional, default false) prompts for a
+custom base URL during login. Auth for env-key scope is resolved eagerly in
+Rust from `opts.engine.api_key_env` (no `resolve`/`rotate`/`refresh` in the
+manifest).
 
 `opts.usage` (optional) is a `function(body) -> { plan = string?, limits =
 table }` parse callback. Rust fetches `opts.engine.usage_url` with the
@@ -2476,7 +2438,7 @@ shape (`limits` is a list of `{ label, percentage?, reset_at?, detail? }`).
 
 **Parameters:**
 
-- `{opts}` (`table`) Manifest: `{ slug, engine, auth, models, usage? }`.
+- `{opts}` (`table`) Manifest: `{ slug, engine, models, login_url?, needs_url?, usage? }`.
 
 
 ## maki.session {#maki-session}
