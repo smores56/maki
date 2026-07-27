@@ -35,7 +35,7 @@ use crate::model_registry::model_registry;
 use crate::provider::{BoxFuture, Provider};
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use crate::providers::{KeyPool, ResolvedAuth, Timeouts, with_prefix};
-use crate::types::{ProviderUsage, ThinkingConfig, dialect};
+use crate::types::{EffortDialect, ProviderUsage, ThinkingConfig, dialect};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
 /// Static login/onboarding metadata for a manifest provider, extracted from the
@@ -48,8 +48,6 @@ pub struct LoginMetadata {
     pub needs_url: bool,
 }
 
-const V4_MARKER: &str = "deepseek-v4";
-
 /// Authoritative description of a manifest provider's engine. Built by the
 /// Lua loader from a `maki.provider.openai_compat{...}` descriptor.
 #[derive(Debug, Clone)]
@@ -61,19 +59,15 @@ pub enum EngineSpec {
         max_tokens_field: String,
         include_stream_usage: bool,
         provider_name: String,
-        thinking: Option<ThinkingMode>,
+        /// Reasoning-effort dialect (a named Rust extension point: Lua cannot
+        /// build an `EffortDialect` at runtime, so effort application stays in
+        /// Rust). Resolved from the engine's `thinking = "<dialect>"` tag.
+        thinking: Option<&'static EffortDialect<'static>>,
         /// Balance/quota endpoint fetched via `OpenAiCompatProvider::get_text`;
         /// paired with a manifest-level `usage` parse callback. `None` disables
         /// usage reporting for this engine.
         usage_url: Option<String>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ThinkingMode {
-    /// DeepSeek's `{"type":"enabled"|"disabled"}` toggle, `dialect::DEEPSEEK`
-    /// reasoning effort, and V4 `reasoning_content` padding.
-    DeepSeek,
 }
 
 /// Serde-friendly shape of the table a Lua manifest returns (the loader pulls
@@ -161,10 +155,46 @@ pub trait UsageParseHook: Send + Sync {
     fn parse_usage(&self, body: String) -> BoxFuture<'static, Result<ProviderUsage, AgentError>>;
 }
 
+/// Decision returned by a manifest's `thinking` callback: the value of the
+/// request's `thinking.type` field ("enabled"/"disabled"/...) and whether to
+/// back-fill empty `reasoning_content` on assistant turns. The per-model gate
+/// (which models want the pad) now lives in Lua, not in a Rust substring.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ThinkingDecision {
+    pub toggle: String,
+    #[serde(default)]
+    pub pad: bool,
+}
+
+/// Resolve a manifest provider's per-request thinking decisions from a Lua
+/// callback. `stream_message` passes the resolved `enabled` flag (from
+/// `ThinkingConfig::is_enabled`) plus the model id; the callback returns the
+/// toggle value and pad flag. Rust then applies the body mutation and the
+/// shared `apply_reasoning_effort` primitive (the dialect comes from
+/// [`EngineSpec::thinking`]).
+pub trait ThinkingHook: Send + Sync {
+    fn decide(
+        &self,
+        enabled: bool,
+        model_id: String,
+    ) -> BoxFuture<'static, Result<ThinkingDecision, AgentError>>;
+}
+
+/// Map an engine descriptor's `thinking` dialect tag to the Rust effort
+/// dialect it names. The only extension point for a new thinking dialect:
+/// add a match arm + a `dialect::*` const, then ship a Lua `thinking` callback.
+fn effort_dialect_for(tag: &str) -> Option<&'static EffortDialect<'static>> {
+    match tag {
+        "deepseek" => Some(&dialect::DEEPSEEK),
+        _ => None,
+    }
+}
+
 pub struct ManifestCompat {
     compat: OpenAiCompatProvider,
     auth_handle: Arc<Mutex<ResolvedAuth>>,
-    thinking: Option<ThinkingMode>,
+    dialect: Option<&'static EffortDialect<'static>>,
+    thinking_hook: Option<Arc<dyn ThinkingHook>>,
     usage_url: Option<String>,
     parse_usage: Option<Arc<dyn UsageParseHook>>,
     system_prefix: Option<String>,
@@ -177,14 +207,16 @@ impl ManifestCompat {
         auth_handle: Arc<Mutex<ResolvedAuth>>,
         key_pool: Option<KeyPool>,
         parse_usage: Option<Arc<dyn UsageParseHook>>,
+        thinking_hook: Option<Arc<dyn ThinkingHook>>,
         timeouts: Timeouts,
         system_prefix: Option<String>,
     ) -> Self {
-        let (thinking, config, usage_url) = build_openai_compat_config(engine_spec);
+        let (dialect, config, usage_url) = build_openai_compat_config(engine_spec);
         Self {
             compat: OpenAiCompatProvider::new(config, timeouts),
             auth_handle,
-            thinking,
+            dialect,
+            thinking_hook,
             usage_url,
             parse_usage,
             system_prefix,
@@ -209,7 +241,17 @@ impl Provider for ManifestCompat {
             let mut buf = String::new();
             let system = with_prefix(&self.system_prefix, system, &mut buf);
             let mut body = self.compat.build_body(model, messages, system, tools);
-            apply_thinking(&mut body, opts.thinking, model, self.thinking);
+            let decision = if let Some(hook) = self.thinking_hook.as_ref() {
+                let enabled = opts.thinking.is_enabled();
+                Some(hook.decide(enabled, model.id.clone()).await.map_err(|e| {
+                    AgentError::Config {
+                        message: format!("manifest provider thinking decision: {e}"),
+                    }
+                })?)
+            } else {
+                None
+            };
+            apply_thinking(&mut body, opts.thinking, model, self.dialect, decision);
             self.compat
                 .do_stream(model, &[], &body, event_tx, &auth)
                 .await
@@ -249,44 +291,42 @@ impl Provider for ManifestCompat {
     }
 }
 
+/// Apply a thinking decision to the request body. `decision` is `None` when
+/// the manifest declared no `thinking` callback (a non-thinking provider):
+/// nothing is written, so a `{"type":"disabled"}` toggle is only ever sent
+/// when a manifest opts in via the callback. Effort application and the
+/// reasoning pad mechanism stay in Rust (shared across providers); the dialect
+/// comes from [`EngineSpec::thinking`] and the decision (toggle value + pad
+/// flag) from the manifest's `thinking` Lua callback.
 fn apply_thinking(
     body: &mut Value,
-    thinking: ThinkingConfig,
+    thinking_cfg: ThinkingConfig,
     model: &Model,
-    mode: Option<ThinkingMode>,
+    dialect: Option<&'static EffortDialect<'static>>,
+    decision: Option<ThinkingDecision>,
 ) {
-    match mode {
-        None => {
-            if matches!(thinking, ThinkingConfig::Off) {
-                body["thinking"] = json!({"type": "disabled"});
-            }
+    let Some(decision) = decision else {
+        return;
+    };
+    body["thinking"] = json!({"type": decision.toggle});
+    if thinking_cfg.is_enabled() {
+        if let Some(dialect) = dialect {
+            thinking_cfg.apply_reasoning_effort(body, dialect, model);
         }
-        Some(ThinkingMode::DeepSeek) => {
-            if thinking.is_enabled() {
-                body["thinking"] = json!({"type": "enabled"});
-                thinking.apply_reasoning_effort(body, &dialect::DEEPSEEK, model);
-                if matches!(thinking, ThinkingConfig::Budget(_)) {
-                    warn!("DeepSeek reasoning does not support token budgets");
-                }
-                pad_reasoning_content(&model.id, body);
-            } else {
-                body["thinking"] = json!({"type": "disabled"});
-            }
+        if matches!(thinking_cfg, ThinkingConfig::Budget(_)) {
+            warn!("manifest thinking provider does not support token budgets");
+        }
+        if decision.pad {
+            pad_empty_reasoning_content(body);
         }
     }
 }
 
-/// DeepSeek's two reasoning models disagree about `reasoning_content`: V4 in
-/// thinking mode wants it on every assistant turn (missing = 400), R1 refuses
-/// it as input. So we gate on the V4 substring, same trick Vercel's AI SDK
-/// uses, and back-fill the turns that have none (plain replies, tool-only
-/// turns). The API only checks the field exists, so `""` is enough.
-///
-/// Ref: <https://api-docs.deepseek.com/guides/thinking_mode>
-fn pad_reasoning_content(model_id: &str, body: &mut Value) {
-    if !model_id.contains(V4_MARKER) {
-        return;
-    }
+/// Back-fill `reasoning_content` on assistant turns that have none. Some APIs
+/// reject assistant turns missing the field while reasoning is on; the field
+/// need only exist, so `""` is enough. The per-model gate (which models want
+/// this) lives in the manifest's `thinking` callback, not here.
+fn pad_empty_reasoning_content(body: &mut Value) {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
@@ -310,7 +350,7 @@ fn leak_str(s: &str) -> &'static str {
 fn build_openai_compat_config(
     spec: &EngineSpec,
 ) -> (
-    Option<ThinkingMode>,
+    Option<&'static EffortDialect<'static>>,
     Arc<OpenAiCompatConfig>,
     Option<String>,
 ) {
@@ -338,7 +378,15 @@ fn build_openai_compat_config(
     }
 }
 
-type Registry = HashMap<Arc<str>, (EngineSpec, LoginMetadata, Option<Arc<dyn UsageParseHook>>)>;
+type Registry = HashMap<
+    Arc<str>,
+    (
+        EngineSpec,
+        LoginMetadata,
+        Option<Arc<dyn UsageParseHook>>,
+        Option<Arc<dyn ThinkingHook>>,
+    ),
+>;
 
 static MANIFEST_PROVIDERS: OnceLock<Mutex<Registry>> = OnceLock::new();
 
@@ -355,12 +403,13 @@ pub fn register_manifest_provider(
     engine_spec: EngineSpec,
     login_metadata: LoginMetadata,
     parse_usage: Option<Arc<dyn UsageParseHook>>,
+    thinking_hook: Option<Arc<dyn ThinkingHook>>,
     models: Vec<ModelInfo>,
     manifest: ProviderManifest,
 ) {
     registry().lock().unwrap().insert(
         Arc::clone(&slug),
-        (engine_spec, login_metadata, parse_usage),
+        (engine_spec, login_metadata, parse_usage, thinking_hook),
     );
     model_registry()
         .write()
@@ -377,13 +426,6 @@ fn family_from_str(s: Option<&str>) -> ModelFamily {
         Some("glm") => ModelFamily::Glm,
         Some("synthetic") => ModelFamily::Synthetic,
         _ => ModelFamily::Generic,
-    }
-}
-
-fn thinking_mode_from_str(s: &str) -> Option<ThinkingMode> {
-    match s {
-        "deepseek" => Some(ThinkingMode::DeepSeek),
-        _ => None,
     }
 }
 
@@ -419,7 +461,7 @@ impl ManifestDescriptor {
                 max_tokens_field,
                 include_stream_usage,
                 provider_name,
-                thinking: thinking.as_deref().and_then(thinking_mode_from_str),
+                thinking: thinking.as_deref().and_then(effort_dialect_for),
                 usage_url,
             },
         };
@@ -484,7 +526,7 @@ pub fn has_manifest_provider(slug: &str) -> bool {
 /// booted the Lua host so the registry is populated.
 pub fn login_info(slug: &str) -> Option<maki_config::providers::LoginInfo> {
     let guard = registry().lock().unwrap();
-    let (spec, login, _) = guard.get(slug)?;
+    let (spec, login, _, _) = guard.get(slug)?;
     let EngineSpec::OpenaiCompat {
         api_key_env,
         base_url,
@@ -524,7 +566,7 @@ pub fn engine_spec(slug: &str) -> Option<EngineSpec> {
         .lock()
         .unwrap()
         .get(slug)
-        .map(|(spec, _, _)| spec.clone())
+        .map(|(spec, _, _, _)| spec.clone())
 }
 
 /// Usage-parse callback for a Lua-registered manifest provider, looked up by
@@ -537,22 +579,34 @@ pub fn parse_usage(slug: &str) -> Option<Arc<dyn UsageParseHook>> {
         .lock()
         .unwrap()
         .get(slug)
-        .and_then(|(_, _, parse)| parse.clone())
+        .and_then(|(_, _, parse, _)| parse.clone())
+}
+
+/// Thinking-decision callback for a Lua-registered manifest provider, looked
+/// up by slug. `None` when the manifest declared no `thinking` function; the
+/// `EngineSpec` carries the matching effort dialect for the fetch half. The
+/// dynamic `Base::Manifest` path pulls both so a custom provider whose engine
+/// is a manifest provider inherits its thinking toggle.
+pub fn thinking_hook(slug: &str) -> Option<Arc<dyn ThinkingHook>> {
+    registry()
+        .lock()
+        .unwrap()
+        .get(slug)
+        .and_then(|(_, _, _, hook)| hook.clone())
 }
 
 pub(crate) fn manifest_provider(
     slug: &str,
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    let (engine_spec, _, parse_usage) =
-        registry()
-            .lock()
-            .unwrap()
-            .get(slug)
-            .cloned()
-            .ok_or_else(|| AgentError::Config {
-                message: format!("no manifest provider registered for '{slug}'"),
-            })?;
+    let (engine_spec, _, parse_usage, thinking_hook) = registry()
+        .lock()
+        .unwrap()
+        .get(slug)
+        .cloned()
+        .ok_or_else(|| AgentError::Config {
+            message: format!("no manifest provider registered for '{slug}'"),
+        })?;
     let EngineSpec::OpenaiCompat { api_key_env, .. } = &engine_spec;
     let pool = KeyPool::resolve(slug, api_key_env)?;
     let auth_handle = Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current())));
@@ -561,6 +615,7 @@ pub(crate) fn manifest_provider(
         auth_handle,
         Some(pool),
         parse_usage,
+        thinking_hook,
         timeouts,
         None,
     )))
@@ -573,11 +628,10 @@ mod tests {
     use test_case::test_case;
 
     const V4: &str = "deepseek-v4-pro";
-    const R1: &str = "deepseek-reasoner";
 
     #[test_case(true  ; "thinking_enabled_pads")]
     #[test_case(false ; "thinking_disabled_no_pad")]
-    fn deepseek_thinking_body_shape(enabled: bool) {
+    fn apply_thinking_writes_toggle_and_pads_when_enabled(enabled: bool) {
         let model = Model {
             id: V4.to_string(),
             provider: Arc::from("deepseek"),
@@ -591,11 +645,19 @@ mod tests {
         } else {
             ThinkingConfig::Off
         };
-        apply_thinking(&mut body, thinking, &model, Some(ThinkingMode::DeepSeek));
-        assert_eq!(
-            body["thinking"]["type"],
-            if enabled { "enabled" } else { "disabled" }
+        let toggle = if enabled { "enabled" } else { "disabled" };
+        let decision = ThinkingDecision {
+            toggle: toggle.to_string(),
+            pad: true,
+        };
+        apply_thinking(
+            &mut body,
+            thinking,
+            &model,
+            Some(&dialect::DEEPSEEK),
+            Some(decision),
         );
+        assert_eq!(body["thinking"]["type"], toggle);
         if enabled {
             assert_eq!(body["messages"][0]["reasoning_content"], "");
         } else {
@@ -604,18 +666,24 @@ mod tests {
     }
 
     #[test]
-    fn none_mode_only_disables_when_off() {
+    fn apply_thinking_no_decision_is_noop() {
         let model = Model {
             id: V4.to_string(),
             ..test_model()
         };
         let mut body = json!({"messages": []});
-        apply_thinking(&mut body, ThinkingConfig::Adaptive, &model, None);
+        apply_thinking(
+            &mut body,
+            ThinkingConfig::Adaptive,
+            &model,
+            Some(&dialect::DEEPSEEK),
+            None,
+        );
         assert!(body.get("thinking").is_none());
 
         let mut body = json!({"messages": []});
-        apply_thinking(&mut body, ThinkingConfig::Off, &model, None);
-        assert_eq!(body["thinking"]["type"], "disabled");
+        apply_thinking(&mut body, ThinkingConfig::Off, &model, None, None);
+        assert!(body.get("thinking").is_none());
     }
 
     fn test_model() -> Model {
@@ -635,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_pads_only_assistant_turns_without_reasoning() {
+    fn pad_backfills_assistant_turns_without_reasoning() {
         let mut body = json!({"messages": [
             {"role": "system",    "content": "sys"},
             {"role": "user",      "content": "hi"},
@@ -643,24 +711,13 @@ mod tests {
             {"role": "assistant", "content": "",   "tool_calls": [{"id": "c1"}]},
             {"role": "tool",      "tool_call_id": "c1", "content": "out"},
         ]});
-        pad_reasoning_content(V4, &mut body);
+        pad_empty_reasoning_content(&mut body);
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs[2]["reasoning_content"], "kept");
         assert_eq!(msgs[3]["reasoning_content"], "");
         for i in [0, 1, 4] {
             assert!(msgs[i].get("reasoning_content").is_none());
         }
-    }
-
-    #[test]
-    fn non_v4_model_is_untouched() {
-        let input = json!({"messages": [
-            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
-            {"role": "assistant", "content": "hi"},
-        ]});
-        let mut body = input.clone();
-        pad_reasoning_content(R1, &mut body);
-        assert_eq!(body, input);
     }
 
     #[test_case(Some("https://x/balance") ; "usage_url_threaded")]

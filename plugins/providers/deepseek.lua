@@ -13,6 +13,12 @@ maki.provider.register({
     "Thinking mode toggle (on/off)",
     "open-weight models",
   },
+  thinking = function(enabled, model_id)
+    return {
+      toggle = enabled and "enabled" or "disabled",
+      pad = string.find(model_id, "deepseek-v4", 1, true) ~= nil,
+    }
+  end,
   engine = maki.provider.openai_compat({
     base_url = "https://api.deepseek.com",
     api_key_env = "DEEPSEEK_API_KEY",

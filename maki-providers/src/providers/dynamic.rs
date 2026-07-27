@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 
 use crate::manifest::ManifestRegistry;
 use crate::manifest::ProviderManifest;
-use crate::manifest_provider::{ManifestCompat, engine_spec, parse_usage};
+use crate::manifest_provider::{ManifestCompat, engine_spec, parse_usage, thinking_hook};
 use crate::model::{Model, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider, ProviderKind};
 use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
@@ -476,6 +476,7 @@ pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>
                 auth.clone(),
                 None,
                 parse_usage(m.slug.as_ref()),
+                thinking_hook(m.slug.as_ref()),
                 timeouts,
                 meta.system_prefix.clone(),
             ))

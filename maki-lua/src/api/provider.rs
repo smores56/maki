@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use maki_lua_macro::{lua_fn, lua_table};
 use maki_providers::manifest_provider::{
-    LoginMetadata, ManifestDescriptor, UsageParseHook, register_manifest_provider,
+    LoginMetadata, ManifestDescriptor, ThinkingDecision, ThinkingHook, UsageParseHook,
+    register_manifest_provider,
 };
 use maki_providers::provider::BoxFuture;
 use maki_providers::{AgentError, ProviderUsage};
@@ -42,15 +43,25 @@ fn openai_compat(_lua: &Lua, opts: Table) -> LuaResult<Table> {
 /// returns a `{ plan, limits }` table mirroring the Rust `ProviderUsage`
 /// shape (`limits` is a list of `{ label, percentage?, reset_at?, detail? }`).
 ///
-/// @param opts table Manifest: `{ slug, engine, models, login_url?, needs_url?, usage? }`.
+/// `opts.thinking` (optional) is a `function(enabled, model_id) ->
+/// { toggle = string, pad = bool }` callback. Rust resolves `enabled` (from
+/// the resolved thinking config) and the model id, then this callback picks
+/// the request's `thinking.type` value and whether to back-fill empty
+/// `reasoning_content` on assistant turns. Rust applies the body mutation and
+/// the shared reasoning-effort primitive (the dialect comes from the engine
+/// descriptor's `thinking = "<dialect>"` tag).
+///
+/// @param opts table Manifest: `{ slug, engine, models, login_url?, needs_url?, usage?, thinking? }`.
 /// @return
 #[lua_fn]
 fn register(lua: &Lua, opts: Table) -> LuaResult<()> {
     let login_url: Option<String> = opts.get("login_url").ok();
     let needs_url: bool = opts.get("needs_url").unwrap_or(false);
     let usage: Option<mlua::Function> = opts.get("usage").ok();
+    let thinking: Option<mlua::Function> = opts.get("thinking").ok();
 
     opts.set("usage", LuaValue::Nil)?;
+    opts.set("thinking", LuaValue::Nil)?;
 
     let desc: ManifestDescriptor = lua
         .from_value(LuaValue::Table(opts.clone()))
@@ -66,11 +77,18 @@ fn register(lua: &Lua, opts: Table) -> LuaResult<()> {
             func,
         })
     });
+    let thinking_hook = thinking.map(|func| -> Arc<dyn ThinkingHook> {
+        Arc::new(LuaThinkingHook {
+            lua: lua.clone(),
+            func,
+        })
+    });
     register_manifest_provider(
         slug_arc,
         engine_spec,
         login_metadata,
         parse_usage,
+        thinking_hook,
         models,
         manifest,
     );
@@ -101,6 +119,39 @@ impl UsageParseHook for LuaUsageParser {
             lua.from_value::<ProviderUsage>(value)
                 .map_err(|e| AgentError::Config {
                     message: format!("manifest provider usage parse: invalid shape: {e}"),
+                })
+        })
+    }
+}
+
+/// Bridge from a manifest `thinking` Lua callback to [`ThinkingHook`]. Rust
+/// resolves `enabled` (from `ThinkingConfig::is_enabled`) and passes it plus
+/// the model id; the callback returns the ``toggle`/`pad` decision, deserialized
+/// here via the captured `Lua` (Arc-backed, cheaply cloned, idle except for
+/// this call).
+struct LuaThinkingHook {
+    lua: Lua,
+    func: mlua::Function,
+}
+
+impl ThinkingHook for LuaThinkingHook {
+    fn decide(
+        &self,
+        enabled: bool,
+        model_id: String,
+    ) -> BoxFuture<'static, Result<ThinkingDecision, AgentError>> {
+        let lua = self.lua.clone();
+        let func = self.func.clone();
+        Box::pin(async move {
+            let value = func
+                .call_async::<LuaValue>((enabled, model_id))
+                .await
+                .map_err(|e| AgentError::Config {
+                    message: format!("manifest provider thinking decision: {e}"),
+                })?;
+            lua.from_value::<ThinkingDecision>(value)
+                .map_err(|e| AgentError::Config {
+                    message: format!("manifest provider thinking decision: invalid shape: {e}"),
                 })
         })
     }

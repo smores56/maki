@@ -2436,9 +2436,17 @@ provider's auth and hands the response body string to this callback; it
 returns a `{ plan, limits }` table mirroring the Rust `ProviderUsage`
 shape (`limits` is a list of `{ label, percentage?, reset_at?, detail? }`).
 
+`opts.thinking` (optional) is a `function(enabled, model_id) ->
+{ toggle = string, pad = bool }` callback. Rust resolves `enabled` (from
+the resolved thinking config) and the model id, then this callback picks
+the request's `thinking.type` value and whether to back-fill empty
+`reasoning_content` on assistant turns. Rust applies the body mutation and
+the shared reasoning-effort primitive (the dialect comes from the engine
+descriptor's `thinking = "<dialect>"` tag).
+
 **Parameters:**
 
-- `{opts}` (`table`) Manifest: `{ slug, engine, models, login_url?, needs_url?, usage? }`.
+- `{opts}` (`table`) Manifest: `{ slug, engine, models, login_url?, needs_url?, usage?, thinking? }`.
 
 
 ## maki.session {#maki-session}
