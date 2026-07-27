@@ -567,12 +567,10 @@ pub fn auth_status(no_plugins: bool, no_jit: bool, storage: &StateDir) -> Result
 }
 
 /// Build a plugin host honoring `--no-plugins` (disabled host) and `--no-jit`
-/// (O1 interpreter). A disabled host makes `load_builtins` a no-op, so owned
-/// manifest providers (DeepSeek) stay absent from any listing under `--no-plugins`.
-fn boot_plugin_host(no_plugins: bool, no_jit: bool) -> Result<PluginHost> {
-    if no_plugins {
-        return Ok(PluginHost::disabled());
-    }
+/// Boot the Lua plugin host. `--no-plugins` no longer disables the host:
+/// builtins (e.g. the DeepSeek manifest) still load, while user `init.lua`
+/// is skipped via [`PluginHost::load_init_files_or_skip`] at each call site.
+fn boot_plugin_host(no_jit: bool) -> Result<PluginHost> {
     PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !no_jit)
         .context("initialize lua plugin host")
 }
@@ -586,7 +584,7 @@ fn auth_login_infos(no_plugins: bool, no_jit: bool) -> Result<Vec<LoginInfo>> {
     let mut infos = builtin_login_infos();
     if !no_plugins {
         let manifest_infos = {
-            let mut host = boot_plugin_host(no_plugins, no_jit)?;
+            let mut host = boot_plugin_host(no_jit)?;
             host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
                 .context("load builtin plugins")?;
             maki_providers::manifest_provider::login_infos()
@@ -610,15 +608,15 @@ fn auth_login_info(slug: &str, no_plugins: bool, no_jit: bool) -> Result<Option<
         .find(|i| i.slug == slug))
 }
 
-pub fn models(no_plugins: bool, no_jit: bool) -> Result<()> {
+pub fn models(_no_plugins: bool, no_jit: bool) -> Result<()> {
     // Boot the plugin host just to populate the manifest registry (DeepSeek
     // et al. register as a side-effect of loading builtins). The registry
     // retains only owned Rust data plus `Arc<dyn UsageParseHook>`s whose
     // `Lua` handles are Arc-backed and outlive the host, so the host can drop
-    // after `load_builtins`. Under `--no-plugins` it is disabled and the
-    // manifests stay absent.
+    // after `load_builtins`. Builtins load even under `--no-plugins` (only
+    // user `init.lua` is skipped), so manifests always register.
     {
-        let mut host = boot_plugin_host(no_plugins, no_jit)?;
+        let mut host = boot_plugin_host(no_jit)?;
         host.load_builtins(&PluginsConfig::from_plugins(HashMap::new()))
             .context("load builtin plugins")?;
     }
@@ -640,9 +638,10 @@ pub fn index(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let mut host = boot_plugin_host(no_plugins, no_jit)?;
-
-    let raw_config = host.load_init_files(&cwd).context("load init.lua files")?;
+    let mut host = boot_plugin_host(no_jit)?;
+    let raw_config = host
+        .load_init_files_or_skip(no_plugins, &cwd)
+        .context("load init.lua files")?;
 
     let mut config = raw_config
         .unwrap_or_default()
@@ -707,6 +706,7 @@ pub fn prompt(
     plan: bool,
     tools: bool,
     names: bool,
+    no_plugins: bool,
     no_jit: bool,
 ) -> Result<()> {
     use crate::cli::PromptVariant;
@@ -725,8 +725,10 @@ pub fn prompt(
 
     let vars = template::env_vars();
     let reg = ToolRegistry::global_arc();
-    let mut host = boot_plugin_host(false, no_jit)?;
-    let raw_config = host.load_init_files(&cwd).context("load init.lua files")?;
+    let mut host = boot_plugin_host(no_jit)?;
+    let raw_config = host
+        .load_init_files_or_skip(no_plugins, &cwd)
+        .context("load init.lua files")?;
     let config = raw_config
         .unwrap_or_default()
         .into_config(false)
@@ -758,10 +760,7 @@ pub fn prompt(
 
     let cwd_str = cwd.to_string_lossy();
     let instructions = load_instruction_text(&cwd_str);
-    let slots = host
-        .event_handle()
-        .map(|h| h.collect_prompt_slots())
-        .unwrap_or_default();
+    let slots = host.event_handle().collect_prompt_slots();
 
     let output = match variant {
         PromptVariant::System => {

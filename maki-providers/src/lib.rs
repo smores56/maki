@@ -11,7 +11,7 @@ pub(crate) mod types;
 pub use error::AgentError;
 pub use model::{
     FastPricing, Model, ModelEntry, ModelError, ModelFamily, ModelInfo, ModelPricing, ModelTier,
-    TokenUsage,
+    TokenUsage, add_cost, format_tokens,
 };
 pub use providers::KeyPool;
 pub use providers::Timeouts;

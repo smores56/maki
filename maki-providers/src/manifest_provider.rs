@@ -141,6 +141,7 @@ impl ModelInfoDescriptor {
             pricing: self.pricing,
             supports_thinking: self.supports_thinking,
             supports_vision: self.supports_vision,
+            tier: None,
             provider_info: None,
         }
     }
