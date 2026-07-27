@@ -70,7 +70,7 @@ fn register(lua: &Lua, opts: Table) -> LuaResult<()> {
         login_url,
         needs_url,
     };
-    let (slug_arc, engine_spec, models, manifest) = desc.into_manifest_parts();
+    let (slug_arc, models, mut manifest) = desc.into_manifest_parts();
     let parse_usage = usage.map(|func| -> Arc<dyn UsageParseHook> {
         Arc::new(LuaUsageParser {
             lua: lua.clone(),
@@ -83,15 +83,10 @@ fn register(lua: &Lua, opts: Table) -> LuaResult<()> {
             func,
         })
     });
-    register_manifest_provider(
-        slug_arc,
-        engine_spec,
-        login_metadata,
-        parse_usage,
-        thinking_hook,
-        models,
-        manifest,
-    );
+    manifest.login = Some(login_metadata);
+    manifest.usage_parse = parse_usage;
+    manifest.thinking_hook = thinking_hook;
+    register_manifest_provider(&slug_arc, models, manifest);
     Ok(())
 }
 

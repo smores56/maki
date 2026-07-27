@@ -18,9 +18,8 @@
 //! manifest, so no provider's display name, family, or fallback windows live in
 //! two places.
 
-use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use flume::Sender;
 use maki_storage::id::SessionRef;
@@ -379,43 +378,19 @@ fn build_openai_compat_config(
     }
 }
 
-type Registry = HashMap<
-    Arc<str>,
-    (
-        EngineSpec,
-        LoginMetadata,
-        Option<Arc<dyn UsageParseHook>>,
-        Option<Arc<dyn ThinkingHook>>,
-    ),
->;
-
-static MANIFEST_PROVIDERS: OnceLock<Mutex<Registry>> = OnceLock::new();
-
-fn registry() -> &'static Mutex<Registry> {
-    MANIFEST_PROVIDERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Register a Lua-loaded provider: store its engine spec, already-built auth
-/// source, and static models for `provider_for_slug` routing and model picking,
-/// AND own its capability manifest so `ManifestRegistry::get` resolves the
-/// slug at runtime. All `'static` data is leaked once at boot.
+/// Register a Lua-loaded provider: store its models for `provider_for_slug`
+/// routing and model picking, AND own its capability manifest (carrying the
+/// engine spec, login metadata, usage/thinking hooks) so `ManifestRegistry::get`
+/// resolves the slug at runtime. All `'static` data is leaked once at boot.
 pub fn register_manifest_provider(
-    slug: Arc<str>,
-    engine_spec: EngineSpec,
-    login_metadata: LoginMetadata,
-    parse_usage: Option<Arc<dyn UsageParseHook>>,
-    thinking_hook: Option<Arc<dyn ThinkingHook>>,
+    slug: &Arc<str>,
     models: Vec<ModelInfo>,
     manifest: ProviderManifest,
 ) {
-    registry().lock().unwrap().insert(
-        Arc::clone(&slug),
-        (engine_spec, login_metadata, parse_usage, thinking_hook),
-    );
     model_registry()
         .write()
         .unwrap()
-        .set_known_models(&slug, models);
+        .set_known_models(slug, models);
     ManifestRegistry::register_owned_manifest(manifest);
 }
 
@@ -432,12 +407,13 @@ fn family_from_str(s: Option<&str>) -> ModelFamily {
 
 impl ManifestDescriptor {
     /// Split a decoded manifest into everything the registry needs: the
-    /// `(slug, engine, models)` parts plus the capability `ProviderManifest`
-    /// (single-sourced here, leaked to `'static` so `ManifestRegistry` can own
-    /// it without a lifetime parameter). Login metadata (`login_url`/
-    /// `needs_url`) is pulled out of the table before serde and passed
-    /// alongside this; auth is resolved eagerly in Rust from `EngineSpec`.
-    pub fn into_manifest_parts(self) -> (Arc<str>, EngineSpec, Vec<ModelInfo>, ProviderManifest) {
+    /// `(slug, models)` parts plus the capability `ProviderManifest` (with
+    /// its `engine` field set from the descriptor). Single-sourced here,
+    /// leaked to `'static` so `ManifestRegistry` can own it without a
+    /// lifetime parameter. Login metadata, `usage`, and `thinking` callbacks
+    /// are pulled out of the table before serde and attached to the manifest
+    /// by [`register_manifest_provider`]'s callers.
+    pub fn into_manifest_parts(self) -> (Arc<str>, Vec<ModelInfo>, ProviderManifest) {
         let slug_arc: Arc<str> = Arc::from(self.slug.as_str());
         let display_name = Arc::from(self.display_name.as_str());
         let family = family_from_str(self.family.as_deref());
@@ -510,13 +486,15 @@ impl ManifestDescriptor {
                     .map(|s| Arc::from(s.as_str()))
                     .collect::<Box<[Arc<str>]>>()
             }),
+            engine: Some(engine_spec),
+            ..Default::default()
         };
-        (slug_arc, engine_spec, model_infos, manifest)
+        (slug_arc, model_infos, manifest)
     }
 }
 
 pub fn has_manifest_provider(slug: &str) -> bool {
-    registry().lock().unwrap().contains_key(slug)
+    ManifestRegistry::get(slug).is_some_and(|m| m.engine.is_some())
 }
 
 /// Login/onboarding metadata for a Lua-registered manifest provider, projecting
@@ -526,14 +504,13 @@ pub fn has_manifest_provider(slug: &str) -> bool {
 /// surface (`maki auth login`/`status`/picker) reads this; callers must have
 /// booted the Lua host so the registry is populated.
 pub fn login_info(slug: &str) -> Option<maki_config::providers::LoginInfo> {
-    let guard = registry().lock().unwrap();
-    let (spec, login, _, _) = guard.get(slug)?;
+    let manifest = ManifestRegistry::get(slug)?;
+    let login = manifest.login.as_ref()?;
     let EngineSpec::OpenaiCompat {
         api_key_env,
         base_url,
         ..
-    } = spec;
-    let manifest = ManifestRegistry::get(slug)?;
+    } = manifest.engine.as_ref()?;
     let default_model =
         ManifestRegistry::find_default_for_tier(slug, crate::model::ModelTier::Medium)
             .and_then(|entry| entry.prefixes.first())
@@ -551,63 +528,54 @@ pub fn login_info(slug: &str) -> Option<maki_config::providers::LoginInfo> {
 }
 
 /// `login_info` for every registered manifest provider, for the auth picker /
-/// `maki auth status` listing. Order follows registry insertion (stable per
-/// boot); `BuiltInProvider` entries are excluded here — the caller merges them.
+/// `maki auth status` listing. Builtins without an engine (link-time natives)
+/// are excluded here — the caller merges them.
 pub fn login_infos() -> Vec<maki_config::providers::LoginInfo> {
-    let slugs: Vec<Arc<str>> = registry().lock().unwrap().keys().cloned().collect();
+    let slugs: Vec<Arc<str>> = ManifestRegistry::builtins()
+        .into_iter()
+        .filter(|m| m.engine.is_some() && m.login.is_some())
+        .map(|m| Arc::clone(&m.slug))
+        .collect();
     slugs.iter().filter_map(|slug| login_info(slug)).collect()
 }
 
 /// Engine spec for a Lua-registered manifest provider, looked up by slug.
-/// `EngineSpec` is the authoritative source of `api_key_env` / `base_url`
-/// (the `ProviderManifest` capability struct carries neither), so docgen and
-/// status surfaces query it here for env/url rendering.
+/// `None` for builtins without a Lua engine. Docgen and status surfaces query
+/// it here for env/url rendering.
 pub fn engine_spec(slug: &str) -> Option<EngineSpec> {
-    registry()
-        .lock()
-        .unwrap()
-        .get(slug)
-        .map(|(spec, _, _, _)| spec.clone())
+    ManifestRegistry::get(slug).and_then(|m| m.engine.clone())
 }
 
 /// Usage-parse callback for a Lua-registered manifest provider, looked up by
-/// slug. `None` when the manifest declared no `usage` function; the `EngineSpec`
-/// carries the matching `usage_url` for the fetch half. `provider_from_base`
-/// (dynamic `Base::Manifest`) pulls both so a custom provider whose engine is
-/// a manifest provider inherits its usage endpoint.
+/// slug. `None` when the manifest declared no `usage` function; the
+/// `EngineSpec` carries the matching `usage_url` for the fetch half. The
+/// dynamic `Base::Manifest` path pulls both so a custom provider whose engine
+/// is a manifest provider inherits its usage endpoint.
 pub fn parse_usage(slug: &str) -> Option<Arc<dyn UsageParseHook>> {
-    registry()
-        .lock()
-        .unwrap()
-        .get(slug)
-        .and_then(|(_, _, parse, _)| parse.clone())
+    ManifestRegistry::get(slug).and_then(|m| m.usage_parse.clone())
 }
 
 /// Thinking-decision callback for a Lua-registered manifest provider, looked
 /// up by slug. `None` when the manifest declared no `thinking` function; the
-/// `EngineSpec` carries the matching effort dialect for the fetch half. The
-/// dynamic `Base::Manifest` path pulls both so a custom provider whose engine
-/// is a manifest provider inherits its thinking toggle.
+/// `EngineSpec` carries the matching effort dialect. The dynamic
+/// `Base::Manifest` path pulls both so a custom provider whose engine is a
+/// manifest provider inherits its thinking toggle.
 pub fn thinking_hook(slug: &str) -> Option<Arc<dyn ThinkingHook>> {
-    registry()
-        .lock()
-        .unwrap()
-        .get(slug)
-        .and_then(|(_, _, _, hook)| hook.clone())
+    ManifestRegistry::get(slug).and_then(|m| m.thinking_hook.clone())
 }
 
 pub(crate) fn manifest_provider(
     slug: &str,
     timeouts: Timeouts,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    let (engine_spec, _, parse_usage, thinking_hook) = registry()
-        .lock()
-        .unwrap()
-        .get(slug)
-        .cloned()
-        .ok_or_else(|| AgentError::Config {
-            message: format!("no manifest provider registered for '{slug}'"),
-        })?;
+    let manifest = ManifestRegistry::get(slug).ok_or_else(|| AgentError::Config {
+        message: format!("no manifest provider registered for '{slug}'"),
+    })?;
+    let engine_spec = manifest.engine.clone().ok_or_else(|| AgentError::Config {
+        message: format!("manifest '{slug}' has no engine"),
+    })?;
+    let parse_usage = manifest.usage_parse.clone();
+    let thinking_hook = manifest.thinking_hook.clone();
     let EngineSpec::OpenaiCompat { api_key_env, .. } = &engine_spec;
     let pool = KeyPool::resolve(slug, api_key_env)?;
     let auth_handle = Arc::new(Mutex::new(ResolvedAuth::bearer(pool.current())));
@@ -741,11 +709,11 @@ mod tests {
             "models": [],
         }))
         .unwrap();
-        let (_, engine_spec, _, _) = desc.into_manifest_parts();
+        let (_, _, manifest) = desc.into_manifest_parts();
         let EngineSpec::OpenaiCompat {
             usage_url: spec_url,
             ..
-        } = engine_spec;
+        } = manifest.engine.expect("engine set");
         assert_eq!(spec_url.as_deref(), usage_url);
     }
 }

@@ -1,5 +1,6 @@
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
+use crate::manifest_provider::{EngineSpec, LoginMetadata, ThinkingHook, UsageParseHook};
 use crate::model::{ModelEntry, ModelFamily, ModelTier};
 use crate::providers::{
     anthropic, copilot, custom, dynamic, google, llama_cpp, mistral, ollama, openai, openrouter,
@@ -13,7 +14,12 @@ use crate::providers::{
 /// `ManifestRegistry::register_owned_manifest` and the `static` builtin
 /// tables) so the `get`/`builtins` API keeps returning `&'static` — the
 /// `Arc<str>` payloads live as long as that leaked shell.
-#[derive(Debug, Clone)]
+///
+/// `engine`/`login`/`usage_parse`/`thinking_hook` are `None` for builtins and
+/// manifest-only bases, `Some` only when `maki.provider.register` loaded a
+/// Lua engine (so a manifest is the single source of truth for a provider;
+/// there is no separate "engine registry" to keep in sync).
+#[derive(Clone)]
 pub struct ProviderManifest {
     pub slug: Arc<str>,
     pub display_name: Arc<str>,
@@ -24,6 +30,30 @@ pub struct ProviderManifest {
     pub fallback_context_window: u32,
     pub models: &'static [ModelEntry],
     pub qualities: Option<Box<[Arc<str>]>>,
+    pub engine: Option<EngineSpec>,
+    pub login: Option<LoginMetadata>,
+    pub usage_parse: Option<Arc<dyn UsageParseHook>>,
+    pub thinking_hook: Option<Arc<dyn ThinkingHook>>,
+}
+
+impl Default for ProviderManifest {
+    fn default() -> Self {
+        Self {
+            slug: Arc::from(""),
+            display_name: Arc::from(""),
+            family: ModelFamily::Generic,
+            supports_thinking: false,
+            accepts_arbitrary_models: false,
+            fallback_max_output: None,
+            fallback_context_window: 0,
+            models: &[],
+            qualities: None,
+            engine: None,
+            login: None,
+            usage_parse: None,
+            thinking_hook: None,
+        }
+    }
 }
 
 static ANTHROPIC: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -36,6 +66,7 @@ static ANTHROPIC: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest
     fallback_context_window: 200_000,
     models: anthropic::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static OPENAI: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -48,6 +79,7 @@ static OPENAI: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
     fallback_context_window: 200_000,
     models: openai::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static GOOGLE: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -60,6 +92,7 @@ static GOOGLE: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
     fallback_context_window: 1_000_000,
     models: google::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static COPILOT: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -72,6 +105,7 @@ static COPILOT: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
     fallback_context_window: 200_000,
     models: copilot::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static OLLAMA: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -84,6 +118,7 @@ static OLLAMA: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
     fallback_context_window: 128_000,
     models: ollama::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static LLAMA_CPP: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -96,6 +131,7 @@ static LLAMA_CPP: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest
     fallback_context_window: 128_000,
     models: llama_cpp::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static MISTRAL: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -108,6 +144,7 @@ static MISTRAL: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
     fallback_context_window: 128_000,
     models: mistral::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static ZAI: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -120,6 +157,7 @@ static ZAI: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
     fallback_context_window: 128_000,
     models: zai::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static OPENROUTER: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -132,6 +170,7 @@ static OPENROUTER: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifes
     fallback_context_window: 200_000,
     models: openrouter::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static SYNTHETIC: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -144,6 +183,7 @@ static SYNTHETIC: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest
     fallback_context_window: 128_000,
     models: synthetic::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static TENSORX: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -156,6 +196,7 @@ static TENSORX: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
     fallback_context_window: 200_000,
     models: tensorx::models(),
     qualities: None,
+    ..Default::default()
 });
 
 static OPENCODE: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest {
@@ -168,6 +209,7 @@ static OPENCODE: LazyLock<ProviderManifest> = LazyLock::new(|| ProviderManifest 
     fallback_context_window: 256_000,
     models: &[],
     qualities: None,
+    ..Default::default()
 });
 
 static BUILTINS: LazyLock<Vec<&'static ProviderManifest>> = LazyLock::new(|| {

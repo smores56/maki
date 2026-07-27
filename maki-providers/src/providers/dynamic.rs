@@ -895,6 +895,7 @@ esac
             fallback_context_window: 0,
             models: &[],
             qualities: None,
+            ..Default::default()
         });
         let tmp = TempDir::new().unwrap();
         write_script(
