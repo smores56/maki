@@ -13,7 +13,7 @@ use maki_agent::{
     McpSnapshotReader, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 use maki_config::{PermissionsConfig, UiConfig};
-use maki_lua::{HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
+use maki_lua::{BuiltinAction, HintReader, LuaCommandInfo, LuaCommandReader};
 use maki_providers::{ContentBlock, Effort, Role, TokenUsage};
 use maki_storage::sessions::{StoredMode, StoredThinking};
 use ratatui::layout::Rect;
@@ -48,7 +48,7 @@ fn build_app_with_lua(
         McpSnapshotReader::empty(),
         McpConfigErrors::new(PathBuf::new()),
         lua_commands,
-        KeymapReader::empty(),
+        maki_lua::test_support::keymap_reader_with(maki_lua::default_keymap_entries()),
         HintReader::empty(),
         writer,
         UiConfig::default(),
@@ -3241,16 +3241,48 @@ fn streaming_cancel_wins_over_quit_override() {
 }
 
 #[test]
-fn dead_host_override_falls_back_to_builtin() {
+fn dead_host_still_runs_builtin() {
+    let entry = maki_lua::KeymapEntry::builtin(
+        kb::HELP.code,
+        kb::HELP.modifiers,
+        std::sync::Arc::from("test-plugin"),
+        "help",
+        9,
+        KeybindContext::General,
+        BuiltinAction::Help,
+    );
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
-    let _probe = install_override(&mut app, kb::HELP.code, kb::HELP.modifiers);
     app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test();
+    app.keymap_reader = reader;
+    assert!(!app.help_modal.is_open());
 
     app.update(Msg::Key(kb::HELP.to_key_event()));
 
     assert!(
         app.help_modal.is_open(),
-        "dead lua host must fall back to the built-in HELP handler"
+        "builtin entry must fire without touching the lua host"
+    );
+}
+
+#[test]
+fn dead_host_callback_binding_falls_through_to_none() {
+    let entry = maki_lua::KeymapEntry::callback(
+        KeyCode::Char('g'),
+        KeyModifiers::CONTROL,
+        std::sync::Arc::from("test-plugin"),
+        "plugin-only callback",
+        42,
+    );
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test();
+    app.keymap_reader = reader;
+
+    let actions = app.dispatch_override(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    assert!(
+        actions.is_none(),
+        "dead host must skip the callback entry and return None"
     );
 }
 

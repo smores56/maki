@@ -1,4 +1,8 @@
-use maki_ui::keybindings::{ALT_SEP, KEYBINDS, KeyLabel, KeybindContext, Platform, all_contexts};
+use maki_lua::EntryKind;
+use maki_lua::default_keymap_entries;
+use maki_ui::keybindings::{
+    ALT_SEP, KEYBINDS, KeyLabel, KeybindContext, Platform, all_contexts, display_key_label,
+};
 
 const FRONTMATTER: &str = "\
 +++
@@ -45,12 +49,30 @@ fn write_table_2col(out: &mut String, rows: &[(String, &str)]) {
 fn write_section(out: &mut String, ctx: KeybindContext) {
     out.push_str(&format!("\n## {}\n\n", ctx.label()));
 
+    let defaults = default_keymap_entries();
+    let default_rows: Vec<_> = defaults
+        .iter()
+        .filter(|e| e.context == ctx)
+        .filter_map(|e| match &e.kind {
+            EntryKind::Builtin(action) => Some((
+                format!("`{}`", display_key_label(e.key, e.modifiers)),
+                action.description(),
+            )),
+            EntryKind::Callback => None,
+        })
+        .collect();
+
     let all_rows: Vec<_> = KEYBINDS.iter().filter(|kb| kb.context == ctx).collect();
 
-    let normal: Vec<_> = all_rows
+    let normal: Vec<_> = default_rows
         .iter()
-        .filter(|kb| kb.platform == Platform::All)
-        .map(|kb| (label_str(kb.label), kb.description))
+        .map(|(k, d)| (k.clone(), *d))
+        .chain(
+            all_rows
+                .iter()
+                .filter(|kb| kb.platform == Platform::All)
+                .map(|kb| (label_str(kb.label), kb.description)),
+        )
         .collect();
 
     if !normal.is_empty() {
@@ -180,13 +202,12 @@ fn write_overrides(out: &mut String) {
     );
     out.push_str("```bash\nmaki --no-plugins\n```\n\n");
     out.push_str(
-        "Skips user `init.lua` files (global and project) but keeps the \
-         Lua host and builtin plugins running, so tools still work. \
-         `permissions.toml`, custom commands, and env files load as \
-         usual.\n\n",
+        "This skips user `init.lua` files (global and project) but keeps \
+         the Lua host and every builtin plugin running, so suspend, \
+         tools, and the default keymap still work.\n\n",
     );
     out.push_str(
-        "The default keymap lives in Rust, not Lua, so `--no-plugins` \
-         never drops it.\n",
+        "Builtin plugins (tools, keymap, slash commands) load alongside \
+         the rest of the defaults, unaffected by `--no-plugins`.\n",
     );
 }

@@ -15,12 +15,19 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 |-----|--------|
 | `Ctrl+C` | Quit / clear input |
 | `Ctrl+H` | Show keybindings |
-| `Ctrl+N` / `Ctrl+P` | Next / previous task chat |
-| `Ctrl+F` | Search messages |
-| `Ctrl+S` | File picker |
-| `Ctrl+O` | Open plan in editor |
+| `Ctrl+P` | Previous task chat |
+| `Ctrl+N` | Next task chat |
+| `Ctrl+U` | Scroll half page up |
+| `Ctrl+D` | Scroll half page down |
+| `Ctrl+G` | Scroll to top |
+| `Ctrl+B` | Scroll to bottom |
 | `Ctrl+T` | Toggle plan panel |
 | `Ctrl+X` | Open tasks |
+| `Ctrl+F` | Search messages |
+| `Ctrl+S` | Open file picker |
+| `Ctrl+O` | Open plan in editor |
+| `Alt+O` | Edit input in editor |
+| `Ctrl+Q` | Pop queued message |
 
 ## Editing
 
@@ -34,13 +41,8 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Alt+←` / `Alt+→` | Move word left / right |
 | `Ctrl+A` | Jump to start of line |
 | `Home` / `End` | Jump to start/end of line |
-| `Ctrl+U` / `Ctrl+D` | Scroll half page up / down |
 | `Ctrl+E` | Jump to end of line |
-| `Ctrl+G` | Scroll to top |
-| `Ctrl+B` | Scroll to bottom |
-| `Ctrl+Q` | Pop queue |
 | `Esc Esc` | Rewind |
-| `Alt+O` | Edit input in external editor |
 
 ### macOS-specific
 
@@ -91,13 +93,8 @@ Some pickers add extra bindings on top of the defaults:
 | Editing | `Ctrl+K` | Delete to end of line |
 | Editing | `Ctrl+A` | Jump to start of line |
 | Editing | `Home` / `End` | Jump to start/end of line |
-| Editing | `Ctrl+U` / `Ctrl+D` | Scroll half page up / down |
 | Editing | `Ctrl+E` | Jump to end of line |
-| Editing | `Ctrl+G` | Scroll to top |
-| Editing | `Ctrl+B` | Scroll to bottom |
-| Editing | `Ctrl+Q` | Pop queue |
 | Editing | `Esc Esc` | Rewind |
-| Editing | `Alt+O` | Edit input in external editor |
 | While Streaming | `↑` / `↓` | Navigate input history |
 | While Streaming | `Esc Esc` | Cancel agent |
 | Form | `↑` / `↓` | Navigate options |
@@ -146,6 +143,6 @@ If an override leaves Maki stuck (a rebound `Ctrl+C`, a modal that won't close, 
 maki --no-plugins
 ```
 
-Skips user `init.lua` files (global and project) but keeps the Lua host and builtin plugins running, so tools still work. `permissions.toml`, custom commands, and env files load as usual.
+This skips user `init.lua` files (global and project) but keeps the Lua host and every builtin plugin running, so suspend, tools, and the default keymap still work.
 
-The default keymap lives in Rust, not Lua, so `--no-plugins` never drops it.
+Builtin plugins (tools, keymap, slash commands) load alongside the rest of the defaults, unaffected by `--no-plugins`.

@@ -36,6 +36,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/index"),
     },
     BundledPlugin {
+        name: "keymap",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/keymap"),
+    },
+    BundledPlugin {
         name: "webfetch",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/webfetch"),
     },

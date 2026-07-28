@@ -528,6 +528,60 @@ fn del(lua: &Lua, #[ctx] plugin: Arc<str>, mode: String, lhs: String) -> LuaResu
     Ok(())
 }
 
+/// The set of bindings `plugins/keymap/init.lua` registers at startup.
+/// Single Rust source of truth mirrored 1:1 by the Lua plugin; the
+/// `default_keymap_matches_plugin` drift gate asserts they stay in sync.
+/// Used by the test harness to pre-populate a `KeymapReader` without a
+/// running Lua runtime.
+pub(crate) const DEFAULT_KEYBINDS: &[(&str, BuiltinAction, KeybindContext)] = &[
+    ("<C-c>", BuiltinAction::Quit, KeybindContext::General),
+    ("<C-h>", BuiltinAction::Help, KeybindContext::General),
+    ("<C-p>", BuiltinAction::PrevChat, KeybindContext::General),
+    ("<C-n>", BuiltinAction::NextChat, KeybindContext::General),
+    (
+        "<C-u>",
+        BuiltinAction::ScrollHalfUp,
+        KeybindContext::General,
+    ),
+    (
+        "<C-d>",
+        BuiltinAction::ScrollHalfDown,
+        KeybindContext::General,
+    ),
+    ("<C-g>", BuiltinAction::ScrollTop, KeybindContext::General),
+    (
+        "<C-b>",
+        BuiltinAction::ScrollBottom,
+        KeybindContext::General,
+    ),
+    ("<C-t>", BuiltinAction::PlanToggle, KeybindContext::General),
+    ("<C-x>", BuiltinAction::Tasks, KeybindContext::General),
+    ("<C-f>", BuiltinAction::Search, KeybindContext::General),
+    ("<C-s>", BuiltinAction::FilePicker, KeybindContext::General),
+    ("<C-o>", BuiltinAction::OpenEditor, KeybindContext::General),
+    ("<M-o>", BuiltinAction::EditInput, KeybindContext::General),
+    ("<C-q>", BuiltinAction::PopQueue, KeybindContext::General),
+];
+
+pub fn default_keymap_entries() -> Vec<KeymapEntry> {
+    DEFAULT_KEYBINDS
+        .iter()
+        .map(|(notation, action, ctx)| {
+            let (key, modifiers) =
+                parse_key_notation(notation).expect("default key notation parses");
+            KeymapEntry::builtin(
+                key,
+                modifiers,
+                Arc::from("keymap"),
+                action.description(),
+                0,
+                *ctx,
+                *action,
+            )
+        })
+        .collect()
+}
+
 lua_table! {
     /// Key mappings, modeled after `vim.keymap`. If you have written a
     /// Neovim keymap plugin before, this will feel familiar.
@@ -831,5 +885,36 @@ mod tests {
         let t = lua.create_table().unwrap();
         t.set("context", label).unwrap();
         assert_eq!(parse_context(Some(&t)).unwrap(), expected);
+    }
+
+    #[test]
+    fn default_keymap_matches_plugin() {
+        const PLUGIN: &str = include_str!("../../../plugins/keymap/init.lua");
+        let expected: std::collections::BTreeSet<(&str, &str, &str)> = DEFAULT_KEYBINDS
+            .iter()
+            .map(|(lhs, action, ctx)| (*lhs, action.lua_name(), ctx.label()))
+            .collect();
+        let set_re = regex::Regex::new(
+            r#"maki\.keymap\.set\("n",\s*"([^"]+)",\s*maki\.actions\.(\w+)(?:,\s*\{\s*context\s*=\s*"([^"]+)"\s*\})?\)"#,
+        )
+        .unwrap();
+        let mut actual: std::collections::BTreeSet<(&str, &str, &str)> =
+            std::collections::BTreeSet::new();
+        for cap in set_re.captures_iter(PLUGIN) {
+            let lhs = cap.get(1).unwrap().as_str();
+            let action = cap.get(2).unwrap().as_str();
+            let ctx = cap.get(3).map(|m| m.as_str()).unwrap_or("General");
+            actual.insert((lhs, action, ctx));
+        }
+        assert_eq!(
+            expected, actual,
+            "plugins/keymap/init.lua drifted from DEFAULT_KEYBINDS"
+        );
+        expected.iter().for_each(|(_, action, _)| {
+            assert!(
+                BuiltinAction::from_lua_name(action).is_some(),
+                "plugin references unknown action {action}"
+            );
+        });
     }
 }

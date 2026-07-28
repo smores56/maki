@@ -457,59 +457,6 @@ impl App {
         }
     }
 
-    fn handle_ctrl(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
-        if !is_ctrl(&key) {
-            return None;
-        }
-        if key::QUIT.matches(key) {
-            self.command_palette.close();
-            return Some(if !self.is_main_chat() || self.input_box.is_empty() {
-                if self.status == Status::Streaming {
-                    return Some(self.handle_cancel());
-                }
-                self.quit()
-            } else {
-                self.input_box.discard();
-                vec![]
-            });
-        }
-        if key::HELP.matches(key) {
-            self.help_modal.toggle();
-            return Some(vec![]);
-        }
-        if key::TASKS.matches(key) {
-            self.open_tasks();
-            return Some(vec![]);
-        }
-        if key::PREV_CHAT.matches(key) {
-            self.active_chat = self.active_chat.saturating_sub(1);
-            return Some(vec![]);
-        }
-        if key::NEXT_CHAT.matches(key) {
-            self.active_chat = (self.active_chat + 1).min(self.chats.len() - 1);
-            return Some(vec![]);
-        }
-        if key::SCROLL_HALF_UP.matches(key) {
-            let half = self.chats[self.active_chat].half_page();
-            self.active_chat().scroll(half);
-            return Some(vec![]);
-        }
-        if key::SCROLL_HALF_DOWN.matches(key) {
-            let half = self.chats[self.active_chat].half_page();
-            self.active_chat().scroll(-half);
-            return Some(vec![]);
-        }
-        if key::SCROLL_TOP.matches(key) {
-            self.active_chat().scroll_to_top();
-            return Some(vec![]);
-        }
-        if key::SCROLL_BOTTOM.matches(key) {
-            self.active_chat().enable_auto_scroll();
-            return Some(vec![]);
-        }
-        None
-    }
-
     fn dispatch_overlay(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
         if self.permission_prompt.is_open() {
             if let Some(answer) = self.permission_prompt.handle_key(key) {
@@ -720,8 +667,8 @@ impl App {
             return actions;
         }
 
-        if let Some(actions) = self.handle_ctrl(key) {
-            return actions;
+        if self.status == Status::Streaming && key::QUIT.matches(key) {
+            return self.handle_cancel();
         }
 
         if !self.is_main_chat() {
@@ -745,7 +692,8 @@ impl App {
         self.handle_main_chat_key(key)
     }
 
-    fn active_keybind_context(&self) -> KeybindContext {
+    #[allow(dead_code)]
+    pub(crate) fn active_keybind_context(&self) -> KeybindContext {
         use KeybindContext as C;
         if self.permission_prompt.is_open() {
             return C::FormInput;
@@ -802,6 +750,12 @@ impl App {
         }
     }
 
+    /// Resolves a `BuiltinAction` identically to the legacy Rust paths in
+    /// `handle_ctrl` and `handle_main_chat_key`. Bodies are lifted verbatim
+    /// so behavior matches the hardcoded arms exactly. Wired into
+    /// `dispatch_override` in the next step; today both legacy functions and
+    /// this method coexist as fallbacks.
+    #[allow(dead_code)]
     fn dispatch_builtin(&mut self, action: BuiltinAction) -> Vec<Action> {
         match action {
             BuiltinAction::Quit => {
@@ -945,27 +899,8 @@ impl App {
     }
 
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        if key::EDIT_INPUT.matches(key) {
-            return vec![Action::EditInputInEditor];
-        }
         if is_ctrl(&key) {
-            if key::POP_QUEUE.matches(key) {
-                self.queue.remove(0);
-            } else if key::OPEN_EDITOR.matches(key) {
-                return match self.state.plan.path() {
-                    Some(p) => vec![Action::OpenEditor(p.to_path_buf())],
-                    None => {
-                        self.flash(FLASH_NO_PLAN.into());
-                        vec![]
-                    }
-                };
-            } else if key::SEARCH.matches(key) {
-                let top = self.chats[self.active_chat].scroll_top();
-                let auto = self.chats[self.active_chat].auto_scroll();
-                self.search_modal.open(top, auto);
-            } else if key::FILE_PICKER.matches(key) {
-                self.file_picker.open(&self.state.session.cwd);
-            } else if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
+            if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
                 self.start_image_paste();
             } else if let InputAction::PaletteSync(val) = self.input_box.handle_key(key) {
                 self.command_palette.sync(&val);
