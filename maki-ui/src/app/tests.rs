@@ -13,7 +13,7 @@ use maki_agent::{
     McpSnapshotReader, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 use maki_config::{PermissionsConfig, UiConfig};
-use maki_lua::{HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
+use maki_lua::{BuiltinAction, HintReader, LuaCommandInfo, LuaCommandReader};
 use maki_providers::{ContentBlock, Effort, Role, TokenUsage};
 use maki_storage::sessions::{StoredMode, StoredThinking};
 use ratatui::layout::Rect;
@@ -48,7 +48,7 @@ fn build_app_with_lua(
         McpSnapshotReader::empty(),
         McpConfigErrors::new(PathBuf::new()),
         lua_commands,
-        KeymapReader::empty(),
+        maki_lua::test_support::keymap_reader_with(maki_lua::default_keymap_entries()),
         HintReader::empty(),
         writer,
         UiConfig::default(),
@@ -3099,13 +3099,14 @@ fn install_override(
     key: KeyCode,
     modifiers: KeyModifiers,
 ) -> maki_lua::test_support::RequestProbe {
-    app.keymap_reader = maki_lua::test_support::keymap_reader_with(vec![maki_lua::KeymapEntry {
-        key,
-        modifiers,
-        desc: "plugin override".into(),
-        plugin: Arc::from("test-plugin"),
-        id: 1,
-    }]);
+    app.keymap_reader =
+        maki_lua::test_support::keymap_reader_with(vec![maki_lua::KeymapEntry::callback(
+            key,
+            modifiers,
+            Arc::from("test-plugin"),
+            "plugin override",
+            1,
+        )]);
     let (handle, probe) = maki_lua::test_support::probed_event_handle();
     app.lua_event_handle = handle;
     probe
@@ -3240,16 +3241,48 @@ fn streaming_cancel_wins_over_quit_override() {
 }
 
 #[test]
-fn dead_host_override_falls_back_to_builtin() {
+fn dead_host_still_runs_builtin() {
+    let entry = maki_lua::KeymapEntry::builtin(
+        kb::HELP.code,
+        kb::HELP.modifiers,
+        std::sync::Arc::from("test-plugin"),
+        "help",
+        9,
+        KeybindContext::General,
+        BuiltinAction::Help,
+    );
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
-    let _probe = install_override(&mut app, kb::HELP.code, kb::HELP.modifiers);
     app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test();
+    app.keymap_reader = reader;
+    assert!(!app.help_modal.is_open());
 
     app.update(Msg::Key(kb::HELP.to_key_event()));
 
     assert!(
         app.help_modal.is_open(),
-        "dead lua host must fall back to the built-in HELP handler"
+        "builtin entry must fire without touching the lua host"
+    );
+}
+
+#[test]
+fn dead_host_callback_binding_falls_through_to_none() {
+    let entry = maki_lua::KeymapEntry::callback(
+        KeyCode::Char('g'),
+        KeyModifiers::CONTROL,
+        std::sync::Arc::from("test-plugin"),
+        "plugin-only callback",
+        42,
+    );
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test();
+    app.keymap_reader = reader;
+
+    let actions = app.dispatch_override(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    assert!(
+        actions.is_none(),
+        "dead host must skip the callback entry and return None"
     );
 }
 
@@ -3734,4 +3767,132 @@ fn subagent_cancel_then_navigate_back_main_unaffected() {
     assert_eq!(app.active_chat, 0);
     assert_eq!(app.status, Status::Streaming);
     assert!(!app.chats[0].is_finished());
+}
+
+#[test]
+fn active_keybind_context_covers_every_overlay() {
+    use crate::components::btw_modal::BtwEvent;
+
+    fn assert_parent(app: &App, overlay: &str, expected: Option<KeybindContext>) {
+        let ctx = app.active_keybind_context();
+        assert_eq!(
+            ctx.parent(),
+            expected,
+            "{overlay}: returned {ctx:?}, expected parent {expected:?}"
+        );
+    }
+
+    {
+        let mut app = test_app();
+        app.permission_prompt.open(
+            "id".into(),
+            maki_config::ToolKey::native("bash"),
+            vec!["execute".into()],
+            None,
+        );
+        assert_parent(&app, "PermissionPrompt", Some(KeybindContext::General));
+    }
+    {
+        let mut app = test_app();
+        app.state.mode = Mode::Plan;
+        app.plan_form.toggle();
+        assert_parent(&app, "PlanForm", Some(KeybindContext::General));
+    }
+    {
+        let mut app = test_app();
+        app.help_modal.toggle();
+        assert_parent(&app, "HelpModal", None);
+    }
+    {
+        let mut app = test_app();
+        app.usage_modal.toggle();
+        assert_parent(&app, "UsageModal", None);
+    }
+    {
+        let mut app = test_app();
+        let (_tx, rx) = flume::bounded::<BtwEvent>(1);
+        app.btw_modal.open("q", rx);
+        assert_parent(&app, "BtwModal", None);
+    }
+    {
+        let mut app = test_app();
+        open_split_window(&mut app, maki_lua::Split::Right);
+        assert_parent(&app, "FloatManager", None);
+    }
+    {
+        let mut app = test_app();
+        app.search_modal.open(0, true);
+        assert_parent(&app, "SearchModal", Some(KeybindContext::Picker));
+    }
+    {
+        let mut app = test_app();
+        app.file_picker.open(&app.state.session.cwd);
+        assert_parent(&app, "FilePickerModal", Some(KeybindContext::Picker));
+    }
+    {
+        let mut app = test_app();
+        app.queue_and_notify(queued_msg("q"));
+        app.queue.set_focus_at(0);
+        assert_parent(&app, "QueueFocus", Some(KeybindContext::Picker));
+    }
+    {
+        let mut app = test_app();
+        open_tasks_picker(&mut app);
+        assert_parent(&app, "TaskPicker", Some(KeybindContext::Picker));
+    }
+    {
+        let mut app = test_app();
+        app.state
+            .session
+            .messages
+            .push(Message::user("hello".into()));
+        let _ = app.rewind_picker.open(&app.state.session.messages);
+        assert_parent(&app, "RewindPicker", Some(KeybindContext::Picker));
+    }
+    {
+        let mut app = test_app();
+        app.theme_picker.open();
+        assert_parent(&app, "ThemePicker", Some(KeybindContext::Picker));
+    }
+    {
+        let mut app = test_app();
+        app.model_picker.open(&app.state.model.spec());
+        assert_parent(&app, "ModelPicker", Some(KeybindContext::Picker));
+    }
+    {
+        let mut app = test_app();
+        app.login_picker.open(app.storage.clone());
+        assert_parent(&app, "LoginPicker", Some(KeybindContext::General));
+    }
+    {
+        let mut app = test_app();
+        app.mcp_picker.open();
+        assert_parent(&app, "McpPicker", Some(KeybindContext::General));
+    }
+    {
+        let app = test_app();
+        assert_eq!(
+            app.active_keybind_context(),
+            KeybindContext::Editing,
+            "default main chat, not streaming, must be Editing"
+        );
+    }
+    {
+        let mut app = test_app();
+        app.status = Status::Streaming;
+        assert_eq!(
+            app.active_keybind_context(),
+            KeybindContext::Streaming,
+            "streaming main chat must be Streaming"
+        );
+    }
+    {
+        let mut app = test_app();
+        app.active_chat = 1;
+        assert_eq!(
+            app.active_keybind_context(),
+            KeybindContext::General,
+            "non-main chat with no overlay must be General"
+        );
+    }
 }

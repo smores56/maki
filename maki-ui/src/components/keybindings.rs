@@ -1,6 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fmt::Write;
-use strum::EnumIter;
 use unicode_width::UnicodeWidthStr;
 
 macro_rules! mod_key {
@@ -157,56 +156,7 @@ pub mod key {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
-pub enum KeybindContext {
-    General,
-    Editing,
-    Streaming,
-    Picker,
-    FormInput,
-    TaskPicker,
-    RewindPicker,
-    ThemePicker,
-    ModelPicker,
-    QueueFocus,
-    CommandPalette,
-    Search,
-    FilePicker,
-}
-
-impl KeybindContext {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::General => "General",
-            Self::Editing => "Editing",
-            Self::Streaming => "While Streaming",
-            Self::Picker => "Pickers",
-            Self::FormInput => "Form",
-            Self::TaskPicker => "Task Picker",
-            Self::RewindPicker => "Rewind Picker",
-            Self::ThemePicker => "Theme Picker",
-            Self::ModelPicker => "Model Picker",
-            Self::QueueFocus => "Queue",
-            Self::CommandPalette => "Commands",
-            Self::Search => "Search",
-            Self::FilePicker => "File Picker",
-        }
-    }
-
-    pub const fn parent(self) -> Option<KeybindContext> {
-        match self {
-            Self::TaskPicker
-            | Self::RewindPicker
-            | Self::ThemePicker
-            | Self::ModelPicker
-            | Self::QueueFocus
-            | Self::CommandPalette
-            | Self::Search
-            | Self::FilePicker => Some(Self::Picker),
-            _ => None,
-        }
-    }
-}
+pub use maki_lua::{BuiltinAction, KeybindContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -302,55 +252,11 @@ pub struct Keybind {
     pub platform: Platform,
 }
 
+/// Static documentation of bindings that are NOT `BuiltinAction`s and stay
+/// hardcoded in Rust (editing keys, overlay navigation, exempt keys). The
+/// help modal merges this with the live `KeymapReader` snapshot so both
+/// remappable builtins and hardcoded keys are visible.
 pub const KEYBINDS: &[Keybind] = &[
-    Keybind {
-        label: KeyLabel::Single(key::QUIT.label),
-        description: "Quit / clear input",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::HELP.label),
-        description: "Show keybindings",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt(key::NEXT_CHAT.label, key::PREV_CHAT.label),
-        description: "Next / previous task chat",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::SEARCH.label),
-        description: "Search messages",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::FILE_PICKER.label),
-        description: "File picker",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::OPEN_EDITOR.label),
-        description: "Open plan in editor",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::PLAN_TOGGLE.label),
-        description: "Toggle plan panel",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::TASKS.label),
-        description: "Open tasks",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
     Keybind {
         label: KeyLabel::Single(key::SUSPEND.label),
         description: "Suspend process",
@@ -418,44 +324,14 @@ pub const KEYBINDS: &[Keybind] = &[
         platform: Platform::All,
     },
     Keybind {
-        label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
-        description: "Scroll half page up / down",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
         label: KeyLabel::Single(key::LINE_END.label),
         description: "Jump to end of line",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },
     Keybind {
-        label: KeyLabel::Single(key::SCROLL_TOP.label),
-        description: "Scroll to top",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::SCROLL_BOTTOM.label),
-        description: "Scroll to bottom",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::POP_QUEUE.label),
-        description: "Pop queue",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
         label: KeyLabel::Single("Esc Esc"),
         description: "Rewind",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::EDIT_INPUT.label),
-        description: "Edit input in external editor",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },
@@ -548,6 +424,50 @@ pub const KEYBINDS: &[Keybind] = &[
 pub fn all_contexts() -> impl Iterator<Item = KeybindContext> {
     use strum::IntoEnumIterator;
     KeybindContext::iter()
+}
+
+/// Display form of a snapshot keybind's key: `Ctrl+C`, `Alt+O`, `Esc`,
+/// `Enter`, `Shift+Tab`. Used by the help modal to render bindings whose
+/// source is the live `KeymapReader` snapshot rather than the static
+/// `KEYBINDS` table.
+pub fn display_key_label(code: KeyCode, mods: KeyModifiers) -> String {
+    let is_char = matches!(code, KeyCode::Char(_));
+    let mut parts: Vec<String> = Vec::new();
+    if mods.contains(KeyModifiers::CONTROL) {
+        parts.push("Ctrl".to_string());
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        parts.push("Alt".to_string());
+    }
+    if mods.contains(KeyModifiers::SHIFT) && !is_char {
+        parts.push("Shift".to_string());
+    }
+    let name = match code {
+        KeyCode::Char(' ') => "Space".to_string(),
+        KeyCode::Char(c) => c.to_ascii_uppercase().to_string(),
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Esc => "Esc".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::BackTab => {
+            parts.insert(0, "Shift".to_string());
+            "Tab".to_string()
+        }
+        KeyCode::Backspace => "Backspace".to_string(),
+        KeyCode::Delete => "Delete".to_string(),
+        KeyCode::Up => "Up".to_string(),
+        KeyCode::Down => "Down".to_string(),
+        KeyCode::Left => "Left".to_string(),
+        KeyCode::Right => "Right".to_string(),
+        KeyCode::Home => "Home".to_string(),
+        KeyCode::End => "End".to_string(),
+        KeyCode::PageUp => "PageUp".to_string(),
+        KeyCode::PageDown => "PageDown".to_string(),
+        KeyCode::F(n) => format!("F{n}"),
+        KeyCode::Insert => "Insert".to_string(),
+        _ => String::new(),
+    };
+    parts.push(name);
+    parts.join("+")
 }
 
 pub(crate) fn key_event_to_string(key: &KeyEvent) -> String {

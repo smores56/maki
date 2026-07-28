@@ -2375,10 +2375,23 @@ pub(crate) struct LuaThread {
     pub prio_tx: flume::Sender<Request>,
     pub join: Option<JoinHandle<()>>,
     pub shutdown: Arc<AtomicBool>,
+    /// Flipped to `false` by `AliveGuard` when the runtime thread exits.
+    /// Shared with every `EventHandle` clone for `is_alive()` render checks.
+    pub alive: Arc<AtomicBool>,
     pub command_reader: LuaCommandReader,
     pub keymap_reader: KeymapReader,
     pub hint_reader: crate::api::util::command::HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
+}
+
+/// Runs on the runtime thread; flips its `AtomicBool` to `false` on drop
+/// whether the thread returns normally, breaks out of the loop, or
+/// unwinds on panic. Signals `EventHandle::is_alive()` for render paths.
+struct AliveGuard(Arc<AtomicBool>);
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// Lua lives on its own OS thread (no Send needed). `smol::block_on`
@@ -2393,6 +2406,8 @@ pub fn spawn(
     let tx_clone = tx.clone();
     let shutdown: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     let shutdown_thread = Arc::clone(&shutdown);
+    let alive: Arc<AtomicBool> = Arc::new(AtomicBool::new(true));
+    let alive_for_thread = Arc::clone(&alive);
     let (init_tx, init_rx) = flume::bounded::<Result<(), PluginError>>(1);
     let (ui_action_tx, ui_action_rx) = flume::unbounded::<UiAction>();
     let (command_writer, command_reader) = LuaCommandWriter::new();
@@ -2402,6 +2417,7 @@ pub fn spawn(
     let handle = thread::Builder::new()
         .name("maki-lua".to_owned())
         .spawn(move || {
+            let _alive_guard = AliveGuard(Arc::clone(&alive_for_thread));
             let mut rt = match LuaRuntime::new(
                 registry,
                 tx_clone,
@@ -2740,6 +2756,7 @@ pub fn spawn(
         prio_tx,
         join: Some(handle),
         shutdown,
+        alive,
         command_reader,
         keymap_reader,
         hint_reader,

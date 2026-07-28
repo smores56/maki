@@ -59,6 +59,7 @@ a string belongs.
 | [`maki.agent`](#maki-agent) | Subagent primitives for plugins that need to talk to an LLM. |
 | [`maki.agent.Session`](#maki-agent-Session) | A subagent session with its own conversation history. |
 | [`maki.async`](#maki-async) | Tools for running things concurrently in Lua plugins. |
+| [`maki.actions`](#maki-actions) | Closed-set of maki builtin action handles. |
 | [`maki.async.Semaphore`](#maki-async-Semaphore) | A counting semaphore for limiting how many tasks run at once. |
 | [`maki.async.Permit`](#maki-async-Permit) | One slot in a semaphore, obtained from `Semaphore:acquire()`. |
 | [`maki.base64`](#maki-base64) | Base64 encoding and decoding, modelled after `vim.base64`. |
@@ -1088,6 +1089,261 @@ maki.async.on_cancel(function()
 end)
 maki.async.gather(children)
 ```
+
+
+## maki.actions {#maki-actions}
+
+Closed-set of maki builtin action handles. Each field is an opaque userdata: pass it as the third argument to maki.keymap.set to bind a builtin action without a per-keypress Lua callback. Constructed in Rust; cannot be forged from Lua.
+
+---
+
+### `maki.actions.quit()` {#maki-actions-quit}
+
+```lua
+maki.actions.quit()
+```
+
+Quit / clear input
+
+---
+
+### `maki.actions.help()` {#maki-actions-help}
+
+```lua
+maki.actions.help()
+```
+
+Show keybindings
+
+---
+
+### `maki.actions.prev_chat()` {#maki-actions-prev_chat}
+
+```lua
+maki.actions.prev_chat()
+```
+
+Previous task chat
+
+---
+
+### `maki.actions.next_chat()` {#maki-actions-next_chat}
+
+```lua
+maki.actions.next_chat()
+```
+
+Next task chat
+
+---
+
+### `maki.actions.scroll_half_up()` {#maki-actions-scroll_half_up}
+
+```lua
+maki.actions.scroll_half_up()
+```
+
+Scroll half page up
+
+---
+
+### `maki.actions.scroll_half_down()` {#maki-actions-scroll_half_down}
+
+```lua
+maki.actions.scroll_half_down()
+```
+
+Scroll half page down
+
+---
+
+### `maki.actions.scroll_line_up()` {#maki-actions-scroll_line_up}
+
+```lua
+maki.actions.scroll_line_up()
+```
+
+Scroll one line up
+
+---
+
+### `maki.actions.scroll_line_down()` {#maki-actions-scroll_line_down}
+
+```lua
+maki.actions.scroll_line_down()
+```
+
+Scroll one line down
+
+---
+
+### `maki.actions.scroll_top()` {#maki-actions-scroll_top}
+
+```lua
+maki.actions.scroll_top()
+```
+
+Scroll to top
+
+---
+
+### `maki.actions.scroll_bottom()` {#maki-actions-scroll_bottom}
+
+```lua
+maki.actions.scroll_bottom()
+```
+
+Scroll to bottom
+
+---
+
+### `maki.actions.plan_toggle()` {#maki-actions-plan_toggle}
+
+```lua
+maki.actions.plan_toggle()
+```
+
+Toggle plan panel
+
+---
+
+### `maki.actions.tasks()` {#maki-actions-tasks}
+
+```lua
+maki.actions.tasks()
+```
+
+Open tasks
+
+---
+
+### `maki.actions.search()` {#maki-actions-search}
+
+```lua
+maki.actions.search()
+```
+
+Search messages
+
+---
+
+### `maki.actions.file_picker()` {#maki-actions-file_picker}
+
+```lua
+maki.actions.file_picker()
+```
+
+Open file picker
+
+---
+
+### `maki.actions.open_editor()` {#maki-actions-open_editor}
+
+```lua
+maki.actions.open_editor()
+```
+
+Open plan in editor
+
+---
+
+### `maki.actions.edit_input()` {#maki-actions-edit_input}
+
+```lua
+maki.actions.edit_input()
+```
+
+Edit input in editor
+
+---
+
+### `maki.actions.pop_queue()` {#maki-actions-pop_queue}
+
+```lua
+maki.actions.pop_queue()
+```
+
+Pop queued message
+
+---
+
+### `maki.actions.new_session()` {#maki-actions-new_session}
+
+```lua
+maki.actions.new_session()
+```
+
+New session
+
+---
+
+### `maki.actions.compact()` {#maki-actions-compact}
+
+```lua
+maki.actions.compact()
+```
+
+Compact context
+
+---
+
+### `maki.actions.model_picker()` {#maki-actions-model_picker}
+
+```lua
+maki.actions.model_picker()
+```
+
+Open model picker
+
+---
+
+### `maki.actions.theme_picker()` {#maki-actions-theme_picker}
+
+```lua
+maki.actions.theme_picker()
+```
+
+Open theme picker
+
+---
+
+### `maki.actions.mcp_picker()` {#maki-actions-mcp_picker}
+
+```lua
+maki.actions.mcp_picker()
+```
+
+Open MCP picker
+
+---
+
+### `maki.actions.usage()` {#maki-actions-usage}
+
+```lua
+maki.actions.usage()
+```
+
+Open usage modal
+
+---
+
+### `maki.actions.refresh()` {#maki-actions-refresh}
+
+```lua
+maki.actions.refresh()
+```
+
+Refresh focused picker
+
+---
+
+### `maki.actions.reload()` {#maki-actions-reload}
+
+```lua
+maki.actions.reload()
+```
+
+Reload maki
 
 
 ## maki.async.Semaphore {#maki-async-Semaphore}
@@ -2234,17 +2490,21 @@ end, { desc = "Say hello" })
 maki.keymap.set({mode}, {lhs}, {rhs}, {opts?})
 ```
 
-Bind a key to a Lua function, just like `vim.keymap.set`. Only
-normal mode (`"n"`) is supported right now. If {lhs} is already
-mapped, the old binding is replaced and a warning is logged.
+Bind a key to a Lua function or builtin action, just like
+`vim.keymap.set`. Only normal mode (`"n"`) is supported right now.
+If {lhs} is already mapped, the old binding is replaced and a
+warning is logged.
 
 **Parameters:**
 
 - `{mode}` (`string`) Mode letter. Currently only `"n"` is accepted.
 - `{lhs}` (`string`) Key in Vim notation, e.g. `"<C-t>"`, `"<Space>"`, `"a"`.
-- `{rhs}` (`function`) Called when the key is pressed.
+- `{rhs}` (`function|userdata`) Either a Lua function invoked on press, or a `maki.actions.<name>` handle (zero per-keypress Lua traffic).
 - `{opts?}` (`table?`) Options:
   - `desc` (`string`) short description shown in the keymap list.
+  - `context` (`string`) where the binding fires; one of the
+    `KeybindContext` labels (case-sensitive). Defaults to `"General"`,
+    which fires everywhere.
 
 **Example:**
 

@@ -36,6 +36,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/index"),
     },
     BundledPlugin {
+        name: "keymap",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/keymap"),
+    },
+    BundledPlugin {
         name: "webfetch",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/webfetch"),
     },
@@ -412,6 +416,7 @@ impl PluginHost {
         EventHandle {
             tx: self.inner.tx.clone(),
             prio_tx: self.inner.prio_tx.clone(),
+            alive: Arc::clone(&self.inner.alive),
         }
     }
 
@@ -437,19 +442,22 @@ pub struct EventHandle {
     tx: flume::Sender<Request>,
     /// User-initiated requests bypass queued bulk work (session restores).
     prio_tx: flume::Sender<Request>,
+    /// Flipped to `false` by the runtime thread's `AliveGuard` when it
+    /// exits (clean return, loop break, or panic unwind). Render-time
+    /// confidence for `Callback` bindings in the help modal; dispatch does
+    /// not consult it (the `Callback` arm already short-circuits via
+    /// `run_keybind_callback`).
+    alive: Arc<AtomicBool>,
 }
 
 impl EventHandle {
-    pub(crate) fn from_tx(tx: flume::Sender<Request>) -> Self {
-        Self {
-            tx,
-            prio_tx: flume::unbounded().0,
-        }
-    }
-
     #[doc(hidden)]
     pub fn disconnected_for_test() -> Self {
-        Self::from_tx(flume::unbounded().0)
+        Self {
+            tx: flume::unbounded().0,
+            prio_tx: flume::unbounded().0,
+            alive: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// True when no runtime is draining requests. Production handles stay
@@ -469,7 +477,15 @@ impl EventHandle {
         Self {
             tx: shared.clone(),
             prio_tx: shared,
+            alive: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    /// Whether the runtime thread is still running. `false` after the
+    /// thread exits by any path; render-only signal, never consulted by
+    /// dispatch.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
     }
 
     pub fn run_command(&self, plugin: Arc<str>, command: Arc<str>, args: String) {
@@ -672,7 +688,11 @@ mod tests {
     fn run_command_sends_correct_request() {
         let (prio_tx, prio_rx) = flume::bounded(8);
         let (tx, _rx) = flume::bounded(8);
-        let handle = EventHandle { tx, prio_tx };
+        let handle = EventHandle {
+            tx,
+            prio_tx,
+            alive: Arc::new(AtomicBool::new(true)),
+        };
         handle.run_command(Arc::from("myplugin"), Arc::from("/greet"), "world".into());
         let req = prio_rx.try_recv().unwrap();
         match req {
@@ -1218,6 +1238,27 @@ mod tests {
         assert_eq!(
             contents(&slots, PromptId::System, Slot::Identity),
             ["Dyn identity"]
+        );
+    }
+
+    #[test]
+    fn event_handle_is_alive_threads_runtime_lifecycle() {
+        let mut host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        let handle = host.event_handle();
+        assert!(
+            handle.is_alive(),
+            "freshly booted runtime must report alive"
+        );
+        host.begin_shutdown();
+        drop(host);
+
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        while handle.is_alive() && Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            !handle.is_alive(),
+            "runtime thread exited but is_alive still true"
         );
     }
 }
