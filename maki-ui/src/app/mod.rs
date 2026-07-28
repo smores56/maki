@@ -31,7 +31,7 @@ use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission};
-use crate::components::keybindings::key;
+use crate::components::keybindings::{BuiltinAction, KeybindContext, key};
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
@@ -726,9 +726,9 @@ impl App {
         }
 
         if !(self.status == Status::Streaming && is_streaming_stop_key(key))
-            && self.dispatch_override(key)
+            && let Some(actions) = self.dispatch_override(key)
         {
-            return vec![];
+            return actions;
         }
 
         if let Some(actions) = self.handle_ctrl(key) {
@@ -756,17 +756,203 @@ impl App {
         self.handle_main_chat_key(key)
     }
 
-    fn dispatch_override(&self, key: KeyEvent) -> bool {
-        let snap = self.keymap_reader.load();
-        for entry in &snap.entries {
-            if entry.key == key.code
-                && entry.modifiers == key.modifiers
-                && self.lua_event_handle.run_keybind_callback(entry.id)
-            {
-                return true;
-            }
+    fn active_keybind_context(&self) -> KeybindContext {
+        use KeybindContext as C;
+        if self.permission_prompt.is_open() {
+            return C::FormInput;
         }
-        false
+        if self.plan_form_active() {
+            return C::FormInput;
+        }
+        if self.help_modal.is_open() {
+            return C::General;
+        }
+        if self.usage_modal.is_open() {
+            return C::General;
+        }
+        if self.btw_modal.is_open() {
+            return C::General;
+        }
+        if self.float_mgr.is_open() {
+            return C::General;
+        }
+        if self.search_modal.is_open() {
+            return C::Search;
+        }
+        if self.file_picker.is_open() {
+            return C::FilePicker;
+        }
+        if self.queue.focus().is_some() {
+            return C::QueueFocus;
+        }
+        if self.task_picker.is_open() {
+            return C::TaskPicker;
+        }
+        if self.rewind_picker.is_open() {
+            return C::RewindPicker;
+        }
+        if self.theme_picker.is_open() {
+            return C::ThemePicker;
+        }
+        if self.model_picker.is_open() {
+            return C::ModelPicker;
+        }
+        if self.login_picker.is_open() {
+            return C::Picker;
+        }
+        if self.mcp_picker.is_open() {
+            return C::Picker;
+        }
+        if !self.is_main_chat() {
+            return C::General;
+        }
+        if self.status == Status::Streaming {
+            C::Streaming
+        } else {
+            C::Editing
+        }
+    }
+
+    fn dispatch_builtin(&mut self, action: BuiltinAction) -> Vec<Action> {
+        match action {
+            BuiltinAction::Quit => {
+                self.command_palette.close();
+                if !self.is_main_chat() || self.input_box.is_empty() {
+                    if self.status == Status::Streaming {
+                        return self.handle_cancel();
+                    }
+                    self.quit()
+                } else {
+                    self.input_box.discard();
+                    vec![]
+                }
+            }
+            BuiltinAction::Help => {
+                self.help_modal.toggle();
+                vec![]
+            }
+            BuiltinAction::Tasks => {
+                self.open_tasks();
+                vec![]
+            }
+            BuiltinAction::PrevChat => {
+                self.active_chat = self.active_chat.saturating_sub(1);
+                vec![]
+            }
+            BuiltinAction::NextChat => {
+                self.active_chat = (self.active_chat + 1).min(self.chats.len() - 1);
+                vec![]
+            }
+            BuiltinAction::ScrollHalfUp => {
+                let half = self.chats[self.active_chat].half_page();
+                self.active_chat().scroll(half);
+                vec![]
+            }
+            BuiltinAction::ScrollHalfDown => {
+                let half = self.chats[self.active_chat].half_page();
+                self.active_chat().scroll(-half);
+                vec![]
+            }
+            BuiltinAction::ScrollLineUp => {
+                self.active_chat().scroll(1);
+                vec![]
+            }
+            BuiltinAction::ScrollLineDown => {
+                self.active_chat().scroll(-1);
+                vec![]
+            }
+            BuiltinAction::ScrollTop => {
+                self.active_chat().scroll_to_top();
+                vec![]
+            }
+            BuiltinAction::ScrollBottom => {
+                self.active_chat().enable_auto_scroll();
+                vec![]
+            }
+            BuiltinAction::PlanToggle => {
+                if self.state.mode == Mode::Plan && self.state.plan.is_ready() {
+                    self.plan_form.toggle();
+                }
+                vec![]
+            }
+            BuiltinAction::Search => {
+                let top = self.chats[self.active_chat].scroll_top();
+                let auto = self.chats[self.active_chat].auto_scroll();
+                self.search_modal.open(top, auto);
+                vec![]
+            }
+            BuiltinAction::FilePicker => {
+                self.file_picker.open(&self.state.session.cwd);
+                vec![]
+            }
+            BuiltinAction::OpenEditor => match self.state.plan.path() {
+                Some(p) => vec![Action::OpenEditor(p.to_path_buf())],
+                None => {
+                    self.flash(FLASH_NO_PLAN.into());
+                    vec![]
+                }
+            },
+            BuiltinAction::EditInput => vec![Action::EditInputInEditor],
+            BuiltinAction::PopQueue => {
+                self.queue.remove(0);
+                vec![]
+            }
+            BuiltinAction::NewSession => self.reset_session(),
+            BuiltinAction::Compact => {
+                if self.status == Status::Streaming {
+                    self.queue_compact();
+                    return vec![];
+                }
+                self.status = Status::Streaming;
+                vec![Action::Compact]
+            }
+            BuiltinAction::ModelPicker => {
+                self.model_picker.open(&self.state.model.spec());
+                vec![Action::RefreshModels]
+            }
+            BuiltinAction::ThemePicker => {
+                self.theme_picker.open();
+                vec![]
+            }
+            BuiltinAction::McpPicker => {
+                self.mcp_picker.open();
+                vec![]
+            }
+            BuiltinAction::UsageModal => {
+                self.usage_modal.toggle();
+                if self.usage_modal.is_open() {
+                    vec![Action::RefreshUsage]
+                } else {
+                    vec![]
+                }
+            }
+            BuiltinAction::Refresh => vec![Action::RefreshUsage],
+            BuiltinAction::Reload => self.quit_with(ExitRequest::Reload),
+        }
+    }
+
+    fn dispatch_override(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
+        let snap = self.keymap_reader.load();
+        let active = self.active_keybind_context();
+        for entry in snap
+            .entries
+            .iter()
+            .filter(|e| e.key == key.code && e.modifiers == key.modifiers)
+        {
+            if !entry.context.applies_in(active) {
+                continue;
+            }
+            return match entry.kind {
+                maki_lua::EntryKind::Builtin(action) => Some(self.dispatch_builtin(action)),
+                maki_lua::EntryKind::Callback
+                    if self.lua_event_handle.run_keybind_callback(entry.id) =>
+                {
+                    Some(vec![])
+                }
+                _ => continue,
+            };
+        }
+        None
     }
 
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {

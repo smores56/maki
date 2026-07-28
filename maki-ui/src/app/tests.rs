@@ -3158,13 +3158,14 @@ fn install_override(
     key: KeyCode,
     modifiers: KeyModifiers,
 ) -> maki_lua::test_support::RequestProbe {
-    app.keymap_reader = maki_lua::test_support::keymap_reader_with(vec![maki_lua::KeymapEntry {
-        key,
-        modifiers,
-        desc: "plugin override".into(),
-        plugin: Arc::from("test-plugin"),
-        id: 1,
-    }]);
+    app.keymap_reader =
+        maki_lua::test_support::keymap_reader_with(vec![maki_lua::KeymapEntry::callback(
+            key,
+            modifiers,
+            Arc::from("test-plugin"),
+            "plugin override",
+            1,
+        )]);
     let (handle, probe) = maki_lua::test_support::probed_event_handle();
     app.lua_event_handle = handle;
     probe
