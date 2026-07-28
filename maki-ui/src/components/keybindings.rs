@@ -1,6 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fmt::Write;
-use strum::EnumIter;
 use unicode_width::UnicodeWidthStr;
 
 macro_rules! mod_key {
@@ -157,56 +156,7 @@ pub mod key {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
-pub enum KeybindContext {
-    General,
-    Editing,
-    Streaming,
-    Picker,
-    FormInput,
-    TaskPicker,
-    RewindPicker,
-    ThemePicker,
-    ModelPicker,
-    QueueFocus,
-    CommandPalette,
-    Search,
-    FilePicker,
-}
-
-impl KeybindContext {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::General => "General",
-            Self::Editing => "Editing",
-            Self::Streaming => "While Streaming",
-            Self::Picker => "Pickers",
-            Self::FormInput => "Form",
-            Self::TaskPicker => "Task Picker",
-            Self::RewindPicker => "Rewind Picker",
-            Self::ThemePicker => "Theme Picker",
-            Self::ModelPicker => "Model Picker",
-            Self::QueueFocus => "Queue",
-            Self::CommandPalette => "Commands",
-            Self::Search => "Search",
-            Self::FilePicker => "File Picker",
-        }
-    }
-
-    pub const fn parent(self) -> Option<KeybindContext> {
-        match self {
-            Self::TaskPicker
-            | Self::RewindPicker
-            | Self::ThemePicker
-            | Self::ModelPicker
-            | Self::QueueFocus
-            | Self::CommandPalette
-            | Self::Search
-            | Self::FilePicker => Some(Self::Picker),
-            _ => None,
-        }
-    }
-}
+pub use maki_lua::{BuiltinAction, KeybindContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
