@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use flume::Sender;
 use maki_storage::id::SessionRef;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider};
@@ -254,7 +254,7 @@ impl Provider for Mistral {
                         supports_thinking,
                         supports_vision: Some(supports_vision),
                         tier: None,
-                        provider_info: None,
+                        capabilities: Map::new(),
                     })
                 })
                 .await

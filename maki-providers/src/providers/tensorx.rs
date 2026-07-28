@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use flume::Sender;
 use maki_storage::id::SessionRef;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::model::{Model, ModelEntry, ModelInfo, ModelPricing};
 use crate::provider::{BoxFuture, Provider};
@@ -40,6 +40,15 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
 struct TensorXModelInfo {
     has_thinking: bool,
     has_reasoning_effort: bool,
+}
+
+fn tensorx_model_info(params: &[Value]) -> TensorXModelInfo {
+    TensorXModelInfo {
+        has_thinking: params.iter().any(|v| v.as_str() == Some("thinking")),
+        has_reasoning_effort: params
+            .iter()
+            .any(|v| v.as_str() == Some("reasoning_effort")),
+    }
 }
 
 pub struct TensorX {
@@ -96,17 +105,13 @@ impl Provider for TensorX {
                 let guard = crate::model_registry::model_registry().read().unwrap();
                 // Discovery keys by the builtin slug; a dynamic wrap's model
                 // carries its own slug, so don't key by model.provider.
-                let info = guard
+                guard
                     .discovered("tensorx", &model.id)
-                    .and_then(|d| d.provider_info.clone())
-                    .map(|arc| {
-                        Arc::downcast::<TensorXModelInfo>(arc).expect("wrong provider info type")
-                    });
-                if let Some(info) = info {
-                    (info.has_thinking, info.has_reasoning_effort)
-                } else {
-                    (false, false)
-                }
+                    .and_then(|d| d.capabilities.get("supported_openai_params"))
+                    .and_then(Value::as_array)
+                    .map(|params| tensorx_model_info(params))
+                    .map(|info| (info.has_thinking, info.has_reasoning_effort))
+                    .unwrap_or((false, false))
             };
 
             if has_thinking {
@@ -199,15 +204,15 @@ impl Provider for TensorX {
 
                             let supported_params = info
                                 .get("supported_openai_params")
-                                .and_then(Value::as_array)
-                                .map(|params| TensorXModelInfo {
-                                    has_thinking: params
-                                        .iter()
-                                        .any(|v| v.as_str() == Some("thinking")),
-                                    has_reasoning_effort: params
-                                        .iter()
-                                        .any(|v| v.as_str() == Some("reasoning_effort")),
-                                });
+                                .and_then(Value::as_array);
+
+                            let mut capabilities = Map::new();
+                            if let Some(params) = supported_params {
+                                capabilities.insert(
+                                    "supported_openai_params".to_string(),
+                                    Value::Array(params.clone()),
+                                );
+                            }
 
                             Some(ModelInfo {
                                 id: id.to_string(),
@@ -217,8 +222,7 @@ impl Provider for TensorX {
                                 supports_thinking,
                                 supports_vision: Some(supports_vision),
                                 tier: None,
-                                provider_info: supported_params
-                                    .map(|p| Arc::new(p) as Arc<dyn std::any::Any + Send + Sync>),
+                                capabilities,
                             })
                         })
                         .collect()

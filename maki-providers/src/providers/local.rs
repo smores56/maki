@@ -4,7 +4,7 @@ use flume::Sender;
 use futures::future::join_all;
 use maki_storage::id::SessionRef;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tracing::warn;
 
 use maki_config::providers::Protocol;
@@ -309,7 +309,7 @@ impl LocalEndpoint {
                     supports_thinking: None,
                     supports_vision,
                     tier: None,
-                    provider_info: None,
+                    capabilities: Map::new(),
                 })
             })
             .collect();
@@ -418,7 +418,7 @@ impl LocalEndpoint {
                 supports_thinking: None,
                 supports_vision: None,
                 tier: None,
-                provider_info: None,
+                capabilities: Map::new(),
             })
             .collect();
         models.sort_by(|a, b| a.id.cmp(&b.id));

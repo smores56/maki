@@ -269,6 +269,7 @@ fn write_overrides(path: &Path, overrides: &BTreeMap<ModelTier, String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
     use tempfile::TempDir;
     use test_case::test_case;
 
@@ -443,7 +444,7 @@ mod tests {
                     supports_thinking: None,
                     supports_vision: None,
                     tier: None,
-                    provider_info: None,
+                    capabilities: Map::new(),
                 },
                 ModelInfo {
                     id: "model-b".into(),
@@ -453,7 +454,7 @@ mod tests {
                     supports_thinking: None,
                     supports_vision: None,
                     tier: None,
-                    provider_info: None,
+                    capabilities: Map::new(),
                 },
             ],
         );

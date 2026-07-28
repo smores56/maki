@@ -4,7 +4,7 @@ use flume::Sender;
 use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tracing::{debug, warn};
 
 use super::ResolvedAuth;
@@ -256,7 +256,7 @@ impl OpenAiCompatProvider {
             supports_thinking: None,
             supports_vision: None,
             tier: None,
-            provider_info: None,
+            capabilities: Map::new(),
         })
     }
 

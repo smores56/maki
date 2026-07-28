@@ -3,7 +3,6 @@
 //! so dated snapshots resolve without registry churn. `context_tokens()` sums input + output
 //! + cache reads/writes because the context window limit applies to all of them combined.
 
-use std::any::Any;
 use std::fmt;
 use std::ops::AddAssign;
 use std::str::FromStr;
@@ -11,6 +10,7 @@ use std::sync::Arc;
 
 use maki_storage::sessions::{MIN_THINKING_BUDGET, StoredTokenUsage};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::manifest::{ManifestRegistry, ProviderManifest};
 use crate::model_registry::model_registry;
@@ -56,8 +56,7 @@ pub struct ModelInfo {
     pub supports_thinking: Option<bool>,
     pub supports_vision: Option<bool>,
     pub tier: Option<ModelTier>,
-    /// Store of additional metadata from the provider.
-    pub provider_info: Option<Arc<dyn Any + Send + Sync>>,
+    pub capabilities: Map<String, Value>,
 }
 
 impl ModelInfo {
@@ -70,7 +69,7 @@ impl ModelInfo {
             supports_thinking: None,
             supports_vision: None,
             tier: None,
-            provider_info: None,
+            capabilities: Map::new(),
         }
     }
 }
@@ -892,7 +891,7 @@ mod tests {
                     supports_thinking: None,
                     supports_vision: None,
                     tier: None,
-                    provider_info: None,
+                    capabilities: Map::new(),
                 }],
             );
         }

@@ -18,7 +18,7 @@ use flume::Sender;
 use isahc::config::Configurable;
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
 use maki_config::providers::builtin_provider;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tracing::{debug, warn};
 
 use maki_storage::StateDir;
@@ -196,7 +196,7 @@ impl ProviderData {
                     supports_thinking: Some(meta.supports_thinking),
                     supports_vision: Some(meta.supports_vision),
                     tier: None,
-                    provider_info: None,
+                    capabilities: Map::new(),
                 })
             })
             .collect();
@@ -756,7 +756,7 @@ impl Provider for CatalogProvider {
                     supports_thinking: Some(meta.supports_thinking),
                     supports_vision: Some(meta.supports_vision),
                     tier: None,
-                    provider_info: None,
+                    capabilities: Map::new(),
                 })
                 .collect())
         })

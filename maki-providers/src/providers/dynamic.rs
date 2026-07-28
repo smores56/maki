@@ -10,7 +10,7 @@ use maki_config::providers::ProvidersConfig;
 use maki_storage::StateDir;
 use maki_storage::id::SessionRef;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use strum::IntoEnumIterator;
 use tracing::{debug, warn};
 
@@ -652,7 +652,7 @@ impl Provider for DynamicProvider {
                     supports_thinking: None,
                     supports_vision: m.supports_vision,
                     tier: None,
-                    provider_info: None,
+                    capabilities: Map::new(),
                 })
                 .collect())
         })
