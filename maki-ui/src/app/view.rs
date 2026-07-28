@@ -260,7 +260,8 @@ impl App {
             overlay_rect = r;
         }
         let snap = self.keymap_reader.load();
-        let r = self.help_modal.view(frame, full, &snap);
+        let lua_alive = self.lua_event_handle.is_alive();
+        let r = self.help_modal.view(frame, full, &snap, lua_alive);
         if r.width > 0 {
             overlay_rect = r;
         }
