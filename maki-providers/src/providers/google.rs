@@ -46,10 +46,10 @@ inventory::submit!(crate::builtin::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &["gemini-2.5-pro"],
+            prefixes: vec!["gemini-2.5-pro".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Gemini,
             vision: true,
@@ -65,7 +65,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_048_576,
         },
         ModelEntry {
-            prefixes: &["gemini-2.5-flash"],
+            prefixes: vec!["gemini-2.5-flash".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Gemini,
             vision: true,
@@ -81,7 +81,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_048_576,
         },
         ModelEntry {
-            prefixes: &["gemini-2.0-flash-lite"],
+            prefixes: vec!["gemini-2.0-flash-lite".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Gemini,
             vision: true,

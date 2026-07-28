@@ -1,10 +1,10 @@
 pub mod builtin;
 pub(crate) mod error;
-pub mod manifest;
 pub mod model;
 pub mod model_registry;
 pub mod provider;
 pub(crate) mod providers;
+pub mod registry;
 pub mod retry;
 pub(crate) mod types;
 
@@ -27,6 +27,7 @@ pub use providers::catalog::{
 pub use providers::copilot::auth as copilot_auth;
 pub use providers::dynamic;
 pub use providers::openai::auth as openai_auth;
+pub use registry::{ProviderSpec, Source, all, clear_owner, get, register};
 pub use types::{
     ContentBlock, Effort, EffortDialect, IMAGE_OMITTED_NOTE, ImageMediaType, ImageSource, Message,
     MessageKind, ProviderEvent, ProviderUsage, RequestOptions, Role, StopReason, StreamResponse,

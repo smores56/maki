@@ -32,8 +32,8 @@ inventory::submit!(crate::builtin::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[]
+pub fn models() -> Vec<ModelEntry> {
+    Vec::new()
 }
 
 #[derive(Debug)]

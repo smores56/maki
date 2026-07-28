@@ -379,10 +379,10 @@ impl EventParser {
     }
 }
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    const MODELS: &[ModelEntry] = &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &["claude-haiku-4-5"],
+            prefixes: vec!["claude-haiku-4-5".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Claude,
             vision: true,
@@ -398,7 +398,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-sonnet-4-5"],
+            prefixes: vec!["claude-sonnet-4-5".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Claude,
             vision: true,
@@ -414,7 +414,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-sonnet-4-6"],
+            prefixes: vec!["claude-sonnet-4-6".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Claude,
             vision: true,
@@ -430,7 +430,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-sonnet-5"],
+            prefixes: vec!["claude-sonnet-5".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Claude,
             vision: true,
@@ -447,7 +447,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-sonnet-4"],
+            prefixes: vec!["claude-sonnet-4".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Claude,
             vision: true,
@@ -463,7 +463,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-opus-4-5"],
+            prefixes: vec!["claude-opus-4-5".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Claude,
             vision: true,
@@ -479,7 +479,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-opus-4-6"],
+            prefixes: vec!["claude-opus-4-6".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Claude,
             vision: true,
@@ -496,7 +496,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-opus-4-7"],
+            prefixes: vec!["claude-opus-4-7".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Claude,
             vision: true,
@@ -513,7 +513,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-opus-4-8"],
+            prefixes: vec!["claude-opus-4-8".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Claude,
             vision: true,
@@ -532,7 +532,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-opus-5"],
+            prefixes: vec!["claude-opus-5".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Claude,
             vision: true,
@@ -551,7 +551,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-fable-5"],
+            prefixes: vec!["claude-fable-5".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Claude,
             vision: true,
@@ -567,7 +567,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-opus-4-0", "claude-opus-4-1"],
+            prefixes: vec!["claude-opus-4-0".to_string(), "claude-opus-4-1".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Claude,
             vision: true,
@@ -582,8 +582,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             max_output_tokens: Some(32000),
             context_window: 200_000,
         },
-    ];
-    MODELS
+    ]
 }
 
 #[cfg(test)]

@@ -51,13 +51,13 @@ inventory::submit!(crate::builtin::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &[
-                "mistral-medium-latest",
-                "mistral-medium-3.5",
-                "mistral-medium-2604",
+            prefixes: vec![
+                "mistral-medium-latest".to_string(),
+                "mistral-medium-3.5".to_string(),
+                "mistral-medium-2604".to_string(),
             ],
             tier: ModelTier::Strong,
             family: ModelFamily::Generic,
@@ -74,7 +74,10 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 262_144,
         },
         ModelEntry {
-            prefixes: &["mistral-small-latest", "mistral-small-2603"],
+            prefixes: vec![
+                "mistral-small-latest".to_string(),
+                "mistral-small-2603".to_string(),
+            ],
             tier: ModelTier::Medium,
             family: ModelFamily::Generic,
             vision: true,
@@ -90,7 +93,10 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 262_144,
         },
         ModelEntry {
-            prefixes: &["ministral-14b-latest", "ministral-14b-2512"],
+            prefixes: vec![
+                "ministral-14b-latest".to_string(),
+                "ministral-14b-2512".to_string(),
+            ],
             tier: ModelTier::Weak,
             family: ModelFamily::Generic,
             vision: false,

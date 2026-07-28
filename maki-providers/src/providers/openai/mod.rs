@@ -21,10 +21,10 @@ inventory::submit!(crate::builtin::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &["gpt-5.6-luna"],
+            prefixes: vec!["gpt-5.6-luna".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Gpt,
             vision: true,
@@ -40,7 +40,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: GPT_5_6_CONTEXT_WINDOW,
         },
         ModelEntry {
-            prefixes: &["gpt-5.6-terra"],
+            prefixes: vec!["gpt-5.6-terra".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Gpt,
             vision: true,
@@ -56,7 +56,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: GPT_5_6_CONTEXT_WINDOW,
         },
         ModelEntry {
-            prefixes: &["gpt-5.6-sol"],
+            prefixes: vec!["gpt-5.6-sol".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Gpt,
             vision: true,
@@ -72,7 +72,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: GPT_5_6_CONTEXT_WINDOW,
         },
         ModelEntry {
-            prefixes: &["gpt-5.4-nano"],
+            prefixes: vec!["gpt-5.4-nano".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Gpt,
             vision: true,
@@ -88,7 +88,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 400_000,
         },
         ModelEntry {
-            prefixes: &["gpt-5.4-mini"],
+            prefixes: vec!["gpt-5.4-mini".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Gpt,
             vision: true,
@@ -104,7 +104,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 400_000,
         },
         ModelEntry {
-            prefixes: &["gpt-4.1-nano"],
+            prefixes: vec!["gpt-4.1-nano".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Gpt,
             vision: true,
@@ -120,7 +120,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_047_576,
         },
         ModelEntry {
-            prefixes: &["gpt-4.1-mini"],
+            prefixes: vec!["gpt-4.1-mini".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Gpt,
             vision: true,
@@ -136,7 +136,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_047_576,
         },
         ModelEntry {
-            prefixes: &["gpt-4.1"],
+            prefixes: vec!["gpt-4.1".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Gpt,
             vision: true,
@@ -152,7 +152,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_047_576,
         },
         ModelEntry {
-            prefixes: &["o4-mini"],
+            prefixes: vec!["o4-mini".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Gpt,
             vision: true,
@@ -168,7 +168,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["gpt-5.5"],
+            prefixes: vec!["gpt-5.5".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Gpt,
             vision: true,
@@ -184,7 +184,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_050_000,
         },
         ModelEntry {
-            prefixes: &["gpt-5.4"],
+            prefixes: vec!["gpt-5.4".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Gpt,
             vision: true,
@@ -200,7 +200,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_050_000,
         },
         ModelEntry {
-            prefixes: &["o3"],
+            prefixes: vec!["o3".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Gpt,
             vision: true,
@@ -216,7 +216,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["gpt-5.3-codex"],
+            prefixes: vec!["gpt-5.3-codex".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Gpt,
             vision: true,
@@ -232,7 +232,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 400_000,
         },
         ModelEntry {
-            prefixes: &["gpt-5.2-codex"],
+            prefixes: vec!["gpt-5.2-codex".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Gpt,
             vision: true,
@@ -248,7 +248,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 400_000,
         },
         ModelEntry {
-            prefixes: &["gpt-5.1-codex-mini"],
+            prefixes: vec!["gpt-5.1-codex-mini".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Gpt,
             vision: true,
@@ -264,7 +264,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 400_000,
         },
         ModelEntry {
-            prefixes: &["gpt-5.1-codex-max"],
+            prefixes: vec!["gpt-5.1-codex-max".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Gpt,
             vision: true,
@@ -280,7 +280,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 400_000,
         },
         ModelEntry {
-            prefixes: &["gpt-5.1-codex"],
+            prefixes: vec!["gpt-5.1-codex".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Gpt,
             vision: true,
@@ -315,9 +315,10 @@ mod tests {
         cache_write: f64,
         output: f64,
     ) {
-        let model = models()
+        let models = models();
+        let model = models
             .iter()
-            .find(|model| model.prefixes.contains(&model_id))
+            .find(|model| model.prefixes.iter().any(|p| p == model_id))
             .expect("GPT-5.6 model should be registered");
 
         assert_eq!(model.tier, tier);

@@ -41,10 +41,10 @@ inventory::submit!(crate::builtin::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &["deepseek-v4-flash"],
+            prefixes: vec!["deepseek-v4-flash".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Generic,
             vision: false,
@@ -60,7 +60,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_000_000,
         },
         ModelEntry {
-            prefixes: &["deepseek-v4-pro"],
+            prefixes: vec!["deepseek-v4-pro".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Generic,
             vision: false,

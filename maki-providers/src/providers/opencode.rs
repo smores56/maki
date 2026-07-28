@@ -1,14 +1,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::builtin::builtin_provider;
 use flume::Sender;
 use isahc::{HttpClient, Request};
 use maki_storage::id::SessionRef;
 use serde_json::{Value, json};
 use tracing::debug;
 
-use crate::model::{Model, ModelInfo};
+use crate::model::{Model, ModelEntry, ModelInfo};
 use crate::provider::{BoxFuture, Provider};
 use crate::providers::anthropic::shared;
 use crate::providers::catalog::{
@@ -21,6 +20,10 @@ use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, 
 use super::{ResolvedAuth, user_agent, with_prefix};
 
 const MESSAGES_PATH: &str = "/messages";
+
+pub fn models() -> Vec<ModelEntry> {
+    Vec::new()
+}
 
 static CATALOG_CHAT_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     slug: "opencode",

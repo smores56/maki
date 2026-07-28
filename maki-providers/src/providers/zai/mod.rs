@@ -111,10 +111,10 @@ inventory::submit!(BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &["glm-5-code"],
+            prefixes: vec!["glm-5-code".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Glm,
             vision: false,
@@ -130,7 +130,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["glm-5.2"],
+            prefixes: vec!["glm-5.2".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Glm,
             vision: false,
@@ -146,7 +146,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_000_000,
         },
         ModelEntry {
-            prefixes: &["glm-5.1", "glm-5"],
+            prefixes: vec!["glm-5.1".to_string(), "glm-5".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Glm,
             vision: false,
@@ -162,7 +162,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["glm-4.7-flash"],
+            prefixes: vec!["glm-4.7-flash".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Glm,
             vision: false,
@@ -178,7 +178,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["glm-4.7", "glm-4.6"],
+            prefixes: vec!["glm-4.7".to_string(), "glm-4.6".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Glm,
             vision: false,
@@ -194,7 +194,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["glm-4.5-flash"],
+            prefixes: vec!["glm-4.5-flash".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Glm,
             vision: false,
@@ -210,7 +210,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 131_072,
         },
         ModelEntry {
-            prefixes: &["glm-4.5-air"],
+            prefixes: vec!["glm-4.5-air".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Glm,
             vision: false,
@@ -226,7 +226,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 131_072,
         },
         ModelEntry {
-            prefixes: &["glm-4.5"],
+            prefixes: vec!["glm-4.5".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Glm,
             vision: false,

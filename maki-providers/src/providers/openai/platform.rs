@@ -236,7 +236,7 @@ impl Provider for OpenAi {
                     .iter()
                     .flat_map(|e| e.prefixes.iter())
                     .filter(|id| is_codex_model(id))
-                    .map(|&s| crate::model::ModelInfo::id_only(s.to_string()))
+                    .map(|s| crate::model::ModelInfo::id_only(s.clone()))
                     .collect();
                 return Ok(models);
             }

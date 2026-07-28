@@ -10,10 +10,10 @@ use maki_storage::id::SessionRef;
 use super::ResolvedAuth;
 use super::openai::responses;
 use super::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
-use crate::manifest::ManifestRegistry;
 use crate::model::{FastPricing, Model, ModelPricing, ModelTier};
-use crate::provider::{BoxFuture, Provider, ProviderKind};
+use crate::provider::{BoxFuture, Provider};
 use crate::providers::Timeouts;
+use crate::registry::{self, ProviderSpec};
 use crate::types::ThinkingConfig;
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse};
 
@@ -28,24 +28,28 @@ static CUSTOM_OPENAI_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "custom",
 };
 
-fn protocol_kind(protocol: Protocol) -> ProviderKind {
-    match protocol {
-        Protocol::Openai | Protocol::OpenaiResponses => ProviderKind::OpenAi,
-        Protocol::Anthropic => ProviderKind::Anthropic,
-        Protocol::Google => ProviderKind::Google,
-    }
+/// Maps a custom provider's declared protocol to the builtin spec it inherits
+/// its model catalog and fallbacks from. Returns `None` for a protocol with no
+/// builtin base.
+fn protocol_spec(protocol: Protocol) -> Option<Arc<ProviderSpec>> {
+    let slug = match protocol {
+        Protocol::Openai | Protocol::OpenaiResponses => "openai",
+        Protocol::Anthropic => "anthropic",
+        Protocol::Google => "google",
+    };
+    registry::get(slug)
 }
 
 /// Builtins win their slug in `from_spec`/`create`, so every custom path skips
-/// them. Key off the manifest (all 13 builtins), not `builtin_provider`, which
+/// them. Keys off the registry (all 13 builtins), not `builtin_provider`, which
 /// omits `openrouter`/`opencode` and would let them shadow the builtin.
 fn is_builtin_slug(slug: &str) -> bool {
-    ManifestRegistry::get(slug).is_some()
+    registry::get(slug).is_some()
 }
 
-pub fn base_kind(slug: &str) -> Option<ProviderKind> {
+pub fn base_kind(slug: &str) -> Option<Arc<ProviderSpec>> {
     let config = ProvidersConfig::load();
-    Some(protocol_kind(config.get(slug)?.protocol?))
+    protocol_spec(config.get(slug)?.protocol?)
 }
 
 fn resolve_custom_auth(slug: &str) -> Result<ResolvedAuth, AgentError> {
@@ -65,7 +69,7 @@ fn resolve_custom_auth(slug: &str) -> Result<ResolvedAuth, AgentError> {
 }
 
 pub fn create(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
-    let kind = base_kind(slug).ok_or_else(|| AgentError::Config {
+    let base = base_kind(slug).ok_or_else(|| AgentError::Config {
         message: format!("unknown custom provider '{slug}'"),
     })?;
     let resolved = resolve_custom_auth(slug)?;
@@ -74,19 +78,19 @@ pub fn create(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, Agent
     let config = ProvidersConfig::load();
     let protocol = resolve_protocol(slug, config.get(slug)).unwrap_or(Protocol::Openai);
 
-    match kind {
-        ProviderKind::Anthropic => Ok(Box::new(super::anthropic::Anthropic::with_auth(
+    match base.slug.as_ref() {
+        "anthropic" => Ok(Box::new(super::anthropic::Anthropic::with_auth(
             auth, timeouts,
         ))),
-        ProviderKind::OpenAi => Ok(Box::new(CustomOpenAiProvider {
+        "openai" => Ok(Box::new(CustomOpenAiProvider {
             compat: OpenAiCompatProvider::new(&CUSTOM_OPENAI_CONFIG, timeouts),
             auth,
             protocol,
         })),
-        ProviderKind::Google => Ok(Box::new(super::google::Google::with_auth(auth, timeouts))),
-        _ => Err(AgentError::Config {
+        "google" => Ok(Box::new(super::google::Google::with_auth(auth, timeouts))),
+        other => Err(AgentError::Config {
             message: format!(
-                "unsupported protocol for custom provider '{slug}', only openai/anthropic/google are supported"
+                "unsupported base '{other}' for custom provider '{slug}', only openai/anthropic/google are supported"
             ),
         }),
     }
@@ -98,27 +102,27 @@ pub fn lookup_model(slug: &str, model_id: &str) -> Option<Model> {
     }
     let config = ProvidersConfig::load();
     let def = config.get(slug)?;
-    let kind = protocol_kind(def.protocol?);
-    Some(model_from_def(def, kind, slug, model_id))
+    let base = protocol_spec(def.protocol?)?;
+    Some(model_from_def(def, &base, slug, model_id))
 }
 
 /// Build a model from an already-loaded provider definition so tier resolution
 /// and id lookup can share one `providers.toml` read instead of loading twice.
-fn model_from_def(def: &ProviderDef, kind: ProviderKind, slug: &str, model_id: &str) -> Model {
+fn model_from_def(def: &ProviderDef, base: &ProviderSpec, slug: &str, model_id: &str) -> Model {
     let declared = def.models.iter().find(|m| m.id == model_id);
     let tier = declared
         .map(|m| ModelTier::from(m.tier))
         .unwrap_or(ModelTier::Medium);
     let max_output_tokens = declared
         .and_then(|m| m.max_output_tokens)
-        .or_else(|| kind.fallback_max_output());
+        .or(base.fallback_max_output);
     let context_window = declared
         .and_then(|m| m.context_window)
-        .unwrap_or_else(|| kind.fallback_context_window());
+        .unwrap_or(base.fallback_context_window);
     let supports_tool_examples_override = declared.and_then(|m| m.supports_tool_examples);
     let supports_thinking_override = declared
         .and_then(|m| m.supports_thinking)
-        .or_else(|| ManifestRegistry::get(&kind.to_string()).map(|m| m.supports_thinking));
+        .or(Some(base.supports_thinking));
     let supports_vision_override = declared.and_then(|m| m.supports_vision);
     let pricing = declared
         .filter(|m| m.has_pricing())
@@ -139,7 +143,7 @@ fn model_from_def(def: &ProviderDef, kind: ProviderKind, slug: &str, model_id: &
         id: model_id.to_string(),
         provider: Arc::from(slug),
         tier,
-        family: kind.family(),
+        family: base.family,
         supports_tool_examples_override,
         supports_thinking_override,
         supports_vision_override,
@@ -173,9 +177,9 @@ fn declared_specs_from(config: &ProvidersConfig) -> Vec<String> {
 /// Outcome of resolving a tier against `providers.toml` in a single read.
 pub enum TierLookup {
     Model(Model),
-    /// Provider exists but declares no model at this tier; carries the base kind
+    /// Provider exists but declares no model at this tier; carries the base spec
     /// so the caller can inherit the base protocol's default.
-    NoModelForTier(ProviderKind),
+    NoModelForTier(Arc<ProviderSpec>),
     Unknown,
 }
 
@@ -192,10 +196,12 @@ pub fn resolve_tier(slug: &str, tier: ModelTier) -> TierLookup {
     let Some(protocol) = def.protocol else {
         return TierLookup::Unknown;
     };
-    let kind = protocol_kind(protocol);
+    let Some(base) = protocol_spec(protocol) else {
+        return TierLookup::Unknown;
+    };
     match def.models.iter().find(|m| ModelTier::from(m.tier) == tier) {
-        Some(declared) => TierLookup::Model(model_from_def(def, kind, slug, &declared.id)),
-        None => TierLookup::NoModelForTier(kind),
+        Some(declared) => TierLookup::Model(model_from_def(def, &base, slug, &declared.id)),
+        None => TierLookup::NoModelForTier(base),
     }
 }
 

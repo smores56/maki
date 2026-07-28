@@ -43,10 +43,14 @@ const RESPONSES_PATH: &str = "/responses";
 const MESSAGES_PATH: &str = "/v1/messages";
 const MODELS_PATH: &str = "/models";
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &["gpt-5-mini", "gpt-5 mini", "claude-haiku-4.5"],
+            prefixes: vec![
+                "gpt-5-mini".to_string(),
+                "gpt-5 mini".to_string(),
+                "claude-haiku-4.5".to_string(),
+            ],
             tier: ModelTier::Weak,
             family: ModelFamily::Generic,
             vision: true,
@@ -56,7 +60,11 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["gpt-5.2", "gpt-4.1", "claude-sonnet-4.5"],
+            prefixes: vec![
+                "gpt-5.2".to_string(),
+                "gpt-4.1".to_string(),
+                "claude-sonnet-4.5".to_string(),
+            ],
             tier: ModelTier::Medium,
             family: ModelFamily::Generic,
             vision: true,
@@ -66,11 +74,11 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &[
-                "gpt-5.4",
-                "gpt-5.3-codex",
-                "claude-opus-4.6",
-                "grok-code-fast-1",
+            prefixes: vec![
+                "gpt-5.4".to_string(),
+                "gpt-5.3-codex".to_string(),
+                "claude-opus-4.6".to_string(),
+                "grok-code-fast-1".to_string(),
             ],
             tier: ModelTier::Strong,
             family: ModelFamily::Generic,
@@ -81,7 +89,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-opus-4.7"],
+            prefixes: vec!["claude-opus-4.7".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Generic,
             vision: true,

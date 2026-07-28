@@ -1,8 +1,6 @@
-use maki_providers::manifest::ManifestRegistry;
 use maki_providers::model::{ModelEntry, ModelTier};
-use maki_providers::provider::ProviderKind;
+use maki_providers::registry::{self, ProviderSpec};
 use std::fmt::Write;
-use strum::IntoEnumIterator;
 
 const FRONT_MATTER: &str = r#"+++
 title = "Providers"
@@ -88,7 +86,7 @@ If the model name is unique across providers, the prefix can be omitted."#;
 fn providers_toml_section() -> String {
     let mut plan_rows = String::new();
     let mut plan_examples = String::new();
-    let mut builtins: Vec<_> = maki_config::providers::all_builtins();
+    let mut builtins: Vec<_> = maki_providers::all_builtins();
     builtins.sort_by_key(|b| b.slug);
     let mut wrote_example = false;
     for b in builtins {
@@ -222,7 +220,10 @@ You can also create a custom provider interactively with `maki auth login` and c
 }
 
 fn dynamic_providers_section() -> String {
-    let valid_values: Vec<String> = ProviderKind::iter().map(|k| format!("`{k}`")).collect();
+    let valid_values: Vec<String> = registry::all()
+        .iter()
+        .map(|s| format!("`{}`", s.slug))
+        .collect();
 
     format!(
         r#"## Dynamic Providers
@@ -284,78 +285,74 @@ fn format_context(entry: &ModelEntry) -> String {
 }
 
 struct ProviderSection {
-    kind: ProviderKind,
-    name: &'static str,
+    slug: String,
+    name: String,
     auth_line: String,
-    urls: Vec<&'static str>,
-    features: Option<&'static str>,
-    entries: &'static [ModelEntry],
+    urls: Vec<String>,
+    features: Option<String>,
+    entries: Vec<ModelEntry>,
 }
 
-fn format_auth(kind: ProviderKind) -> String {
-    let env = kind.api_key_env();
-    if kind == ProviderKind::Ollama {
+fn format_auth(spec: &ProviderSpec) -> String {
+    let env = &spec.api_key_env;
+    if spec.slug.as_ref() == "ollama" {
         format!("`OLLAMA_HOST` for local/remote (e.g. `http://localhost:11434`), `{env}` for auth")
     } else {
         format!("`{env}`")
     }
 }
 
+/// Display URLs for the docs. Separate from `ProviderSpec::base_url` (the
+/// runtime origin the provider appends paths to) because the docs show the
+/// full endpoint a user would recognize, e.g. Anthropic's `/v1/messages`.
+fn doc_urls(spec: &ProviderSpec) -> Vec<String> {
+    match spec.slug.as_ref() {
+        "anthropic" => vec!["https://api.anthropic.com/v1/messages".to_string()],
+        "openai" => vec!["https://api.openai.com/v1".to_string()],
+        "google" => vec!["https://generativelanguage.googleapis.com/v1beta".to_string()],
+        "copilot" => vec![
+            "https://api.githubcopilot.com (or GraphQL-discovered Copilot API endpoint)"
+                .to_string(),
+        ],
+        "ollama" => vec!["http://localhost:11434/v1".to_string()],
+        "llama-cpp" => vec!["http://localhost:8080/v1".to_string()],
+        "mistral" => vec!["https://api.mistral.ai/v1".to_string()],
+        "zai" => vec![
+            "https://api.z.ai/api/paas/v4".to_string(),
+            "https://api.z.ai/api/coding/paas/v4".to_string(),
+        ],
+        "deepseek" => vec!["https://api.deepseek.com".to_string()],
+        "openrouter" => vec!["https://openrouter.ai/api/v1".to_string()],
+        "synthetic" => vec!["https://api.synthetic.new/openai/v1".to_string()],
+        "tensorx" => vec!["https://api.tensorx.ai/v1".to_string()],
+        "opencode" => vec!["https://opencode.ai/zen/v1".to_string()],
+        _ => spec.base_url.clone().into_iter().collect(),
+    }
+}
+
 fn build_sections() -> Vec<ProviderSection> {
     let mut sections = Vec::new();
 
-    for kind in ProviderKind::iter() {
-        match kind {
-            ProviderKind::Zai => {
-                sections.push(ProviderSection {
-                    kind: ProviderKind::Zai,
-                    name: "Z.AI",
-                    auth_line: format!(
-                        "{} (shared across both endpoints)",
-                        format_auth(ProviderKind::Zai)
-                    ),
-                    urls: vec![
-                        ProviderKind::Zai.base_url(),
-                        "https://api.z.ai/api/coding/paas/v4",
-                    ],
-                    features: ProviderKind::Zai.features(),
-                    entries: ManifestRegistry::get("zai").unwrap().models,
-                });
-            }
-            ProviderKind::OpenAi => {
-                sections.push(ProviderSection {
-                    kind,
-                    name: kind.display_name(),
-                    auth_line: format!("{} (also supports OAuth device flow)", format_auth(kind)),
-                    urls: vec![kind.base_url()],
-                    features: kind.features(),
-                    entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
-                });
-            }
-            ProviderKind::Copilot => {
-                sections.push(ProviderSection {
-                    kind,
-                    name: kind.display_name(),
-                    auth_line: format!(
-                        "{} (or run `maki auth login copilot` to import a token from gh)",
-                        format_auth(kind)
-                    ),
-                    urls: vec![kind.base_url()],
-                    features: kind.features(),
-                    entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
-                });
-            }
-            _ => {
-                sections.push(ProviderSection {
-                    kind,
-                    name: kind.display_name(),
-                    auth_line: format_auth(kind),
-                    urls: vec![kind.base_url()],
-                    features: kind.features(),
-                    entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
-                });
-            }
-        }
+    for spec in registry::all() {
+        let slug = spec.slug.as_ref();
+        let urls = doc_urls(&spec);
+        let auth_line = match slug {
+            "zai" => format!("{} (shared across both endpoints)", format_auth(&spec)),
+            "openai" => format!("{} (also supports OAuth device flow)", format_auth(&spec)),
+            "copilot" => format!(
+                "{} (or run `maki auth login copilot` to import a token from gh)",
+                format_auth(&spec)
+            ),
+            _ => format_auth(&spec),
+        };
+        sections.push(ProviderSection {
+            slug: slug.to_string(),
+            name: spec.display_name.clone(),
+            auth_line,
+            urls,
+            features: spec.features.clone(),
+            entries: spec.models.clone(),
+        });
     }
 
     sections
@@ -397,7 +394,7 @@ fn write_model_table(out: &mut String, entries: &[ModelEntry]) {
         .map(|e| {
             format!(
                 "{} ({})",
-                e.prefixes.first().unwrap_or(&"?"),
+                e.prefixes.first().map(String::as_str).unwrap_or("?"),
                 tier_label(e.tier).to_lowercase(),
             )
         })
@@ -409,19 +406,19 @@ fn write_model_table(out: &mut String, entries: &[ModelEntry]) {
     }
 }
 
-fn no_catalog_note(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Ollama => {
+fn no_catalog_note(slug: &str) -> &'static str {
+    match slug {
+        "ollama" => {
             "This provider talks the OpenAI-compatible `/v1` API, so it also works with \
              llama.cpp's server, LocalAI, or anything else that speaks the same protocol. \
              Just point `OLLAMA_HOST` to the right address \
              (e.g. `http://localhost:8080` for llama.cpp)."
         }
-        ProviderKind::LlamaCpp => {
+        "llama-cpp" => {
             "Connects to any OpenAI-compatible `/v1` endpoint. Point `LLAMA_CPP_HOST` \
              to your server address (defaults to `http://localhost:8080`)."
         }
-        ProviderKind::OpenRouter => {
+        "openrouter" => {
             "OpenRouter aggregates models from many providers behind a single API key. \
              Browse available models at [openrouter.ai/models](https://openrouter.ai/models). \
              Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`)."
@@ -443,16 +440,16 @@ fn write_section(out: &mut String, section: &ProviderSection) {
         }
     }
 
-    if let Some(features) = section.features {
+    if let Some(features) = &section.features {
         let _ = writeln!(out, "- **Features**: {features}");
     }
 
     let _ = writeln!(out);
 
     if section.entries.is_empty() {
-        let _ = writeln!(out, "{}", no_catalog_note(section.kind));
+        let _ = writeln!(out, "{}", no_catalog_note(&section.slug));
     } else {
-        write_model_table(out, section.entries);
+        write_model_table(out, &section.entries);
     }
 
     if section.name == "Anthropic" {
@@ -460,7 +457,7 @@ fn write_section(out: &mut String, section: &ProviderSection) {
         let _ = writeln!(out, "\n{BEDROCK_NOTE}");
     }
 
-    if section.kind == ProviderKind::Opencode {
+    if section.slug == "opencode" {
         let _ = writeln!(out, "\n{OPENCODE_FREE_MODELS_NOTE}");
     }
 }

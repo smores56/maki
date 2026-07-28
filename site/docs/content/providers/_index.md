@@ -1,6 +1,6 @@
 +++
 title = "Providers"
-weight = 7
+weight = 5
 [extra]
 group = "Reference"
 +++
@@ -78,6 +78,77 @@ You will need `AWS_REGION` and one of the following for auth:
 
 You can override the model with `ANTHROPIC_MODEL` and the endpoint with `ANTHROPIC_BEDROCK_BASE_URL`. These env var names match Claude Code, so if you were already using Bedrock there, the same setup works here.
 
+### Copilot
+
+- **Env var**: `GH_COPILOT_TOKEN` (or run `maki auth login copilot` to import a token from gh)
+- **API**: `https://api.githubcopilot.com (or GraphQL-discovered Copilot API endpoint)`
+- **Features**: Native Copilot Chat HTTP API with model endpoint discovery
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Weak | **gpt-5-mini, gpt-5 mini, claude-haiku-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
+| Medium | **gpt-5.2, gpt-4.1, claude-sonnet-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
+| Strong | **gpt-5.4, gpt-5.3-codex, claude-opus-4.6, grok-code-fast-1** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
+| Strong | claude-opus-4.7 | $0.00 / $0.00 | 264K ctx / 64K out |
+
+Defaults: gpt-5-mini (weak), gpt-5.2 (medium), gpt-5.4 (strong)
+
+### DeepSeek
+
+- **Env var**: `DEEPSEEK_API_KEY`
+- **API**: `https://api.deepseek.com`
+- **Features**: Thinking mode toggle (on/off), open-weight models
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Medium | **deepseek-v4-flash** (default) | $0.14 / $0.28 | 1000K ctx / 384K out |
+| Strong | **deepseek-v4-pro** (default) | $0.43 / $0.87 | 1000K ctx / 384K out |
+
+Defaults: deepseek-v4-flash (medium), deepseek-v4-pro (strong)
+
+### Google
+
+- **Env var**: `GEMINI_API_KEY`
+- **API**: `https://generativelanguage.googleapis.com/v1beta`
+- **Features**: Native Gemini API with thinking support
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Weak | **gemini-2.0-flash-lite** (default) | $0.07 / $0.30 | 1048K ctx / 65K out |
+| Medium | **gemini-2.5-flash** (default) | $0.15 / $0.60 | 1048K ctx / 65K out |
+| Strong | **gemini-2.5-pro** (default) | $1.25 / $5.00 | 1048K ctx / 65K out |
+
+Defaults: gemini-2.5-pro (strong), gemini-2.5-flash (medium), gemini-2.0-flash-lite (weak)
+
+### LlamaCpp
+
+- **Env var**: `LLAMA_CPP_API_KEY`
+- **API**: `http://localhost:8080/v1`
+- **Features**: Local or remote inference via LLAMA_CPP_HOST, set optional key via LLAMA_CPP_API_KEY
+
+Connects to any OpenAI-compatible `/v1` endpoint. Point `LLAMA_CPP_HOST` to your server address (defaults to `http://localhost:8080`).
+
+### Mistral
+
+- **Env var**: `MISTRAL_API_KEY`
+- **API**: `https://api.mistral.ai/v1`
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Weak | **ministral-14b-latest, ministral-14b-2512** (default) | $0.20 / $0.20 | 262K ctx / 262K out |
+| Medium | **mistral-small-latest, mistral-small-2603** (default) | $0.15 / $0.60 | 262K ctx / 262K out |
+| Strong | **mistral-medium-latest, mistral-medium-3.5, mistral-medium-2604** (default) | $1.50 / $7.50 | 262K ctx / 262K out |
+
+Defaults: mistral-medium-latest (strong), mistral-small-latest (medium), ministral-14b-latest (weak)
+
+### Ollama
+
+- **Env var**: `OLLAMA_HOST` for local/remote (e.g. `http://localhost:11434`), `OLLAMA_API_KEY` for auth
+- **API**: `http://localhost:11434/v1`
+- **Features**: Local or remote inference via OLLAMA_HOST, cloud fallback via OLLAMA_API_KEY
+
+This provider talks the OpenAI-compatible `/v1` API, so it also works with llama.cpp's server, LocalAI, or anything else that speaks the same protocol. Just point `OLLAMA_HOST` to the right address (e.g. `http://localhost:8080` for llama.cpp).
+
 ### OpenAI
 
 - **Env var**: `OPENAI_API_KEY` (also supports OAuth device flow)
@@ -105,96 +176,22 @@ You can override the model with `ANTHROPIC_MODEL` and the endpoint with `ANTHROP
 
 Defaults: gpt-5.6-luna (weak), gpt-5.6-terra (medium), gpt-5.6-sol (strong)
 
-### Google
+### Opencode
 
-- **Env var**: `GEMINI_API_KEY`
-- **API**: `https://generativelanguage.googleapis.com/v1beta`
-- **Features**: Native Gemini API with thinking support
+- **Env var**: `OPENCODE_API_KEY`
+- **API**: `https://opencode.ai/zen/v1`
+- **Features**: Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Zen API
 
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Weak | **gemini-2.0-flash-lite** (default) | $0.07 / $0.30 | 1048K ctx / 65K out |
-| Medium | **gemini-2.5-flash** (default) | $0.15 / $0.60 | 1048K ctx / 65K out |
-| Strong | **gemini-2.5-pro** (default) | $1.25 / $5.00 | 1048K ctx / 65K out |
+No hardcoded model catalog. Use any model ID supported by this provider.
 
-Defaults: gemini-2.5-pro (strong), gemini-2.5-flash (medium), gemini-2.0-flash-lite (weak)
+By default Maki hides free models from the Opencode catalog. To list free models (they use a public fallback, no API key needed), add this to `~/.config/maki/providers.toml`:
 
-### Copilot
+```toml
+[opencode]
+enable_free_models = true
+```
 
-- **Env var**: `GH_COPILOT_TOKEN` (or run `maki auth login copilot` to import a token from gh)
-- **API**: `https://api.githubcopilot.com (or GraphQL-discovered Copilot API endpoint)`
-- **Features**: Native Copilot Chat HTTP API with model endpoint discovery
-
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Weak | **gpt-5-mini, gpt-5 mini, claude-haiku-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
-| Medium | **gpt-5.2, gpt-4.1, claude-sonnet-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
-| Strong | **gpt-5.4, gpt-5.3-codex, claude-opus-4.6, grok-code-fast-1** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
-| Strong | claude-opus-4.7 | $0.00 / $0.00 | 264K ctx / 64K out |
-
-Defaults: gpt-5-mini (weak), gpt-5.2 (medium), gpt-5.4 (strong)
-
-### Ollama
-
-- **Env var**: `OLLAMA_HOST` for local/remote (e.g. `http://localhost:11434`), `OLLAMA_API_KEY` for auth
-- **API**: `http://localhost:11434/v1`
-- **Features**: Local or remote inference via OLLAMA_HOST, cloud fallback via OLLAMA_API_KEY
-
-This provider talks the OpenAI-compatible `/v1` API, so it also works with llama.cpp's server, LocalAI, or anything else that speaks the same protocol. Just point `OLLAMA_HOST` to the right address (e.g. `http://localhost:8080` for llama.cpp).
-
-### LlamaCpp
-
-- **Env var**: `LLAMA_CPP_API_KEY`
-- **API**: `http://localhost:8080/v1`
-- **Features**: Local or remote inference via LLAMA_CPP_HOST, set optional key via LLAMA_CPP_API_KEY
-
-Connects to any OpenAI-compatible `/v1` endpoint. Point `LLAMA_CPP_HOST` to your server address (defaults to `http://localhost:8080`).
-
-### Mistral
-
-- **Env var**: `MISTRAL_API_KEY`
-- **API**: `https://api.mistral.ai/v1`
-
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Weak | **ministral-14b-latest, ministral-14b-2512** (default) | $0.20 / $0.20 | 262K ctx |
-| Medium | **mistral-small-latest, mistral-small-2603** (default) | $0.15 / $0.60 | 262K ctx |
-| Strong | **mistral-medium-latest, mistral-medium-3.5, mistral-medium-2604** (default) | $1.50 / $7.50 | 262K ctx |
-
-Defaults: mistral-medium-latest (strong), mistral-small-latest (medium), ministral-14b-latest (weak)
-
-### Z.AI
-
-- **Env var**: `ZHIPU_API_KEY` (shared across both endpoints)
-- **API endpoints**:
-  - `https://api.z.ai/api/paas/v4`
-  - `https://api.z.ai/api/coding/paas/v4`
-
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Weak | **glm-4.7-flash** (default) | $0.00 / $0.00 | 200K ctx / 131K out |
-| Weak | glm-4.5-flash | $0.00 / $0.00 | 131K ctx / 98K out |
-| Weak | glm-4.5-air | $0.20 / $1.10 | 131K ctx / 98K out |
-| Medium | **glm-4.7, glm-4.6** (default) | $0.60 / $2.20 | 200K ctx / 131K out |
-| Medium | glm-4.5 | $0.60 / $2.20 | 131K ctx / 98K out |
-| Strong | **glm-5-code** (default) | $1.20 / $5.00 | 200K ctx / 131K out |
-| Strong | glm-5.2 | $1.00 / $3.20 | 1000K ctx / 131K out |
-| Strong | glm-5.1, glm-5 | $1.00 / $3.20 | 200K ctx / 131K out |
-
-Defaults: glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
-
-### DeepSeek
-
-- **Env var**: `DEEPSEEK_API_KEY`
-- **API**: `https://api.deepseek.com`
-- **Features**: Thinking mode toggle (on/off), open-weight models
-
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Medium | **deepseek-v4-flash** (default) | $0.14 / $0.28 | 1000K ctx / 384K out |
-| Strong | **deepseek-v4-pro** (default) | $0.43 / $0.87 | 1000K ctx / 384K out |
-
-Defaults: deepseek-v4-flash (medium), deepseek-v4-pro (strong)
+The default is `false`.
 
 ### OpenRouter
 
@@ -226,31 +223,25 @@ Defaults: hf:moonshotai/Kimi-K2.5 (strong), hf:deepseek-ai/DeepSeek-V3.2 (medium
 
 No hardcoded model catalog. Use any model ID supported by this provider.
 
-### Opencode Zen
+### Z.AI
 
-- **Env var**: `OPENCODE_API_KEY`
-- **API**: `https://opencode.ai/zen/v1`
-- **Features**: Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Zen API
+- **Env var**: `ZHIPU_API_KEY` (shared across both endpoints)
+- **API endpoints**:
+  - `https://api.z.ai/api/paas/v4`
+  - `https://api.z.ai/api/coding/paas/v4`
 
-No hardcoded model catalog. Use any model ID supported by this provider.
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Weak | **glm-4.7-flash** (default) | $0.00 / $0.00 | 200K ctx / 131K out |
+| Weak | glm-4.5-flash | $0.00 / $0.00 | 131K ctx / 98K out |
+| Weak | glm-4.5-air | $0.20 / $1.10 | 131K ctx / 98K out |
+| Medium | **glm-4.7, glm-4.6** (default) | $0.60 / $2.20 | 200K ctx / 131K out |
+| Medium | glm-4.5 | $0.60 / $2.20 | 131K ctx / 98K out |
+| Strong | **glm-5-code** (default) | $1.20 / $5.00 | 200K ctx / 131K out |
+| Strong | glm-5.2 | $1.00 / $3.20 | 1000K ctx / 131K out |
+| Strong | glm-5.1, glm-5 | $1.00 / $3.20 | 200K ctx / 131K out |
 
-By default Maki hides free models from the Opencode catalog. To list free models (they use a public fallback, no API key needed), add this to `~/.config/maki/providers.toml`:
-
-```toml
-[opencode]
-enable_free_models = true
-```
-
-The default is `false`.
-
-### Opencode Go
-
-- **Env var**: `OPENCODE_API_KEY`
-- **API**: `https://opencode.ai/zen/go/v1`
-- **Features**: Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Go API
-
-No hardcoded model catalog. Use any model ID supported by this provider. An API key is required.
-
+Defaults: glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
 
 ## Model Identifiers
 
@@ -264,104 +255,9 @@ zai/glm-4.7
 
 If the model name is unique across providers, the prefix can be omitted.
 
-## providers.toml
-
-`providers.toml` lives in the config directory (`~/.config/maki/providers.toml` on Linux/macOS, `%APPDATA%\maki\providers.toml` on Windows). It is the file for provider overrides and custom HTTP providers. Two jobs:
-
-1. Tweak a built-in (pick a plan, change its base URL, set `enable_free_models` for Opencode).
-2. Declare a custom provider that speaks OpenAI, Anthropic, or Google wire format.
-
-```toml
-# Point a built-in at a proxy. Env vars still win over this file.
-[anthropic]
-base_url = "https://my-proxy.internal"
-
-# Full custom provider. Slug becomes the `provider/` prefix in model specs.
-[my-proxy]
-display_name = "My Proxy"
-protocol = "openai"            # openai | openai-responses | anthropic | google
-base_url = "https://llm.example.com/v1"
-api_key_env = "MY_PROXY_API_KEY"
-default_model = "my-proxy/fast-v1"
-discover_models = true         # also list models via the provider's /models endpoint
-
-[[my-proxy.models]]
-id = "fast-v1"
-tier = "weak"
-context_window = 128000
-max_output_tokens = 16384
-pricing_input = 0.5
-pricing_output = 1.5
-
-[[my-proxy.models]]
-id = "smart-v1"
-tier = "strong"
-context_window = 200000
-max_output_tokens = 32000
-supports_thinking = true
-supports_vision = false
-```
-
-### Provider fields
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `display_name` | string | Shown in pickers and auth status |
-| `protocol` | string | `openai`, `openai-responses`, `anthropic`, or `google`. Required for custom slugs |
-| `base_url` | string | Origin of the API. Maki appends the protocol paths |
-| `plan` | string | Built-in plan key (see Plans below). Sets base URL and default model |
-| `api_key_env` | string | Env var that holds the key. Defaults to `<SLUG>_API_KEY` |
-| `api_key` | string | Inline key (prefer the env var or `maki auth login`) |
-| `default_model` | string | Used after login when no model is saved yet |
-| `discover_models` | bool | When true, also probe the provider's model list endpoint (default false) |
-| `enable_free_models` | bool | Opencode only. Show free catalog models (default false) |
-| `models` | array | Declared models for custom providers (see below) |
-
-### Model fields
-
-| Field | Type | Default | Notes |
-|-------|------|---------|-------|
-| `id` | string | required | Model id. Spec becomes `{slug}/{id}` |
-| `tier` | string | `medium` | `weak`, `medium`, `strong`, or `compaction` |
-| `context_window` | u32 | protocol default | Tokens of context |
-| `max_output_tokens` | u32 | protocol default | Max completion tokens |
-| `supports_tool_examples` | bool | protocol default | |
-| `supports_thinking` | bool | protocol default | |
-| `supports_vision` | bool | protocol default | When false, image input and `view_image` are off |
-| `pricing_input` / `pricing_output` | f64 | 0 | USD per 1M tokens |
-| `pricing_cache_write` / `pricing_cache_read` | f64 | 0 | USD per 1M tokens |
-| `pricing_fast_input` / `pricing_fast_output` | f64 | unset | Fast-mode pricing when the provider supports it |
-
-Custom slugs must not reuse a built-in provider name. A bad TOML parse exits with code 2 at startup so a typo cannot silently empty the registry.
-
-You can also create a custom provider interactively with `maki auth login` and choosing the custom option. That writes a starter entry to this file.
-
-### Plans
-
-Some built-ins ship multiple plans (different base URLs or default models). `maki auth login <provider>` asks which plan to use when more than one exists. You can also set it in TOML:
-
-```toml
-[mistral]
-plan = "coding"
-
-[zai]
-plan = "coding"
-```
-
-Current plans:
-
-| Provider | Plan | What it does |
-|----------|------|--------------|
-| Mistral | `standard` | Standard at `https://api.mistral.ai/v1`, default `mistral/mistral-medium-latest` |
-| Mistral | `coding` | Vibe / Coding at `https://api.mistral.ai/v1`, default `mistral/mistral-vibe-cli-latest` |
-| Z.AI | `standard` | Pay-as-you-go at `https://api.z.ai/api/paas/v4`, default `zai/glm-5.1` |
-| Z.AI | `coding` | Coding plan at `https://api.z.ai/api/coding/paas/v4`, default `zai/glm-5-code` |
-
-Env `<SLUG>_BASE_URL` still wins over both the plan and a `base_url` in this file.
-
 ## Dynamic Providers
 
-To add a custom provider or proxy, drop an executable script into the config `providers/` directory (`~/.config/maki/providers/` on Linux/macOS, `%APPDATA%\maki\providers\` on Windows). The script must handle these subcommands:
+To add a custom provider or proxy, drop an executable script into `~/.config/maki/providers/`. The script must handle these subcommands:
 
 | Subcommand | Timeout | What it does |
 |------------|---------|--------|
@@ -374,7 +270,7 @@ To add a custom provider or proxy, drop an executable script into the config `pr
 
 `resolve` is called each time a new agent spawns, so scripts should read tokens from disk instead of caching them in memory. That way auth changes from other processes get picked up.
 
-The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `zai`, `deepseek`, `openrouter`, `synthetic`, `tensorx`, `opencode`.
+The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `copilot`, `deepseek`, `google`, `llama-cpp`, `mistral`, `ollama`, `openai`, `opencode`, `openrouter`, `synthetic`, `tensorx`, `zai`.
 
 If your provider serves models not in the base catalog, add a `models` subcommand returning:
 
