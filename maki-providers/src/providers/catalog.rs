@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use crate::builtin::builtin_provider;
 use flume::Sender;
 use isahc::config::Configurable;
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
-use crate::builtin::builtin_provider;
 use serde_json::Value;
 use tracing::{debug, warn};
 

@@ -1,14 +1,14 @@
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 use maki_config::providers::Protocol;
 use tracing::warn;
 
 use crate::AgentError;
-use crate::builtin::{ProviderPlan, builtin_provider};
+use crate::auth::{AuthSpec, BuildOptions};
+use crate::builtin::builtin_provider;
 use crate::model::{ModelEntry, ModelFamily};
 use crate::provider::Provider;
-use crate::providers::Timeouts;
 use crate::providers::anthropic::Anthropic;
 use crate::providers::anthropic::bedrock;
 use crate::providers::copilot::Copilot;
@@ -45,7 +45,9 @@ pub enum Source {
 /// A spec's constructor. Resolves auth/bedrock at BUILD time (inside the fn),
 /// never at spec-construction time, because the registry's `LazyLock` is not
 /// reentrant — a `spec()`-time lookup would recurse into `builtin_specs`.
-pub type BuildFn = fn(&Arc<ProviderSpec>, Timeouts) -> Result<Box<dyn Provider>, AgentError>;
+/// `BuildOptions` carries pre-resolved `auth` + `system_prefix` for script and
+/// toml-produced specs; builtins ignore them and go through `KeyPool::resolve`.
+pub type BuildFn = fn(&Arc<ProviderSpec>, BuildOptions) -> Result<Box<dyn Provider>, AgentError>;
 
 pub struct ProviderSpec {
     pub slug: Arc<str>,
@@ -56,10 +58,7 @@ pub struct ProviderSpec {
     pub protocol: Protocol,
     pub base_url: Option<String>,
     pub default_model: Option<String>,
-    pub api_key_env: String,
-    pub plans: Option<&'static [(&'static str, ProviderPlan)]>,
-    pub login_url: Option<String>,
-    pub needs_url: bool,
+    pub auth: AuthSpec,
     pub supports_thinking: bool,
     pub accepts_arbitrary_models: bool,
     pub fallback_max_output: Option<u32>,
@@ -87,12 +86,34 @@ impl ProviderSpec {
 pub static REGISTRY: LazyLock<RwLock<HashMap<Arc<str>, Arc<ProviderSpec>>>> =
     LazyLock::new(|| RwLock::new(builtin_specs()));
 
+/// Lazily registers providers.toml custom specs the first time the registry is
+/// read. Runs after the `LazyLock` is populated, so it can write `REGISTRY`
+/// without reentering `builtin_specs`. Script specs register themselves via
+/// `dynamic::discover` on first read.
+static EXTRA_REGISTERED: OnceLock<()> = OnceLock::new();
+
+fn ensure_extra_registered() {
+    EXTRA_REGISTERED.get_or_init(|| {
+        crate::providers::custom::ensure_registered();
+    });
+}
+
 pub fn get(slug: &str) -> Option<Arc<ProviderSpec>> {
+    ensure_extra_registered();
+    REGISTRY.read().unwrap().get(slug).cloned()
+}
+
+/// Reads the registry WITHOUT triggering `ensure_extra_registered`. Used during
+/// custom spec registration (which itself runs inside `ensure_extra_registered`)
+/// to check whether a slug already belongs to a builtin — reentering
+/// `ensure_extra_registered` there would deadlock the `OnceLock`.
+pub(crate) fn get_no_extra(slug: &str) -> Option<Arc<ProviderSpec>> {
     REGISTRY.read().unwrap().get(slug).cloned()
 }
 
 /// All registered specs, sorted by slug for docgen determinism.
 pub fn all() -> Vec<Arc<ProviderSpec>> {
+    ensure_extra_registered();
     let guard = REGISTRY.read().unwrap();
     let mut specs: Vec<Arc<ProviderSpec>> = guard.values().cloned().collect();
     specs.sort_by(|a, b| a.slug.cmp(&b.slug));
@@ -127,97 +148,166 @@ pub fn clear_owner(owner: &str) {
 
 fn build_anthropic(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
+    if let Some(auth) = opts.auth {
+        return Ok(Box::new(
+            Anthropic::with_auth(auth, opts.timeouts).with_system_prefix(opts.system_prefix),
+        ));
+    }
     if bedrock::is_enabled() {
-        Ok(Box::new(bedrock::Bedrock::new(timeouts)?))
+        Ok(Box::new(bedrock::Bedrock::new(opts.timeouts)?))
     } else {
-        Ok(Box::new(Anthropic::new(timeouts)?))
+        Ok(Box::new(Anthropic::new(opts.timeouts)?))
     }
 }
 
 fn build_openai(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(OpenAi::new(timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => OpenAi::with_auth(auth, opts.timeouts).with_system_prefix(opts.system_prefix),
+        None => OpenAi::new(opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_google(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(Google::new(timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => Google::with_auth(auth, opts.timeouts),
+        None => Google::new(opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_copilot(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(Copilot::new(timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => {
+            Copilot::with_auth(auth, opts.timeouts).with_system_prefix(opts.system_prefix)
+        }
+        None => Copilot::new(opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_ollama(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(LocalEndpoint::new(&OLLAMA, timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => LocalEndpoint::with_auth(&OLLAMA, auth, opts.timeouts)
+            .with_system_prefix(opts.system_prefix),
+        None => LocalEndpoint::new(&OLLAMA, opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_llama_cpp(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(LocalEndpoint::new(&LLAMACPP, timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => LocalEndpoint::with_auth(&LLAMACPP, auth, opts.timeouts)
+            .with_system_prefix(opts.system_prefix),
+        None => LocalEndpoint::new(&LLAMACPP, opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_mistral(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(Mistral::new(timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => {
+            Mistral::with_auth(auth, opts.timeouts).with_system_prefix(opts.system_prefix)
+        }
+        None => Mistral::new(opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_zai(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(Zai::new(timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => Zai::with_auth(auth, opts.timeouts).with_system_prefix(opts.system_prefix),
+        None => Zai::new(opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_deepseek(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(DeepSeek::new(timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => {
+            DeepSeek::with_auth(auth, opts.timeouts).with_system_prefix(opts.system_prefix)
+        }
+        None => DeepSeek::new(opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_openrouter(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(OpenRouter::new(timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => {
+            OpenRouter::with_auth(auth, opts.timeouts).with_system_prefix(opts.system_prefix)
+        }
+        None => OpenRouter::new(opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_synthetic(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(Synthetic::new(timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => {
+            Synthetic::with_auth(auth, opts.timeouts).with_system_prefix(opts.system_prefix)
+        }
+        None => Synthetic::new(opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_tensorx(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(TensorX::new(timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => {
+            TensorX::with_auth(auth, opts.timeouts).with_system_prefix(opts.system_prefix)
+        }
+        None => TensorX::new(opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 fn build_opencode(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    Ok(Box::new(Opencode::new(timeouts)?))
+    let provider = match opts.auth {
+        Some(auth) => {
+            Opencode::with_auth(auth, opts.timeouts).with_system_prefix(opts.system_prefix)
+        }
+        None => Opencode::new(opts.timeouts)?,
+    };
+    Ok(Box::new(provider))
 }
 
 /// `opencode-go` streams through the models.dev catalog as a sibling of
@@ -225,9 +315,9 @@ fn build_opencode(
 /// cold, in which case [`catalog::try_create`] returns a lazy provider).
 fn build_opencode_go(
     _spec: &Arc<ProviderSpec>,
-    timeouts: Timeouts,
+    opts: BuildOptions,
 ) -> Result<Box<dyn Provider>, AgentError> {
-    match crate::providers::catalog::try_create("opencode-go", timeouts) {
+    match crate::providers::catalog::try_create("opencode-go", opts.timeouts) {
         Some(result) => result,
         None => Err(AgentError::Config {
             message: "opencode-go catalog provider unavailable".to_string(),
@@ -449,6 +539,8 @@ struct OmitData {
     protocol: Protocol,
     base_url: &'static str,
     api_key_env: &'static str,
+    login_url: Option<&'static str>,
+    needs_url: bool,
 }
 
 fn omit_for(slug: &str) -> Option<OmitData> {
@@ -457,47 +549,55 @@ fn omit_for(slug: &str) -> Option<OmitData> {
             protocol: Protocol::Openai,
             base_url: "https://openrouter.ai/api/v1",
             api_key_env: "OPENROUTER_API_KEY",
+            login_url: None,
+            needs_url: false,
         },
         "opencode" => OmitData {
             protocol: Protocol::Openai,
             base_url: "https://opencode.ai/zen/v1",
             api_key_env: "OPENCODE_API_KEY",
+            login_url: None,
+            needs_url: false,
         },
         "opencode-go" => OmitData {
             protocol: Protocol::Openai,
             base_url: "https://opencode.ai/zen/go/v1",
             api_key_env: "OPENCODE_API_KEY",
+            login_url: None,
+            needs_url: false,
         },
         _ => return None,
     })
 }
 
 fn builtin_spec(b: &'static BuiltinSpec) -> ProviderSpec {
-    let (protocol, base_url, default_model, api_key_env, plans, login_url, needs_url) =
-        match builtin_provider(b.slug) {
-            Some(bp) => (
-                bp.protocol,
-                Some(bp.default_base_url.to_string()),
-                Some(bp.default_model.to_string()),
-                bp.default_api_key_env.to_string(),
-                bp.plans,
-                bp.login_url.map(String::from),
-                bp.needs_url,
-            ),
-            None => {
-                let omit =
-                    omit_for(b.slug).expect("builtin without inventory entry must be listed");
-                (
-                    omit.protocol,
-                    Some(omit.base_url.to_string()),
-                    None,
-                    omit.api_key_env.to_string(),
-                    None,
-                    None,
-                    false,
-                )
-            }
-        };
+    let (protocol, base_url, default_model, auth) = match builtin_provider(b.slug) {
+        Some(bp) => (
+            bp.protocol,
+            Some(bp.default_base_url.to_string()),
+            Some(bp.default_model.to_string()),
+            AuthSpec::ApiKey {
+                env: bp.default_api_key_env.to_string(),
+                login_url: bp.login_url.map(String::from),
+                needs_url: bp.needs_url,
+                plans: bp.plans,
+            },
+        ),
+        None => {
+            let omit = omit_for(b.slug).expect("builtin without inventory entry must be listed");
+            (
+                omit.protocol,
+                Some(omit.base_url.to_string()),
+                None,
+                AuthSpec::ApiKey {
+                    env: omit.api_key_env.to_string(),
+                    login_url: omit.login_url.map(String::from),
+                    needs_url: omit.needs_url,
+                    plans: None,
+                },
+            )
+        }
+    };
     ProviderSpec {
         slug: Arc::from(b.slug),
         owner: None,
@@ -507,10 +607,7 @@ fn builtin_spec(b: &'static BuiltinSpec) -> ProviderSpec {
         protocol,
         base_url,
         default_model,
-        api_key_env,
-        plans,
-        login_url,
-        needs_url,
+        auth,
         supports_thinking: b.supports_thinking,
         accepts_arbitrary_models: b.accepts_arbitrary_models,
         fallback_max_output: b.fallback_max_output,
@@ -551,10 +648,12 @@ mod tests {
             protocol: Protocol::Openai,
             base_url: None,
             default_model: None,
-            api_key_env: String::new(),
-            plans: None,
-            login_url: None,
-            needs_url: false,
+            auth: AuthSpec::ApiKey {
+                env: String::new(),
+                login_url: None,
+                needs_url: false,
+                plans: None,
+            },
             supports_thinking: false,
             accepts_arbitrary_models: false,
             fallback_max_output: None,

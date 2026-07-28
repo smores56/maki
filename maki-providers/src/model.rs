@@ -13,7 +13,7 @@ use maki_storage::sessions::{MIN_THINKING_BUDGET, StoredTokenUsage};
 use serde::{Deserialize, Serialize};
 
 use crate::model_registry::model_registry;
-use crate::providers::{anthropic, custom, dynamic};
+use crate::providers::{anthropic, dynamic};
 use crate::registry::{self, ProviderSpec};
 
 const PER_MILLION: f64 = 1_000_000.0;
@@ -112,7 +112,7 @@ pub enum ModelFamily {
     Synthetic,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelTier {
     Weak,
@@ -184,14 +184,12 @@ pub(crate) fn lookup_entry<'a>(
         .ok_or_else(|| ModelError::UnknownModel(model_id.to_string()))
 }
 
-/// Resolves a slug to its builtin [`ProviderSpec`], following dynamic and
-/// custom (providers.toml) bases so capability lookups still work for stubs
-/// that declare no models. `None` for an unknown slug, so callers pick a
-/// fallback instead of silently inheriting a zeroed spec.
+/// Resolves a slug to its builtin [`ProviderSpec`]. Custom and script specs
+/// are registered in the registry, so a single lookup covers them too.
+/// `None` for an unknown slug, so callers pick a fallback instead of silently
+/// inheriting a zeroed spec.
 fn for_slug(slug: &str) -> Option<Arc<ProviderSpec>> {
     registry::get(slug)
-        .or_else(|| dynamic::base_for_slug(slug))
-        .or_else(|| custom::base_kind(slug))
 }
 
 fn find_default_for_tier(slug: &str, tier: ModelTier) -> Option<ModelEntry> {
@@ -399,25 +397,7 @@ impl Model {
         if let Some(model) = dynamic::find_model_for_tier(slug, tier) {
             return Ok(model);
         }
-        // One providers.toml read, three answers: a model declared at this tier,
-        // the provider exists but declares nothing here (inherit the base
-        // protocol default under the custom slug, keeping its tier and pricing),
-        // or no such provider.
-        match custom::resolve_tier(slug, tier) {
-            custom::TierLookup::Model(model) => return Ok(model),
-            custom::TierLookup::NoModelForTier(base) => {
-                let entry = base
-                    .models
-                    .iter()
-                    .find(|e| e.default && e.tier == tier)
-                    .ok_or_else(|| ModelError::NoDefault(slug.to_string(), tier))?;
-                return Ok(Self::from_base(&base, slug, &entry.prefixes[0]));
-            }
-            custom::TierLookup::Unknown => {}
-        }
-        // Builtin or dynamic slug: resolve the base default under the slug
-        // (dynamic slugs route through `base_for_slug`).
-        if registry::get(slug).is_some() || dynamic::base_for_slug(slug).is_some() {
+        if registry::get(slug).is_some() {
             return Self::from_tier(slug, tier);
         }
         Err(ModelError::UnsupportedProvider(slug.to_string()))
@@ -426,10 +406,9 @@ impl Model {
     pub fn from_spec(spec: &str) -> Result<Self, ModelError> {
         let (slug, model_id) = spec.split_once('/').ok_or(ModelError::InvalidFormat)?;
 
-        // Precedence: builtin, then dynamic script, then providers.toml custom,
-        // then models.dev catalogue sub-provider.
-        // Discovery drops any script slug a builtin or custom entry already owns,
-        // so a script and a custom provider can never share a slug here.
+        // Precedence: builtin (registry covers custom + script specs too), then
+        // dynamic script lookup, then a dynamic slug's base builtin, then the
+        // models.dev catalogue sub-provider.
         if let Some(resolved) = registry::get(slug) {
             return Ok(Self::from_base(&resolved, slug, model_id));
         }
@@ -440,10 +419,6 @@ impl Model {
 
         if let Some(base) = dynamic::base_for_slug(slug) {
             return Ok(Self::from_base(&base, slug, model_id));
-        }
-
-        if let Some(model) = custom::lookup_model(slug, model_id) {
-            return Ok(model);
         }
 
         if let Some(meta) = crate::providers::catalog::model_meta_if_available(slug, model_id) {

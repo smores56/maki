@@ -1,3 +1,4 @@
+use maki_providers::AuthSpec;
 use maki_providers::model::{ModelEntry, ModelTier};
 use maki_providers::registry::{self, ProviderSpec};
 use std::fmt::Write;
@@ -294,7 +295,10 @@ struct ProviderSection {
 }
 
 fn format_auth(spec: &ProviderSpec) -> String {
-    let env = &spec.api_key_env;
+    let env = match &spec.auth {
+        AuthSpec::ApiKey { env, .. } => env,
+        AuthSpec::External(_) => "",
+    };
     if spec.slug.as_ref() == "ollama" {
         format!("`OLLAMA_HOST` for local/remote (e.g. `http://localhost:11434`), `{env}` for auth")
     } else {
@@ -484,8 +488,8 @@ pub fn generate() -> String {
         let _ = writeln!(out);
     }
 
-    // Opencode Go is catalog-backed (no ProviderKind), so it gets a static
-    // section right after Opencode Zen, which is the last built-in section.
+    // Opencode Go is catalog-backed, so it gets a static section right after
+    // Opencode Zen, which is the last built-in section.
     let _ = writeln!(out, "{OPENCODE_GO_SECTION}\n");
 
     let _ = writeln!(out, "{MODEL_IDENTIFIERS}\n");

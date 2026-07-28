@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod builtin;
 pub(crate) mod error;
 pub mod model;
@@ -8,6 +9,7 @@ pub mod registry;
 pub mod retry;
 pub(crate) mod types;
 
+pub use auth::{AuthResolver, AuthSpec, BuildOptions};
 pub use builtin::{
     BuiltInProvider, ProviderPlan, all_builtins, base_url_env_var, base_url_override,
     builtin_provider, configured_base_url, resolve_api_key_env, resolve_base_url,

@@ -12,24 +12,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use crate::model::{Model, ModelPricing, ModelTier};
+use crate::auth::{AuthResolver, AuthSpec, BuildOptions};
+use crate::model::{Model, ModelEntry, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider};
-use crate::registry::{self, ProviderSpec};
+use crate::registry::{self, ProviderSpec, SCRIPT_OWNER};
 use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
 
 use super::ResolvedAuth;
-use super::anthropic::Anthropic;
-use super::copilot::Copilot;
-use super::deepseek::DeepSeek;
-use super::google::Google;
-use super::local::{LLAMACPP, LocalEndpoint, OLLAMA};
-use super::mistral::Mistral;
-use super::openai::OpenAi;
-use super::opencode::Opencode;
-use super::openrouter::OpenRouter;
-use super::synthetic::Synthetic;
-use super::tensorx::TensorX;
-use super::zai::Zai;
 
 const INFO_TIMEOUT: Duration = Duration::from_secs(5);
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -414,9 +403,16 @@ fn discover_in(dir: &Path) -> Vec<DynamicProviderMeta> {
 }
 
 static DISCOVERED: OnceLock<Vec<DynamicProviderMeta>> = OnceLock::new();
+static REGISTERED: OnceLock<()> = OnceLock::new();
+
+/// Triggers script discovery + registry registration exactly once. Safe to
+/// call from the registry init path (runs after the builtin `LazyLock`).
+pub fn ensure_discovered() {
+    let _ = discover();
+}
 
 fn discover() -> &'static [DynamicProviderMeta] {
-    DISCOVERED.get_or_init(|| {
+    let metas = DISCOVERED.get_or_init(|| {
         // Load config first: it hard-exits on malformed providers.toml, so fail
         // before spawning every provider script.
         let custom = ProvidersConfig::load();
@@ -436,7 +432,61 @@ fn discover() -> &'static [DynamicProviderMeta] {
             }
         });
         metas
-    })
+    });
+    REGISTERED.get_or_init(|| {
+        for m in metas {
+            registry::register(script_spec(m));
+        }
+    });
+    metas
+}
+
+/// Builds the [`ProviderSpec`] registered for a discovered script provider.
+/// Copies family/protocol/base_url from the base builtin so capability lookups
+/// (`Model::supports_thinking`, vision) resolve through the base, and sets
+/// `auth = AuthSpec::External` so [`AuthSpec::is_configured`] answers
+/// `has_auth` without running the script.
+fn script_spec(meta: &'static DynamicProviderMeta) -> ProviderSpec {
+    let base = &meta.base;
+    ProviderSpec {
+        slug: Arc::from(meta.slug.as_str()),
+        owner: Some(Arc::from(SCRIPT_OWNER)),
+        display_name: meta.display_name.clone(),
+        family: base.family,
+        features: base.features.clone(),
+        protocol: base.protocol,
+        base_url: base.base_url.clone(),
+        default_model: base.default_model.clone(),
+        auth: AuthSpec::External(Arc::new(ScriptAuthResolver::new(meta))),
+        supports_thinking: base.supports_thinking,
+        accepts_arbitrary_models: base.accepts_arbitrary_models,
+        fallback_max_output: base.fallback_max_output,
+        fallback_context_window: base.fallback_context_window,
+        capability_keys: base.capability_keys.clone(),
+        models: script_models(base, meta),
+        build: build_script,
+    }
+}
+
+/// Chooses the spec's model catalog: the script's declared models (as
+/// single-prefix entries) when present, otherwise the base builtin's catalog.
+fn script_models(base: &ProviderSpec, meta: &DynamicProviderMeta) -> Vec<ModelEntry> {
+    if meta.models.is_empty() {
+        return base.models.clone();
+    }
+    meta.models
+        .iter()
+        .map(|m| ModelEntry {
+            prefixes: vec![m.id.clone()],
+            tier: m.tier,
+            family: base.family,
+            vision: m.supports_vision.unwrap_or(false),
+            default: false,
+            pricing: m.pricing.clone().unwrap_or_default(),
+            max_output_tokens: Some(m.max_output_tokens),
+            context_window: m.context_window,
+        })
+        .collect()
 }
 
 fn find_meta(slug: &str) -> Option<&'static DynamicProviderMeta> {
@@ -476,69 +526,35 @@ pub fn auth_providers() -> Vec<(&'static str, &'static str)> {
 }
 
 pub fn create(slug: &str, timeouts: super::Timeouts) -> Result<Box<dyn Provider>, AgentError> {
-    let meta = find_meta(slug).ok_or_else(|| AgentError::Config {
+    let _ = discover();
+    let spec = registry::get(slug).ok_or_else(|| AgentError::Config {
         message: format!("unknown dynamic provider '{slug}'"),
     })?;
-    let resolved = resolve_auth(meta)?;
-    let auth = Arc::new(Mutex::new(resolved));
+    build_script(&spec, BuildOptions::from_timeouts(timeouts))
+}
 
-    let inner: Box<dyn Provider> = match meta.base.slug.as_ref() {
-        "anthropic" => Box::new(
-            Anthropic::with_auth(auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "openai" => Box::new(
-            OpenAi::with_auth(auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "google" => Box::new(Google::with_auth(auth.clone(), timeouts)),
-        "copilot" => Box::new(
-            Copilot::with_auth(auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "ollama" => Box::new(
-            LocalEndpoint::with_auth(&OLLAMA, auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "llama-cpp" => Box::new(
-            LocalEndpoint::with_auth(&LLAMACPP, auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "mistral" => Box::new(
-            Mistral::with_auth(auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "zai" => Box::new(
-            Zai::with_auth(auth.clone(), timeouts).with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "synthetic" => Box::new(
-            Synthetic::with_auth(auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "deepseek" => Box::new(
-            DeepSeek::with_auth(auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "openrouter" => Box::new(
-            OpenRouter::with_auth(auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "tensorx" => Box::new(
-            TensorX::with_auth(auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        "opencode" => Box::new(
-            Opencode::with_auth(auth.clone(), timeouts)
-                .with_system_prefix(meta.system_prefix.clone()),
-        ),
-        other => {
-            return Err(AgentError::Config {
-                message: format!("dynamic provider '{slug}' has unsupported base '{other}'"),
-            });
-        }
+/// Registry build fn for script-produced specs. Finds the [`DynamicProviderMeta`]
+/// by slug, resolves auth (running the script's `resolve` subcommand when
+/// `opts.auth` is unset), then delegates to the base builtin's `build` with a
+/// `BuildOptions` carrying the resolved auth and the script's `system_prefix`.
+fn build_script(
+    spec: &Arc<ProviderSpec>,
+    opts: BuildOptions,
+) -> Result<Box<dyn Provider>, AgentError> {
+    let meta = find_meta(spec.slug.as_ref()).ok_or_else(|| AgentError::Config {
+        message: format!("no script meta for registered spec '{}'", spec.slug),
+    })?;
+    let auth = match opts.auth {
+        Some(a) => a,
+        None => Arc::new(Mutex::new(resolve_auth(meta)?)),
     };
-
-    Ok(Box::new(DynamicProvider {
+    let inner_opts = BuildOptions {
+        timeouts: opts.timeouts,
+        auth: Some(Arc::clone(&auth)),
+        system_prefix: meta.system_prefix.clone(),
+    };
+    let inner = (meta.base.build)(&meta.base, inner_opts)?;
+    Ok(Box::new(SpecProvider {
         script_path: &meta.script_path,
         inner,
         auth,
@@ -593,14 +609,34 @@ pub fn find_model_for_tier(slug: &str, tier: ModelTier) -> Option<Model> {
     Some(script_model.to_model(slug, &meta.base, script_model.id.clone(), tier))
 }
 
-struct DynamicProvider {
+struct ScriptAuthResolver {
+    meta: &'static DynamicProviderMeta,
+}
+
+impl ScriptAuthResolver {
+    fn new(meta: &'static DynamicProviderMeta) -> Self {
+        Self { meta }
+    }
+}
+
+impl AuthResolver for ScriptAuthResolver {
+    fn resolve(&self) -> BoxFuture<'_, Result<ResolvedAuth, AgentError>> {
+        let meta = self.meta;
+        Box::pin(async move { smol::unblock(move || resolve_auth(meta)).await })
+    }
+    fn is_configured(&self) -> bool {
+        self.meta.has_auth
+    }
+}
+
+struct SpecProvider {
     script_path: &'static Path,
     inner: Box<dyn Provider>,
     auth: Arc<Mutex<ResolvedAuth>>,
     models: &'static [ScriptModel],
 }
 
-impl DynamicProvider {
+impl SpecProvider {
     fn run_auth_script(&self, subcommand: &'static str) -> BoxFuture<'_, Result<(), AgentError>> {
         Box::pin(async move {
             let script_path = self.script_path;
@@ -622,7 +658,7 @@ impl DynamicProvider {
     }
 }
 
-impl Provider for DynamicProvider {
+impl Provider for SpecProvider {
     fn stream_message<'a>(
         &'a self,
         model: &'a Model,

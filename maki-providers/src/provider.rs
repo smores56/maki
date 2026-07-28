@@ -8,14 +8,17 @@ use tracing::{debug, warn};
 
 use maki_storage::id::SessionRef;
 
+use crate::auth::BuildOptions;
 use crate::model::{Model, ModelInfo};
 use crate::providers::Timeouts;
 use crate::providers::catalog::{
     OPENCODE_FAMILY_SLUGS, available_if_warm, catalog_providers, catalog_providers_if_available,
 };
 use crate::providers::dynamic;
-use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse, registry};
-
+use crate::registry::Source;
+use crate::{
+    AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse, registry,
+};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -57,13 +60,10 @@ pub trait Provider: Send + Sync {
 
 pub fn provider_for_slug(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
     if let Some(spec) = registry::get(slug) {
-        return (spec.build)(&spec, timeouts);
+        return (spec.build)(&spec, BuildOptions::from_timeouts(timeouts));
     }
     if dynamic::display_name(slug).is_some() {
         return dynamic::create(slug, timeouts);
-    }
-    if crate::providers::custom::base_kind(slug).is_some() {
-        return crate::providers::custom::create(slug, timeouts);
     }
     if let Some(catalog) = crate::providers::catalog::try_create(slug, timeouts) {
         return catalog;
@@ -74,17 +74,17 @@ pub fn provider_for_slug(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provi
 }
 
 pub fn provider_available(slug: &str) -> bool {
-    provider_for_slug(slug, Timeouts::default()).is_ok()
+    match registry::get(slug) {
+        Some(spec) => spec.auth.is_configured(slug),
+        None => provider_for_slug(slug, Timeouts::default()).is_ok(),
+    }
 }
 
 /// Non-blocking variant of [`provider_available`] for offline model discovery:
 /// catalog-backed slugs consult only the already-warm catalog, so a cold cache
 /// reports them unavailable instead of blocking on a network fetch.
 fn provider_available_offline(slug: &str) -> bool {
-    if registry::get(slug).is_some()
-        || dynamic::display_name(slug).is_some()
-        || crate::providers::custom::base_kind(slug).is_some()
-    {
+    if registry::get(slug).is_some() {
         return provider_available(slug);
     }
     available_if_warm(slug)
@@ -160,8 +160,10 @@ pub struct ModelBatch {
 /// Never blocks on catalog download; catalog-backed providers appear only once
 /// the catalog has warmed in the background.
 pub fn available_model_specs() -> Vec<String> {
+    crate::providers::dynamic::ensure_discovered();
     let mut specs: Vec<String> = registry::all()
         .into_iter()
+        .filter(|s| matches!(s.source(), Source::Builtin | Source::Toml))
         .filter(|s| provider_available_offline(s.slug.as_ref()))
         .flat_map(|s| {
             let slug = Arc::clone(&s.slug);
@@ -173,18 +175,16 @@ pub fn available_model_specs() -> Vec<String> {
         })
         .collect();
     for slug in dynamic::discovered_slugs() {
-        specs.extend(dynamic::dynamic_model_specs_for(slug));
-    }
-    for spec in crate::providers::custom::declared_model_specs() {
-        if !specs.contains(&spec) {
-            specs.push(spec);
+        for spec in dynamic::dynamic_model_specs_for(slug) {
+            if !specs.contains(&spec) {
+                specs.push(spec);
+            }
         }
     }
     if let Some(catalog) = catalog_providers_if_available() {
         for cat in catalog {
             if registry::get(&cat.slug).is_some()
                 || dynamic::base_for_slug(&cat.slug).is_some()
-                || crate::providers::custom::base_kind(&cat.slug).is_some()
                 || OPENCODE_FAMILY_SLUGS.contains(&cat.slug.as_str())
             {
                 continue;
@@ -210,7 +210,10 @@ pub async fn fetch_all_models(
     let (tx, rx) = flume::unbounded();
     let timeouts = Timeouts::default();
 
-    for spec in registry::all() {
+    for spec in registry::all()
+        .into_iter()
+        .filter(|s| matches!(s.source(), Source::Builtin | Source::Toml))
+    {
         let slug: Arc<str> = Arc::clone(&spec.slug);
         let slug_for_create = Arc::clone(&slug);
         let Ok(provider) =
@@ -315,31 +318,6 @@ pub async fn fetch_all_models(
             let _ = tx_catalog
                 .send_async(ModelBatch {
                     models,
-                    warnings: Vec::new(),
-                })
-                .await;
-        }
-    })
-    .detach();
-
-    let custom_timeouts = timeouts;
-    let tx_custom = tx.clone();
-    smol::spawn(async move {
-        let declared = crate::providers::custom::declared_model_specs();
-        if !declared.is_empty() {
-            let _ = tx_custom
-                .send_async(ModelBatch {
-                    models: declared,
-                    warnings: Vec::new(),
-                })
-                .await;
-        }
-        let custom_specs =
-            smol::unblock(move || crate::providers::custom::discover_models(custom_timeouts)).await;
-        if !custom_specs.is_empty() {
-            let _ = tx_custom
-                .send_async(ModelBatch {
-                    models: custom_specs,
                     warnings: Vec::new(),
                 })
                 .await;
