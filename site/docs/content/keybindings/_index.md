@@ -81,6 +81,34 @@ Some pickers add extra bindings on top of the defaults:
 
 | Context | Key | Action |
 |---------|-----|--------|
+| Editing | `Enter` | Submit prompt |
+| Editing | `Shift+Enter` / `Ctrl+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
+| Editing | `Tab` | Toggle mode |
+| Editing | `/command` | Open command palette |
+| Editing | `Ctrl+W` | Delete word backward |
+| Editing | `Alt+←` / `Alt+→` | Move word left / right |
+| Editing | `Ctrl+Del` / `⌥Del` | Delete word forward |
+| Editing | `Ctrl+K` | Delete to end of line |
+| Editing | `Ctrl+A` | Jump to start of line |
+| Editing | `Home` / `End` | Jump to start/end of line |
+| Editing | `Ctrl+U` / `Ctrl+D` | Scroll half page up / down |
+| Editing | `Ctrl+E` | Jump to end of line |
+| Editing | `Ctrl+G` | Scroll to top |
+| Editing | `Ctrl+B` | Scroll to bottom |
+| Editing | `Ctrl+Q` | Pop queue |
+| Editing | `Esc Esc` | Rewind |
+| Editing | `Alt+O` | Edit input in external editor |
+| While Streaming | `↑` / `↓` | Navigate input history |
+| While Streaming | `Esc Esc` | Cancel agent |
+| Form | `↑` / `↓` | Navigate options |
+| Form | `Enter` | Select option |
+| Form | `Esc` | Close |
+| Pickers | `↑` / `↓` | Navigate |
+| Pickers | `Enter` | Select |
+| Pickers | `Esc` | Close |
+| Pickers | `Type` | Filter |
+| Pickers | `PageUp` / `PageDown` | Scroll page up / down |
+| Pickers | `Ctrl+U` / `Ctrl+D` | Scroll page up / down |
 | Queue | `Enter` | Remove item |
 | Commands | `Tab` | Complete command |
 | Model Picker | `!/@/#/$` | Set tier (strong/medium/weak/compaction) |
@@ -92,6 +120,7 @@ Some pickers add extra bindings on top of the defaults:
 
 Child contexts inherit their parent's bindings and add their own.
 
+- **General** is the base for: Editing, While Streaming, Pickers, Form
 - **Pickers** is the base for: Task Picker, Rewind Picker, Theme Picker, Model Picker, Queue, Commands, Search, File Picker
 
 ## Overriding Keybindings
