@@ -220,8 +220,8 @@ impl ManifestRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtin::BuiltInProvider;
     use crate::provider::ProviderKind;
-    use maki_config::providers::BuiltInProvider;
     use std::str::FromStr;
     use strum::IntoEnumIterator;
 

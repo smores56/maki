@@ -20,7 +20,7 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "TensorX",
 };
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "tensorx",
     display_name: "TensorX",
     protocol: maki_config::providers::Protocol::Openai,

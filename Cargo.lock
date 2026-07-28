@@ -2529,7 +2529,6 @@ name = "maki-config"
 version = "0.4.5"
 dependencies = [
  "dotenvy",
- "inventory",
  "maki-config-macro",
  "maki-storage",
  "serde",

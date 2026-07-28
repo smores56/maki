@@ -9,7 +9,7 @@ use crate::model::{ModelEntry, ModelFamily, ModelPricing, ModelTier};
 const GPT_5_6_CONTEXT_WINDOW: u32 = 372_000;
 const GPT_5_6_MAX_OUTPUT_TOKENS: u32 = 128_000;
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "openai",
     display_name: "OpenAI",
     protocol: maki_config::providers::Protocol::Openai,

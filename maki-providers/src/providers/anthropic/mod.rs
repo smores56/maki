@@ -36,7 +36,7 @@ const LABEL_WEEK_ALL: &str = "Current week (all models)";
 
 const ENV_VAR: &str = "ANTHROPIC_API_KEY";
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "anthropic",
     display_name: "Anthropic",
     protocol: maki_config::providers::Protocol::Anthropic,
@@ -237,7 +237,7 @@ fn usage_eligible(auth: &super::ResolvedAuth, configured_override: Option<&str>)
 
 fn resolve_anthropic_base_url() -> Option<String> {
     let config = maki_config::providers::ProvidersConfig::load();
-    maki_config::providers::resolve_base_url("anthropic", config.get("anthropic"))
+    crate::builtin::resolve_base_url("anthropic", config.get("anthropic"))
 }
 
 fn resolve_auth_from_key(key: &str, base_url: Option<String>) -> super::ResolvedAuth {

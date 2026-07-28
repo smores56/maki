@@ -34,7 +34,7 @@ fn max_thinking(model: &Model) -> u32 {
     model.max_thinking_budget().map_or(cap, |m| m.min(cap))
 }
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "google",
     display_name: "Google",
     protocol: maki_config::providers::Protocol::Google,
@@ -101,7 +101,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
 
 fn resolve_google_base_url() -> Option<String> {
     let config = maki_config::providers::ProvidersConfig::load();
-    maki_config::providers::resolve_base_url("google", config.get("google"))
+    crate::builtin::resolve_base_url("google", config.get("google"))
 }
 
 fn resolve_auth_from_key(key: &str, base_url: Option<String>) -> ResolvedAuth {

@@ -3,9 +3,8 @@ use std::sync::{Arc, Mutex};
 use flume::Sender;
 use serde_json::Value;
 
-use maki_config::providers::{
-    Protocol, ProviderDef, ProvidersConfig, resolve_api_key_env, resolve_base_url, resolve_protocol,
-};
+use crate::builtin::{resolve_api_key_env, resolve_base_url, resolve_protocol};
+use maki_config::providers::{Protocol, ProviderDef, ProvidersConfig};
 use maki_storage::id::SessionRef;
 
 use super::ResolvedAuth;

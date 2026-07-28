@@ -20,7 +20,7 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "Synthetic",
 };
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "synthetic",
     display_name: "Synthetic",
     protocol: maki_config::providers::Protocol::Openai,

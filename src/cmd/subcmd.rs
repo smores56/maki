@@ -8,14 +8,15 @@ use color_eyre::eyre::{Context, bail};
 
 use maki_agent::mcp::{config as mcp_config, oauth as mcp_oauth};
 use maki_agent::tools::ToolRegistry;
-use maki_config::providers::{
-    ProviderDef, ProvidersConfig, all_builtins, builtin_provider, resolve_api_key_env,
-    resolve_base_url, resolve_default_model, resolve_display_name, resolve_login_url, slugify,
-};
+use maki_config::providers::{ProviderDef, ProvidersConfig, slugify};
 use maki_config::{load_env_files, load_permissions};
 use maki_lua::PluginHost;
 use maki_providers::provider::fetch_all_models;
 use maki_providers::{ProviderData, catalog_providers};
+use maki_providers::{
+    all_builtins, builtin_provider, resolve_api_key_env, resolve_base_url, resolve_default_model,
+    resolve_display_name, resolve_login_url,
+};
 use maki_providers::{copilot_auth, dynamic, openai_auth};
 use maki_storage::StateDir;
 use maki_storage::auth::ProviderCredentials;
@@ -339,7 +340,7 @@ fn login_custom(storage: &StateDir) -> Result<()> {
 
 fn select_plan(
     slug: &str,
-    builtin: Option<&'static maki_config::providers::BuiltInProvider>,
+    builtin: Option<&'static maki_providers::BuiltInProvider>,
     def: Option<&ProviderDef>,
 ) -> Result<Option<String>> {
     let plans = builtin.and_then(|b| b.plans);

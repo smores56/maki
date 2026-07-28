@@ -1127,7 +1127,7 @@ impl<'t> EventLoop<'t> {
                     provider: Arc::from(provider),
                 }));
             }
-        } else if let Some(builtin) = maki_config::providers::builtin_provider(&slug) {
+        } else if let Some(builtin) = maki_providers::builtin_provider(&slug) {
             self.change_model(builtin.default_model.to_string());
         }
     }

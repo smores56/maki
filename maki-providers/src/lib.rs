@@ -1,3 +1,4 @@
+pub mod builtin;
 pub(crate) mod error;
 pub mod manifest;
 pub mod model;
@@ -7,6 +8,11 @@ pub(crate) mod providers;
 pub mod retry;
 pub(crate) mod types;
 
+pub use builtin::{
+    BuiltInProvider, ProviderPlan, all_builtins, base_url_env_var, base_url_override,
+    builtin_provider, configured_base_url, resolve_api_key_env, resolve_base_url,
+    resolve_default_model, resolve_display_name, resolve_login_url, resolve_protocol,
+};
 pub use error::AgentError;
 pub use model::{
     FastPricing, Model, ModelEntry, ModelError, ModelFamily, ModelInfo, ModelPricing, ModelTier,

@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::builtin::builtin_provider;
 use flume::Sender;
 use isahc::{HttpClient, Request};
 use maki_storage::id::SessionRef;

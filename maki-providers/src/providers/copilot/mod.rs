@@ -24,7 +24,7 @@ pub mod auth;
 
 const DEFAULT_API_ENDPOINT: &str = "https://api.githubcopilot.com";
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "copilot",
     display_name: "Copilot",
     protocol: maki_config::providers::Protocol::Openai,

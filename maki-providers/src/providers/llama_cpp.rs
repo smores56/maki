@@ -2,7 +2,7 @@ use crate::model::ModelEntry;
 
 use super::local::LLAMACPP;
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: LLAMACPP.slug,
     display_name: LLAMACPP.display_name,
     protocol: maki_config::providers::Protocol::Openai,

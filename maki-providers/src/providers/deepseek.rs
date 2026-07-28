@@ -29,7 +29,7 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "DeepSeek",
 };
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "deepseek",
     display_name: "DeepSeek",
     protocol: maki_config::providers::Protocol::Openai,

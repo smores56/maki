@@ -31,7 +31,7 @@ pub(crate) struct LocalEndpointConfig {
 }
 
 fn resolve_protocol_for_local(slug: &str) -> Option<Protocol> {
-    maki_config::providers::resolve_protocol(
+    crate::builtin::resolve_protocol(
         slug,
         maki_config::providers::ProvidersConfig::load().get(slug),
     )

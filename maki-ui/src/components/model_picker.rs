@@ -240,7 +240,7 @@ fn parse_model_entry(spec: &str) -> Option<ModelEntry> {
     } else {
         let config = maki_config::providers::ProvidersConfig::load();
         config.get(provider_str)?;
-        maki_config::providers::resolve_display_name(provider_str, config.get(provider_str))
+        maki_providers::resolve_display_name(provider_str, config.get(provider_str))
     };
 
     let map = model_registry::model_registry().read().unwrap();

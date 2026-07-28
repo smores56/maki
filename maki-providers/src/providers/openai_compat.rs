@@ -41,7 +41,7 @@ impl OpenAiCompatProvider {
             None
         } else {
             let providers = maki_config::providers::ProvidersConfig::load();
-            maki_config::providers::configured_base_url(config.slug, providers.get(config.slug))
+            crate::builtin::configured_base_url(config.slug, providers.get(config.slug))
         };
         Self {
             client: super::http_client(timeouts),

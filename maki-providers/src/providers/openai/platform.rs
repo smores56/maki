@@ -179,7 +179,7 @@ impl OpenAi {
 
 fn resolve_openai_base_url() -> Option<String> {
     let config = maki_config::providers::ProvidersConfig::load();
-    maki_config::providers::configured_base_url("openai", config.get("openai"))
+    crate::builtin::configured_base_url("openai", config.get("openai"))
 }
 
 impl Provider for OpenAi {

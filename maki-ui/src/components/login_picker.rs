@@ -7,6 +7,10 @@ use ratatui::widgets::Wrap;
 
 use maki_config::providers::{self, Protocol, ProviderDef, ProvidersConfig, slugify};
 use maki_providers::catalog_providers_if_available;
+use maki_providers::{
+    all_builtins, builtin_provider, resolve_base_url, resolve_default_model, resolve_display_name,
+    resolve_login_url,
+};
 use maki_storage::StateDir;
 use maki_storage::auth::{
     ProviderCredentials, load_provider_credentials, save_provider_credentials,
@@ -177,7 +181,7 @@ impl LoginPicker {
     }
 
     pub fn open(&mut self, storage: maki_storage::StateDir) {
-        let builtins = providers::all_builtins();
+        let builtins = all_builtins();
         let config = providers::ProvidersConfig::load();
         let mut items: Vec<ProviderItem> = builtins
             .iter()
@@ -199,7 +203,7 @@ impl LoginPicker {
             .collect();
 
         for (slug, def) in &config.providers {
-            if slug == "opencode" || providers::builtin_provider(slug).is_some() {
+            if slug == "opencode" || builtin_provider(slug).is_some() {
                 continue;
             }
             let has_key = load_provider_credentials(&storage, slug).is_some();
@@ -287,20 +291,19 @@ impl LoginPicker {
                         let slug = item.slug.clone();
                         let config = providers::ProvidersConfig::load();
                         let def = config.get(&slug);
-                        let has_plans = providers::builtin_provider(&slug)
+                        let has_plans = builtin_provider(&slug)
                             .and_then(|b| b.plans)
                             .is_some_and(|p| p.len() > 1);
                         if has_plans {
                             StepAction::GoPickPlan { slug }
                         } else {
-                            let display_name =
-                                if providers::builtin_provider(&slug).is_some() || def.is_some() {
-                                    providers::resolve_display_name(&slug, def)
-                                } else {
-                                    item.display_name.clone()
-                                };
-                            let needs_url =
-                                providers::builtin_provider(&slug).is_some_and(|b| b.needs_url);
+                            let display_name = if builtin_provider(&slug).is_some() || def.is_some()
+                            {
+                                resolve_display_name(&slug, def)
+                            } else {
+                                item.display_name.clone()
+                            };
+                            let needs_url = builtin_provider(&slug).is_some_and(|b| b.needs_url);
                             if needs_url {
                                 StepAction::GoBuiltinUrl { slug, display_name }
                             } else {
@@ -327,7 +330,7 @@ impl LoginPicker {
                     StepAction::GoEnterKey {
                         slug: slug.clone(),
                         plan: Some(item.key.clone()),
-                        display_name: providers::resolve_display_name(slug, config.get(slug)),
+                        display_name: resolve_display_name(slug, config.get(slug)),
                         custom: None,
                         builtin_url: None,
                         api_key_optional: false,
@@ -457,8 +460,7 @@ impl LoginPicker {
                             });
                         }
                     } else {
-                        let needs_url =
-                            providers::builtin_provider(&slug_c).is_some_and(|b| b.needs_url);
+                        let needs_url = builtin_provider(&slug_c).is_some_and(|b| b.needs_url);
                         if plan_c.is_some() || builtin_url_c.is_some() || needs_url {
                             let mut def = config.get(&slug_c).cloned().unwrap_or_default();
                             def.plan = plan_c.clone();
@@ -476,12 +478,11 @@ impl LoginPicker {
                         }
                     }
 
-                    let needs_url =
-                        providers::builtin_provider(&slug_c).is_some_and(|b| b.needs_url);
+                    let needs_url = builtin_provider(&slug_c).is_some_and(|b| b.needs_url);
                     let default_model = if needs_url {
                         None
                     } else {
-                        providers::resolve_default_model(&slug_c, config.get(&slug_c))
+                        resolve_default_model(&slug_c, config.get(&slug_c))
                     };
                     if let Some(model) = &default_model {
                         persist_model(&storage, model);
@@ -521,7 +522,7 @@ impl LoginPicker {
                 KeyCode::Enter => {
                     let mut base_url = input.value().trim().to_string();
                     if base_url.is_empty() {
-                        base_url = providers::resolve_base_url(slug, None).unwrap_or_default();
+                        base_url = resolve_base_url(slug, None).unwrap_or_default();
                     }
                     StepAction::GoEnterKey {
                         slug: slug.clone(),
@@ -562,7 +563,7 @@ impl LoginPicker {
                 api_key_optional,
             } => {
                 if custom.is_none()
-                    && let Some(url) = providers::resolve_login_url(&slug, plan.as_deref())
+                    && let Some(url) = resolve_login_url(&slug, plan.as_deref())
                     && let Err(e) = open::that(&url)
                 {
                     tracing::warn!(error = %e, url, "failed to open browser");
@@ -580,8 +581,7 @@ impl LoginPicker {
             }
             StepAction::GoBuiltinUrl { slug, display_name } => {
                 let config = providers::ProvidersConfig::load();
-                let default =
-                    providers::resolve_base_url(&slug, config.get(&slug)).unwrap_or_default();
+                let default = resolve_base_url(&slug, config.get(&slug)).unwrap_or_default();
                 self.step = Step::BuiltinUrl {
                     input: TextBuffer::new(default),
                     slug,
@@ -590,7 +590,7 @@ impl LoginPicker {
                 LoginPickerAction::Consumed
             }
             StepAction::GoPickPlan { slug } => {
-                let builtin = providers::builtin_provider(&slug);
+                let builtin = builtin_provider(&slug);
                 let plans = builtin.and_then(|b| b.plans).unwrap_or(&[]);
                 let plan_items: Vec<PlanItem> = plans
                     .iter()
@@ -600,7 +600,7 @@ impl LoginPicker {
                         base_url: plan.base_url.to_string(),
                     })
                     .collect();
-                let display = providers::resolve_display_name(&slug, None);
+                let display = resolve_display_name(&slug, None);
                 let mut plan_picker = ListPicker::new();
                 plan_picker.open(plan_items, format!(" {display} plan "));
                 self.step = Step::PickPlan {

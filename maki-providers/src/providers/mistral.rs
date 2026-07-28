@@ -20,7 +20,7 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "Mistral",
 };
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "mistral",
     display_name: "Mistral",
     protocol: maki_config::providers::Protocol::Openai,
@@ -30,7 +30,7 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     plans: Some(&[
         (
             "standard",
-            maki_config::providers::ProviderPlan {
+            crate::builtin::ProviderPlan {
                 display_name: "Standard",
                 base_url: "https://api.mistral.ai/v1",
                 default_model: Some("mistral/mistral-medium-latest"),
@@ -39,7 +39,7 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
         ),
         (
             "coding",
-            maki_config::providers::ProviderPlan {
+            crate::builtin::ProviderPlan {
                 display_name: "Vibe / Coding",
                 base_url: "https://api.mistral.ai/v1",
                 default_model: Some("mistral/mistral-vibe-cli-latest"),

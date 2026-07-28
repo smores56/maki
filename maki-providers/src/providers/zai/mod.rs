@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 
+use crate::builtin::{BuiltInProvider, ProviderPlan};
 use flume::Sender;
-use maki_config::providers::{BuiltInProvider, Protocol, ProviderPlan};
+use maki_config::providers::Protocol;
 use maki_storage::id::SessionRef;
 use serde::Deserialize;
 use serde_json::Value;
@@ -255,9 +256,7 @@ impl Zai {
         let pool = KeyPool::resolve("zai", CONFIG_STANDARD.api_key_env)?;
         let mut auth = ResolvedAuth::bearer(pool.current());
         let provider_config = maki_config::providers::ProvidersConfig::load();
-        if let Some(url) =
-            maki_config::providers::resolve_base_url("zai", provider_config.get("zai"))
-        {
+        if let Some(url) = crate::builtin::resolve_base_url("zai", provider_config.get("zai")) {
             auth.base_url = Some(url);
         }
         Ok(Self {
