@@ -4,11 +4,10 @@ use std::sync::Arc;
 use color_eyre::Result;
 use color_eyre::eyre::Context;
 
-use maki_agent::tools::ToolRegistry;
 use maki_config::{load_env_files, load_permissions};
-use maki_lua::PluginHost;
 use maki_storage::StateDir;
 
+use crate::cmd::{boot_lua_host, load_builtins_or_start_err};
 use crate::setup;
 
 pub fn run(model_arg: Option<String>, yolo: bool, no_plugins: bool, no_jit: bool) -> Result<()> {
@@ -18,12 +17,7 @@ pub fn run(model_arg: Option<String>, yolo: bool, no_plugins: bool, no_jit: bool
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let mut plugin_host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !no_jit)
-        .context("initialize lua plugin host")?;
-
-    let raw_config = plugin_host
-        .load_init_files_or_skip(no_plugins, &cwd)
-        .context("load init.lua files")?;
+    let (mut plugin_host, raw_config) = boot_lua_host(no_jit, no_plugins, &cwd)?;
 
     let mut config = raw_config
         .unwrap_or_default()
@@ -36,9 +30,7 @@ pub fn run(model_arg: Option<String>, yolo: bool, no_plugins: bool, no_jit: bool
     }
     config.validate()?;
 
-    plugin_host
-        .load_builtins(&config.plugins)
-        .context("load builtin plugins")?;
+    load_builtins_or_start_err(&mut plugin_host, &config.plugins)?;
 
     let timeouts = maki_providers::Timeouts {
         connect: config.provider.connect_timeout,

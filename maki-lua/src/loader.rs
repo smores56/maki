@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use include_dir::{Dir, include_dir};
@@ -430,6 +430,21 @@ impl PluginHost {
     pub fn ui_action_rx(&self) -> flume::Receiver<UiAction> {
         self.inner.ui_action_rx.clone()
     }
+
+    /// Snapshot of what the panic hook captured, if the runtime thread
+    /// panicked. Returns `None` while the thread is still alive.
+    #[cfg(test)]
+    pub fn crash_info(&self) -> Option<runtime::CrashInfo> {
+        self.inner.crash.lock().unwrap().clone()
+    }
+
+    /// Shared crash slot, for callers that need live reads across the host's
+    /// lifetime (the UI polls it after the runtime thread dies, instead of
+    /// cloning the snapshot). The `Arc` is the host's own slot, so reads stay
+    /// valid even while the host drops.
+    pub fn crash_slot(&self) -> Arc<Mutex<Option<runtime::CrashInfo>>> {
+        Arc::clone(&self.inner.crash)
+    }
 }
 
 #[derive(Clone)]
@@ -470,6 +485,13 @@ impl EventHandle {
             tx: shared.clone(),
             prio_tx: shared,
         }
+    }
+
+    /// Test-only: queues a request that panics on the runtime thread, so the
+    /// panic-hook capture path can be exercised.
+    #[cfg(test)]
+    pub fn panic_for_test(&self) {
+        let _ = self.tx.send(Request::PanicForTest);
     }
 
     pub fn run_command(&self, plugin: Arc<str>, command: Arc<str>, args: String) {
@@ -563,7 +585,8 @@ mod tests {
     use crate::api::util::command::{LuaCommandInfo, LuaCommandWriter};
     use maki_agent::prompt::{PromptId, ResolvedSlots, Slot};
     use maki_agent::tools::ToolRegistry;
-    use std::time::Instant;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
     use test_case::test_case;
 
     /// jit=true is exercised by the whole integration suite
@@ -615,6 +638,44 @@ mod tests {
         drop(host);
         let slots = handle.collect_prompt_slots();
         assert!(contents(&slots, PromptId::System, Slot::ToolUsage).is_empty());
+    }
+
+    const PANIC_FOR_TEST_MSG: &str = "PanicForTest: intentional crash for the panic-hook test";
+
+    /// The thread-scoped panic hook installed by `runtime::spawn` must capture
+    /// the payload (and mark it a panic) so the crash modal has something to
+    /// show. Drives the real host: queues a panic on the runtime thread, then
+    /// reads the shared crash slot.
+    #[test]
+    fn runtime_panic_populates_crash_info() {
+        let reg = Arc::new(ToolRegistry::new());
+        let mut host = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let handle = host.event_handle();
+
+        handle.panic_for_test();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let info = loop {
+            if let Some(info) = host.crash_info() {
+                break info;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "crash info never populated after thread panic"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        assert!(info.panicked, "captured info must be marked as a panic");
+        assert!(
+            info.message.contains(PANIC_FOR_TEST_MSG),
+            "captured message must carry the panic payload, got: {}",
+            info.message
+        );
+        assert!(info.location.is_some(), "panic hook records a location");
+
+        drop(handle);
+        host.begin_shutdown();
     }
 
     /// Load `src` as one plugin, collect resolved slots.
@@ -1218,6 +1279,85 @@ mod tests {
         assert_eq!(
             contents(&slots, PromptId::System, Slot::Identity),
             ["Dyn identity"]
+        );
+    }
+
+    const CRASH_POLL_DEADLINE: Duration = Duration::from_secs(10);
+    const CRASH_POLL_STEP: Duration = Duration::from_millis(10);
+    const CHAIN_HOOK_MSG: &str = "chain hook fired after reload";
+
+    /// Regression for F1. `/reload` (`src/cmd/tui.rs`) defers the retired
+    /// host's Drop to a teardown queue and spawns the replacement BEFORE that
+    /// Drop joins the thread. So host2's `take_hook()` runs against the
+    /// post-host1 global while host1 is still live, then host1's Drop fires.
+    /// With the LIFO `HookGuard` restore, host1's Drop reinstalled the
+    /// pre-host1 hook (the counter), clobbering host2's capture hook, so a
+    /// later panic on host2's thread never populated `crash_info`. With the
+    /// fix (no restore), host2's hook stays global and the counter still
+    /// chains.
+    #[test]
+    fn crash_capture_survives_host_reload() {
+        let chain_hits = Arc::new(AtomicUsize::new(0));
+        let chain_hits_for_hook = Arc::clone(&chain_hits);
+        let prior_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            chain_hits_for_hook.fetch_add(1, Ordering::SeqCst);
+            prior_hook(info);
+        }));
+
+        let reg = Arc::new(ToolRegistry::new());
+        let mut host1 = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let mut host2 = PluginHost::new(Arc::clone(&reg)).unwrap();
+        let handle = host2.event_handle();
+
+        host1.begin_shutdown();
+        drop(host1);
+
+        handle.panic_for_test();
+
+        let deadline = Instant::now() + CRASH_POLL_DEADLINE;
+        let info = loop {
+            if let Some(info) = host2.crash_info() {
+                break info;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "host2 crash info never populated after host1 teardown (F1 regression)"
+            );
+            std::thread::sleep(CRASH_POLL_STEP);
+        };
+
+        assert!(
+            info.panicked,
+            "host2 capture hook must survive host1 teardown, got: {:?}",
+            info
+        );
+        assert!(
+            info.message.contains(PANIC_FOR_TEST_MSG),
+            "host2 message must carry the panic payload, got: {}",
+            info.message
+        );
+
+        let host2_chain_hits = chain_hits.load(Ordering::SeqCst);
+        assert!(
+            host2_chain_hits > 0,
+            "chain hook must fire when host2 captures the panic, fired {host2_chain_hits} times"
+        );
+
+        drop(handle);
+        host2.begin_shutdown();
+        drop(host2);
+
+        let chain_thread = std::thread::spawn(|| {
+            let _ = std::panic::catch_unwind(|| panic!("{CHAIN_HOOK_MSG}"));
+        });
+        chain_thread.join().unwrap();
+
+        let hits_after_teardown = chain_hits.load(Ordering::SeqCst);
+        let _ = std::panic::take_hook();
+        assert!(
+            hits_after_teardown > host2_chain_hits,
+            "chain hook must survive host teardown, fired {hits_after_teardown} after {host2_chain_hits}"
         );
     }
 }

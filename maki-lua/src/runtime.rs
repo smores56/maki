@@ -91,6 +91,11 @@ const RESTORE_ASYNC_DEADLINE: Duration = Duration::from_secs(10);
 /// tool's rendered output.
 const RESTORE_ITEM_TIMEOUT: Duration = Duration::from_secs(60);
 const TURN_END_EVENT: &str = "TurnEnd";
+/// Shown when the runtime thread is gone but no panic payload was
+/// captured (clean shutdown, foreign unwind, or hook never installed).
+pub(crate) const CRASH_GENERIC_MSG: &str = "Lua runtime exited unexpectedly";
+/// Tracebacks longer than this get truncated before reaching the modal.
+const CRASH_TRACEBACK_MAX: usize = 8 * 1024;
 /// Without a cap, a runaway plugin OOM-kills the whole process.
 /// With one, it hits a catchable Lua error instead.
 const LUA_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
@@ -207,6 +212,10 @@ pub enum Request {
         ctx: Box<LuaCtx>,
         reply: flume::Sender<()>,
     },
+    /// Test-only: panics on the runtime thread so the panic-hook capture can
+    /// be exercised end-to-end.
+    #[cfg(test)]
+    PanicForTest,
 }
 
 pub struct RestoreItem {
@@ -2369,6 +2378,42 @@ async fn run_tool_call(
     reply
 }
 
+/// What the UI shows when the Lua runtime thread dies. `panicked` is true
+/// only when a panic hook captured the failure mid-unwind; a clean (or
+/// unknown) shutdown leaves it false so the caller falls back to the
+/// generic message.
+#[derive(Debug, Clone)]
+pub struct CrashInfo {
+    pub message: String,
+    pub location: Option<String>,
+    pub traceback: Option<String>,
+    pub panicked: bool,
+}
+
+impl CrashInfo {
+    pub fn generic() -> Self {
+        Self {
+            message: CRASH_GENERIC_MSG.to_owned(),
+            location: None,
+            traceback: None,
+            panicked: false,
+        }
+    }
+
+    fn truncate_traceback(tb: String) -> String {
+        if tb.len() <= CRASH_TRACEBACK_MAX {
+            return tb;
+        }
+        let mut cut_end = CRASH_TRACEBACK_MAX;
+        while cut_end > 0 && !tb.is_char_boundary(cut_end) {
+            cut_end -= 1;
+        }
+        let mut cut = tb[..cut_end].to_owned();
+        cut.push_str("\n... (truncated)");
+        cut
+    }
+}
+
 pub(crate) struct LuaThread {
     pub tx: flume::Sender<Request>,
     pub prio_tx: flume::Sender<Request>,
@@ -2378,6 +2423,7 @@ pub(crate) struct LuaThread {
     pub keymap_reader: KeymapReader,
     pub hint_reader: crate::api::util::command::HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
+    pub crash: Arc<Mutex<Option<CrashInfo>>>,
 }
 
 /// Lua lives on its own OS thread (no Send needed). `smol::block_on`
@@ -2398,9 +2444,43 @@ pub fn spawn(
     let (keymap_writer, keymap_reader) = KeymapWriter::new();
     let (hint_writer, hint_reader) = HintWriter::new();
 
+    let crash: Arc<Mutex<Option<CrashInfo>>> = Arc::new(Mutex::new(None));
+    let crash_for_hook = Arc::clone(&crash);
+
     let handle = thread::Builder::new()
         .name("maki-lua".to_owned())
         .spawn(move || {
+            let thread_id = thread::current().id();
+            std::panic::set_hook({
+                let prev_hook = std::panic::take_hook();
+                Box::new(move |info| {
+                    if thread::current().id() == thread_id {
+                        let payload = info.payload();
+                        let message = payload
+                            .downcast_ref::<&'static str>()
+                            .map(|s| (*s).to_owned())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| CRASH_GENERIC_MSG.to_owned());
+                        let location = info.location().map(|l| l.to_string());
+                        let traceback = std::backtrace::Backtrace::force_capture()
+                            .to_string()
+                            .trim()
+                            .to_owned();
+                        let traceback = if traceback.is_empty() {
+                            None
+                        } else {
+                            Some(CrashInfo::truncate_traceback(traceback))
+                        };
+                        *crash_for_hook.lock().unwrap() = Some(CrashInfo {
+                            message,
+                            location,
+                            traceback,
+                            panicked: true,
+                        });
+                    }
+                    prev_hook(info);
+                })
+            });
             let mut rt = match LuaRuntime::new(
                 registry,
                 tx_clone,
@@ -2477,6 +2557,13 @@ pub fn spawn(
                     };
                     match msg {
                         Request::Shutdown => break,
+                        #[cfg(test)]
+                        Request::PanicForTest => {
+                            let _ = catch_unwind(|| {
+                                panic!("PanicForTest: intentional crash for the panic-hook test")
+                            });
+                            break;
+                        }
                         Request::WarmJit => codegen_armed = true,
                         Request::LoadSource {
                             name,
@@ -2743,6 +2830,7 @@ pub fn spawn(
         keymap_reader,
         hint_reader,
         ui_action_rx,
+        crash,
     })
 }
 

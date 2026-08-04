@@ -8,6 +8,7 @@
 //! agent event, or keypress arrives instead of sleeping in `event::poll`.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -22,7 +23,8 @@ use maki_agent::permissions::PermissionManager;
 use maki_agent::{AgentConfig, CancelToken, McpCommand, McpConfigErrors, McpHandle, mcp};
 use maki_config::UiConfig;
 use maki_lua::{
-    EventHandle, HintReader, KeymapReader, LuaCommandReader, SessionReply, SessionRequest, UiAction,
+    CrashInfo, EventHandle, HintReader, KeymapReader, LuaCommandReader, SessionReply,
+    SessionRequest, UiAction,
 };
 use maki_providers::Timeouts;
 use maki_providers::provider::{Provider, fetch_all_models, from_model};
@@ -61,6 +63,7 @@ pub(crate) struct ShutdownReport {
     pub exit: ExitRequest,
     pub tabs: Vec<AppSession>,
     pub focused: usize,
+    pub force_no_plugins: bool,
 }
 
 pub struct EventLoopParams {
@@ -82,6 +85,8 @@ pub struct EventLoopParams {
     pub hint_reader: HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
     pub lua_event_handle: EventHandle,
+    pub lua_crash_slot: Arc<Mutex<Option<CrashInfo>>>,
+    pub no_plugins: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -160,6 +165,8 @@ struct SpawnCtx {
     keymap_reader: KeymapReader,
     hint_reader: HintReader,
     lua_event_handle: EventHandle,
+    lua_crash_slot: Arc<Mutex<Option<CrashInfo>>>,
+    no_plugins: bool,
     mcp_handle: Option<McpHandle>,
     mcp_config_errors: McpConfigErrors,
     model_slot: Arc<ArcSwap<ModelSlot>>,
@@ -199,6 +206,8 @@ impl SpawnCtx {
             permissions,
             Arc::clone(&self.custom_commands),
             self.lua_event_handle.clone(),
+            Arc::clone(&self.lua_crash_slot),
+            self.no_plugins,
         );
         handles.apply_to_app(&mut app);
         if resumed {
@@ -329,6 +338,8 @@ impl<'t> EventLoop<'t> {
             hint_reader,
             ui_action_rx,
             lua_event_handle,
+            lua_crash_slot,
+            no_plugins,
         } = params;
 
         // Apply the config theme before the warmup thread spawns, or warmup
@@ -379,6 +390,8 @@ impl<'t> EventLoop<'t> {
             keymap_reader,
             hint_reader,
             lua_event_handle,
+            lua_crash_slot,
+            no_plugins,
             mcp_handle,
             mcp_config_errors,
             model_slot,
@@ -524,6 +537,7 @@ impl<'t> EventLoop<'t> {
 
     fn tick(&mut self) {
         for (i, rt) in self.sessions.iter_mut().enumerate() {
+            rt.app.poll_lua_crash();
             rt.app.float_mgr.tick();
             if i != self.focused {
                 continue;
@@ -1141,6 +1155,7 @@ impl<'t> EventLoop<'t> {
             elapsed
         };
         let exit = self.sessions[self.focused].app.exit_request;
+        let force_no_plugins = self.sessions[self.focused].app.force_no_plugins;
         if let Some(ref h) = self.ctx.mcp_handle {
             mcp::kill_process_groups(&h.reader().load().pids);
         }
@@ -1187,6 +1202,7 @@ impl<'t> EventLoop<'t> {
             exit,
             tabs,
             focused: self.focused,
+            force_no_plugins,
         }
     }
 }

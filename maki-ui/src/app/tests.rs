@@ -62,6 +62,8 @@ fn build_app_with_lua(
         )),
         Arc::from([]),
         maki_lua::EventHandle::disconnected_for_test(),
+        std::sync::Arc::new(std::sync::Mutex::new(None)),
+        false,
     )
 }
 
@@ -3274,6 +3276,169 @@ fn dead_host_override_falls_back_to_builtin() {
     assert!(
         app.help_modal.is_open(),
         "dead lua host must fall back to the built-in HELP handler"
+    );
+}
+
+const CRASH_MSG: &str = "assertion failed: never nil";
+const CRASH_LOC: &str = "init.lua:42:7";
+
+fn crash_info(message: &str) -> maki_lua::CrashInfo {
+    maki_lua::CrashInfo {
+        message: message.to_owned(),
+        location: Some(CRASH_LOC.to_owned()),
+        traceback: Some("stack traceback:\n  [C]: in ?".to_owned()),
+        panicked: true,
+    }
+}
+
+fn app_with_dead_host() -> App {
+    let mut app = test_app();
+    app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test();
+    app
+}
+
+#[test]
+fn poll_lua_crash_opens_modal_on_live_to_dead_transition() {
+    let mut app = app_with_dead_host();
+    assert!(app.poll_lua_crash(), "first poll on dead host must fire");
+    assert!(app.crash_modal.is_open(), "modal must open on transition");
+}
+
+#[test]
+fn poll_lua_crash_does_not_refire_once_dead() {
+    let mut app = app_with_dead_host();
+    assert!(app.poll_lua_crash());
+    assert!(!app.poll_lua_crash(), "second poll once dead must not fire");
+    assert!(app.crash_modal.is_open());
+}
+
+#[test]
+fn poll_lua_crash_uses_panic_hook_capture_when_present() {
+    let mut app = app_with_dead_host();
+    *app.lua_crash_slot.lock().unwrap() = Some(crash_info(CRASH_MSG));
+
+    assert!(app.poll_lua_crash());
+
+    let info = app.crash_modal.info().expect("modal carries crash info");
+    assert_eq!(info.message, CRASH_MSG);
+    assert_eq!(info.location.as_deref(), Some(CRASH_LOC));
+    assert!(info.panicked);
+}
+
+#[test]
+fn poll_lua_crash_falls_back_to_generic_when_no_capture() {
+    let mut app = app_with_dead_host();
+
+    assert!(app.poll_lua_crash());
+
+    let info = app.crash_modal.info().expect("modal carries crash info");
+    assert_eq!(info.message, "Lua runtime exited unexpectedly");
+    assert!(!info.panicked);
+}
+
+#[test]
+fn poll_lua_crash_suppressed_during_reload() {
+    let mut app = app_with_dead_host();
+    app.lua_crash_suppressed = true;
+
+    assert!(
+        !app.poll_lua_crash(),
+        "reload suppression must block the modal"
+    );
+    assert!(!app.crash_modal.is_open());
+}
+
+#[test]
+fn poll_lua_crash_skipped_when_host_still_alive() {
+    let mut app = test_app();
+    let (handle, _probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+
+    assert!(!app.poll_lua_crash(), "live host must not fire the modal");
+    assert!(!app.crash_modal.is_open());
+}
+
+#[test]
+fn crash_modal_quit_action_requests_success_exit() {
+    let mut app = app_with_dead_host();
+    app.open_lua_crash(crash_info(CRASH_MSG));
+
+    app.update(Msg::Key(key::QUIT.to_key_event()));
+
+    assert_eq!(app.exit_request, ExitRequest::Success);
+    assert!(!app.crash_modal.is_open());
+}
+
+#[test]
+fn crash_modal_reload_action_requests_reload() {
+    let mut app = app_with_dead_host();
+    app.open_lua_crash(crash_info(CRASH_MSG));
+
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('r'),
+        KeyModifiers::NONE,
+    )));
+
+    assert_eq!(app.exit_request, ExitRequest::Reload);
+    assert!(!app.force_no_plugins);
+    assert!(app.lua_crash_suppressed);
+}
+
+#[test]
+fn crash_modal_reload_without_plugins_sets_force_flag() {
+    let mut app = app_with_dead_host();
+    app.open_lua_crash(crash_info(CRASH_MSG));
+
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('p'),
+        KeyModifiers::NONE,
+    )));
+
+    assert_eq!(app.exit_request, ExitRequest::Reload);
+    assert!(
+        app.force_no_plugins,
+        "force_no_plugins must flip for the next boot"
+    );
+    assert!(app.lua_crash_suppressed);
+}
+
+#[test]
+fn crash_modal_reload_without_plugins_hidden_in_no_plugins_mode() {
+    let mut app = app_with_dead_host();
+    app.no_plugins = true;
+    app.open_lua_crash(crash_info(CRASH_MSG));
+
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('p'),
+        KeyModifiers::NONE,
+    )));
+
+    assert_eq!(
+        app.exit_request,
+        ExitRequest::None,
+        "p must be ignored when already in no-plugins mode"
+    );
+    assert!(
+        app.crash_modal.is_open(),
+        "modal must stay open when p is ignored"
+    );
+}
+
+#[test]
+fn crash_modal_branches_first_in_dispatch_overlay() {
+    let mut app = app_with_dead_host();
+    app.open_lua_crash(crash_info(CRASH_MSG));
+    app.help_modal.toggle();
+
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('r'),
+        KeyModifiers::NONE,
+    )));
+
+    assert_eq!(
+        app.exit_request,
+        ExitRequest::Reload,
+        "crash modal must win over an open help modal"
     );
 }
 

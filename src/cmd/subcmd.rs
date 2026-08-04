@@ -1,7 +1,6 @@
 use std::env;
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::Arc;
 
 use color_eyre::Result;
 use color_eyre::eyre::{Context, bail};
@@ -13,7 +12,6 @@ use maki_config::providers::{
     resolve_base_url, resolve_default_model, resolve_display_name, resolve_login_url, slugify,
 };
 use maki_config::{load_env_files, load_permissions};
-use maki_lua::PluginHost;
 use maki_providers::provider::fetch_all_models;
 use maki_providers::{ProviderData, catalog_providers};
 use maki_providers::{copilot_auth, dynamic, openai_auth};
@@ -23,6 +21,8 @@ use maki_storage::auth::{
     delete_provider_credentials, load_provider_credentials, save_provider_credentials,
 };
 use maki_storage::model::persist_model;
+
+use crate::cmd::{boot_lua_host, load_builtins_or_start_err};
 
 pub fn auth_login(provider: Option<&str>, storage: &StateDir) -> Result<()> {
     match provider {
@@ -551,12 +551,7 @@ pub fn index(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
     let cwd = env::current_dir().unwrap_or_else(|_| ".".into());
     load_env_files(&cwd);
 
-    let mut host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !no_jit)
-        .context("initialize lua plugin host")?;
-
-    let raw_config = host
-        .load_init_files_or_skip(no_plugins, &cwd)
-        .context("load init.lua files")?;
+    let (mut host, raw_config) = boot_lua_host(no_jit, no_plugins, &cwd)?;
 
     let mut config = raw_config
         .unwrap_or_default()
@@ -564,8 +559,7 @@ pub fn index(path: &str, no_plugins: bool, no_jit: bool) -> Result<()> {
         .context("invalid config")?;
     config.permissions = load_permissions(&cwd);
 
-    host.load_builtins(&config.plugins)
-        .context("load builtin plugins")?;
+    load_builtins_or_start_err(&mut host, &config.plugins)?;
 
     let abs_path = Path::new(path)
         .canonicalize()
@@ -640,17 +634,12 @@ pub fn prompt(
 
     let vars = template::env_vars();
     let reg = ToolRegistry::global_arc();
-    let mut host =
-        PluginHost::with_jit(Arc::clone(reg), !no_jit).context("initialize lua plugin host")?;
-    let raw_config = host
-        .load_init_files_or_skip(no_plugins, &cwd)
-        .context("load init.lua files")?;
+    let (mut host, raw_config) = boot_lua_host(no_jit, no_plugins, &cwd)?;
     let config = raw_config
         .unwrap_or_default()
         .into_config(false)
         .context("invalid config")?;
-    host.load_builtins(&config.plugins)
-        .context("load builtin plugins")?;
+    load_builtins_or_start_err(&mut host, &config.plugins)?;
 
     if tools {
         let ctx = DescriptionContext {

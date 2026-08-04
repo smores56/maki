@@ -19,6 +19,7 @@ pub(crate) mod view;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,7 @@ use crate::chat::{CANCELLED_TEXT, ChatEventResult, DONE_TEXT, ERROR_TEXT};
 use crate::clipboard::ClipboardState;
 use crate::components::btw_modal::BtwModal;
 use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
+use crate::components::crash_modal::{CrashAction, CrashModal};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission};
@@ -58,7 +60,7 @@ use maki_agent::{
     SharedMessages, SubagentInfo,
 };
 use maki_config::UiConfig;
-use maki_lua::{EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
+use maki_lua::{CrashInfo, EventHandle, HintReader, KeymapReader, LuaCommandReader, WinView};
 use maki_providers::{Model, ThinkingConfig, add_cost};
 use maki_storage::StateDir;
 use maki_storage::input_history::InputHistory;
@@ -152,6 +154,7 @@ pub struct App {
     pub(super) search_modal: SearchModal,
     pub(super) file_picker: FilePickerModal,
     pub(super) permission_prompt: PermissionPrompt,
+    pub(super) crash_modal: CrashModal,
     pub(super) plan_form: PlanForm,
     pub(super) status_bar: StatusBar,
     pub status: Status,
@@ -185,6 +188,11 @@ pub struct App {
     pub(super) hint_reader: HintReader,
     pub(crate) restore_event_tx: Option<maki_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
+    pub(crate) lua_crash_slot: Arc<Mutex<Option<CrashInfo>>>,
+    pub(super) no_plugins: bool,
+    pub(super) force_no_plugins: bool,
+    lua_alive: bool,
+    pub(crate) lua_crash_suppressed: bool,
     subagent_answers: HashMap<String, flume::Sender<String>>,
 }
 
@@ -206,6 +214,8 @@ impl App {
         permissions: Arc<PermissionManager>,
         custom_commands: Arc<[maki_agent::command::CustomCommand]>,
         lua_event_handle: EventHandle,
+        lua_crash_slot: Arc<Mutex<Option<CrashInfo>>>,
+        no_plugins: bool,
     ) -> Self {
         scrollbar::set_enabled(ui_config.scrollbar);
         let state = SessionState::from_session(session, model, &storage);
@@ -243,6 +253,7 @@ impl App {
             search_modal: SearchModal::new(),
             file_picker: FilePickerModal::new(),
             permission_prompt: PermissionPrompt::new(),
+            crash_modal: CrashModal::new(),
             plan_form: PlanForm::new(),
             status_bar: StatusBar::new(flash),
             status: Status::Idle,
@@ -275,6 +286,11 @@ impl App {
             hint_reader,
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
+            lua_crash_slot,
+            no_plugins,
+            force_no_plugins: false,
+            lua_alive: true,
+            lua_crash_suppressed: false,
             subagent_answers: HashMap::new(),
         };
         app.model_picker
@@ -399,6 +415,10 @@ impl App {
     }
 
     fn scroll_at(&mut self, column: u16, row: u16, delta: i32) -> Option<SelectionZone> {
+        if self.crash_modal.is_open() {
+            self.crash_modal.scroll(delta);
+            return None;
+        }
         if self.btw_modal.is_open() {
             self.btw_modal.scroll(delta);
             return None;
@@ -522,6 +542,13 @@ impl App {
     }
 
     fn dispatch_overlay(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
+        if self.crash_modal.is_open() {
+            if let Some(action) = self.crash_modal.handle_key(key) {
+                return Some(self.handle_crash_action(action));
+            }
+            return Some(vec![]);
+        }
+
         if self.permission_prompt.is_open() {
             if let Some(answer) = self.permission_prompt.handle_key(key) {
                 let subagent_id = self.permission_prompt.subagent_id().map(str::to_owned);
@@ -869,8 +896,55 @@ impl App {
 
     fn quit_with(&mut self, req: ExitRequest) -> Vec<Action> {
         self.save_input_history();
+        if req == ExitRequest::Reload {
+            self.lua_crash_suppressed = true;
+        }
         self.exit_request = req;
         vec![]
+    }
+
+    fn handle_crash_action(&mut self, action: CrashAction) -> Vec<Action> {
+        match action {
+            CrashAction::Quit => self.quit_with(ExitRequest::Success),
+            CrashAction::Reload => self.quit_with(ExitRequest::Reload),
+            CrashAction::ReloadWithoutPlugins => {
+                self.force_no_plugins = true;
+                self.quit_with(ExitRequest::Reload)
+            }
+        }
+    }
+
+    /// Called by the event loop when the Lua runtime transitions from live
+    /// to dead. `info` is the panic-hook capture (or a generic placeholder
+    /// for an unknown shutdown). Idempotent: a no-op if the modal is open or
+    /// a reload is already in flight.
+    pub(crate) fn open_lua_crash(&mut self, info: CrashInfo) {
+        if self.crash_modal.is_open() || self.lua_crash_suppressed {
+            return;
+        }
+        self.crash_modal.open(info, self.no_plugins);
+    }
+
+    /// True when the runtime was alive last tick but the event handle is now
+    /// disconnected. Reads the panic-hook capture (falling back to a generic
+    /// message) and opens the crash modal.
+    pub(crate) fn poll_lua_crash(&mut self) -> bool {
+        if !self.lua_alive
+            || self.lua_crash_suppressed
+            || self.crash_modal.is_open()
+            || !self.lua_event_handle.is_disconnected()
+        {
+            return false;
+        }
+        self.lua_alive = false;
+        let info = self
+            .lua_crash_slot
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(CrashInfo::generic);
+        self.open_lua_crash(info);
+        true
     }
 
     pub(crate) fn handle_submit(&mut self, sub: Submission) -> Vec<Action> {
@@ -1416,8 +1490,9 @@ impl App {
         vec![]
     }
 
-    fn overlays(&self) -> [&dyn Overlay; 13] {
+    fn overlays(&self) -> [&dyn Overlay; 14] {
         [
+            &self.crash_modal,
             &self.help_modal,
             &self.usage_modal,
             &self.btw_modal,
@@ -1434,8 +1509,9 @@ impl App {
         ]
     }
 
-    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 13] {
+    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 14] {
         [
+            &mut self.crash_modal,
             &mut self.help_modal,
             &mut self.usage_modal,
             &mut self.btw_modal,

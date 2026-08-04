@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use color_eyre::Result;
-use color_eyre::eyre::Context;
+use color_eyre::eyre::{Context, Report};
 
 use maki_agent::command::{self, CustomCommand};
 use maki_agent::tools::ToolRegistry;
@@ -17,6 +17,7 @@ use maki_storage::id::MakiId;
 use maki_ui::{AppSession, RunOutcome};
 
 use crate::cli::{Cli, normalize_tool_name};
+use crate::cmd::{StartError, load_init_or_err, start_host};
 use crate::setup;
 
 const FALLBACK_MODEL_SPEC: &str = "anthropic/claude-sonnet-4-20250514";
@@ -80,15 +81,14 @@ fn discover_commands(disable: bool) -> Vec<CustomCommand> {
     command::discover_commands(&cwd)
 }
 
-fn load_config(plugin_host: &PluginHost, cli: &Cli, cwd: &Path) -> Result<Config> {
-    let raw_config = plugin_host
-        .load_init_files_or_skip(cli.no_plugins, cwd)
-        .context("load init.lua files")?;
+fn load_config(plugin_host: &PluginHost, cli: &Cli, cwd: &Path) -> Result<Config, StartError> {
+    let raw_config = load_init_or_err(plugin_host, cli.no_plugins, cwd)?;
 
     let mut config = raw_config
         .unwrap_or_default()
         .into_config(cli.no_rtk)
-        .context("invalid config")?;
+        .context("invalid config")
+        .map_err(StartError::Other)?;
     config.permissions = load_permissions(cwd);
 
     if cli.yolo || config.always_yolo {
@@ -99,7 +99,8 @@ fn load_config(plugin_host: &PluginHost, cli: &Cli, cwd: &Path) -> Result<Config
             .allowed_tools
             .iter()
             .map(|t| normalize_tool_name(t))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()
+            .map_err(|e| StartError::Other(Report::from(e)))?;
     }
     if !cli.disallowed_tools.is_empty() {
         config.agent.disabled_tools.extend(
@@ -108,19 +109,21 @@ fn load_config(plugin_host: &PluginHost, cli: &Cli, cwd: &Path) -> Result<Config
                 .filter_map(|t| normalize_tool_name(t).ok()),
         );
     }
-    config.validate()?;
+    config
+        .validate()
+        .map_err(|e| StartError::Other(Report::from(e)))?;
     Ok(config)
 }
 
 fn config_or_fallback(
-    loaded: Result<Config>,
+    loaded: Result<Config, StartError>,
     fallback: Option<Config>,
     warnings: &mut Vec<String>,
-) -> Result<Config> {
+) -> Result<Config, StartError> {
     match (loaded, fallback) {
         (Ok(config), _) => Ok(config),
         (Err(e), Some(last_good)) => {
-            warnings.push(format!("{CONFIG_FALLBACK_WARNING}: {e:#}"));
+            warnings.push(format!("{CONFIG_FALLBACK_WARNING}: {}", e.fmt_advisory()));
             Ok(last_good)
         }
         (Err(e), None) => Err(e),
@@ -135,11 +138,10 @@ fn build_stack(
     cwd: &Path,
     storage: &StateDir,
     fallback: Option<(Config, Model)>,
-) -> Result<(Stack, Vec<String>)> {
+) -> Result<(Stack, Vec<String>), StartError> {
     let mut warnings = Vec::new();
 
-    let mut plugin_host = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), !cli.no_jit)
-        .context("initialize lua plugin host")?;
+    let mut plugin_host = start_host(!cli.no_jit)?;
 
     let (fallback_config, fallback_model) = fallback.unzip();
     let reloading = fallback_model.is_some();
@@ -150,11 +152,11 @@ fn build_stack(
     )?;
 
     if let Err(e) = plugin_host.load_builtins(&config.plugins) {
-        let e = color_eyre::eyre::Report::from(e).wrap_err("load builtin plugins");
+        let e = Report::from(e).wrap_err("load builtin plugins");
         if reloading {
             warnings.push(format!("{e:#}"));
         } else {
-            return Err(e);
+            return Err(StartError::Runtime(e));
         }
     }
 
@@ -171,7 +173,7 @@ fn build_stack(
             let placeholder = Model::from_spec(FALLBACK_MODEL_SPEC).expect("fallback model");
             (placeholder, true)
         }
-        (Err(e), None) => return Err(e),
+        (Err(e), None) => return Err(StartError::Other(Report::from(e))),
     };
 
     Ok((
@@ -330,6 +332,8 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 hint_reader: stack.plugin_host.hint_reader(),
                 ui_action_rx: stack.plugin_host.ui_action_rx(),
                 lua_event_handle: stack.plugin_host.event_handle(),
+                lua_crash_slot: stack.plugin_host.crash_slot(),
+                no_plugins: cli.no_plugins,
             },
             initial_prompt.take(),
         )
@@ -349,7 +353,11 @@ pub fn run(mut cli: Cli) -> Result<()> {
             RunOutcome::Reload {
                 tabs: reloaded,
                 focused: f,
+                force_no_plugins,
             } => {
+                if force_no_plugins {
+                    cli.no_plugins = true;
+                }
                 let started = std::time::Instant::now();
                 let last_good = (stack.config.clone(), stack.model.clone());
                 // Shut the old host down first so nothing can repopulate
@@ -361,7 +369,8 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 stack.plugin_host.begin_shutdown();
                 ToolRegistry::global().clear_lua();
                 teardown.defer(move || drop(stack));
-                let (new_stack, new_warnings) = build_stack(&cli, &cwd, &storage, Some(last_good))?;
+                let (new_stack, new_warnings) = build_stack(&cli, &cwd, &storage, Some(last_good))
+                    .map_err(|e| color_eyre::eyre::eyre!("{}", e.fmt_advisory()))?;
                 tabs = reloaded;
                 if tabs.is_empty() {
                     tabs.push(AppSession::new(&new_stack.model.spec(), &cwd_str));
@@ -451,8 +460,12 @@ mod tests {
         last_good.always_fast = true;
         let mut warnings = Vec::new();
 
-        let config = config_or_fallback(Err(eyre!("boom")), Some(last_good), &mut warnings)
-            .expect("fallback config");
+        let config = config_or_fallback(
+            Err(StartError::Other(eyre!("boom"))),
+            Some(last_good),
+            &mut warnings,
+        )
+        .expect("fallback config");
 
         assert!(config.always_fast);
         assert_eq!(warnings.len(), 1);
@@ -466,10 +479,11 @@ mod tests {
     #[test]
     fn broken_config_without_fallback_is_fatal() {
         let mut warnings = Vec::new();
-        let err = match config_or_fallback(Err(eyre!("boom")), None, &mut warnings) {
-            Err(e) => e,
-            Ok(_) => panic!("expected error without fallback"),
-        };
+        let err =
+            match config_or_fallback(Err(StartError::Other(eyre!("boom"))), None, &mut warnings) {
+                Err(e) => e,
+                Ok(_) => panic!("expected error without fallback"),
+            };
         assert!(err.to_string().contains("boom"));
         assert!(warnings.is_empty());
     }

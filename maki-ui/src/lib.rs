@@ -42,6 +42,8 @@ pub use event_loop::EventLoopParams;
 
 /// How a UI generation ended. On `Reload`, each tab carries its in-memory
 /// session so the caller reopens everything without re-reading from disk.
+/// `force_no_plugins` is set by the crash modal's "Reload without plugins"
+/// action so the next boot skips a broken user `init.lua`.
 pub enum RunOutcome {
     Exit {
         session_id: Option<MakiId>,
@@ -50,6 +52,7 @@ pub enum RunOutcome {
     Reload {
         tabs: Vec<AppSession>,
         focused: usize,
+        force_no_plugins: bool,
     },
 }
 
@@ -64,6 +67,7 @@ pub fn run(params: EventLoopParams, initial_prompt: Option<String>) -> Result<Ru
         components::ExitRequest::Reload => RunOutcome::Reload {
             tabs: report.tabs,
             focused: report.focused,
+            force_no_plugins: report.force_no_plugins,
         },
         _ => RunOutcome::Exit {
             session_id: report
