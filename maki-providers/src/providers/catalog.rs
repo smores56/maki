@@ -105,6 +105,13 @@ impl ProviderData {
             debug!(provider = %self.display_name, "api key resolved from storage");
             return Some(key);
         }
+        if let Some(key) = maki_config::providers::ProvidersConfig::load()
+            .get(&self.slug)
+            .and_then(|d| d.api_key.clone())
+        {
+            debug!(provider = %self.display_name, "api key resolved from providers.toml");
+            return Some(key);
+        }
         None
     }
 
@@ -403,6 +410,19 @@ static CATALOG_PROVIDER_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
 };
 
 static SHARED_CATALOG: OnceLock<Mutex<CatalogData>> = OnceLock::new();
+
+static OPENCODE_FREE_MODELS_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// Snapshot of the free-models opt-in, cached per process so the provider gate
+/// and the shared catalog can never disagree mid-session.
+pub(crate) fn opencode_free_models_enabled() -> bool {
+    *OPENCODE_FREE_MODELS_ENABLED.get_or_init(|| {
+        maki_config::providers::ProvidersConfig::load()
+            .get("opencode")
+            .and_then(|d| d.enable_free_models)
+            .unwrap_or(false)
+    })
+}
 
 pub(crate) fn init_shared_catalog_if_needed() -> &'static Mutex<CatalogData> {
     // Zen models live under the bare `opencode` catalog slug; Go is its own
@@ -891,6 +911,7 @@ pub struct CatalogMetaView {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::fs;
 
     use super::schema::{CatalogCost, CatalogIndex, CatalogLimits, CatalogModel, CatalogProvider};
     use super::{
@@ -1144,6 +1165,43 @@ mod tests {
         );
         // ANTHROPIC_SECRET_KEY is not set.
         assert!(provider_data.resolve_api_key(&state_dir).is_none());
+    }
+
+    #[test]
+    fn catalog_provider_resolve_api_key_from_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", tmp.path()) };
+        let config = tmp.path().join("maki");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("providers.toml"),
+            "[fake-slug]\napi_key = \"sk-config\"\n",
+        )
+        .unwrap();
+
+        let provider = CatalogProvider {
+            name: "Test".into(),
+            env: vec![],
+            npm: "@ai-sdk/openai-compatible".into(),
+            api: None,
+            models: HashMap::new(),
+        };
+        let provider_data = ProviderData::new(
+            "fake-slug".into(),
+            &provider,
+            EndpointType::ChatCompletions,
+            HashMap::new(),
+        );
+        let (_state_tmp, state_dir) = temp_state_dir();
+        assert_eq!(
+            provider_data.resolve_api_key(&state_dir).as_deref(),
+            Some("sk-config")
+        );
+        match previous_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
     }
 
     #[test]

@@ -8,18 +8,21 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use crate::model::{Model, ModelInfo};
-use crate::provider::{BoxFuture, Provider};
+use crate::provider::{BoxFuture, Provider, ProviderKind};
 use crate::providers::anthropic::shared;
 use crate::providers::catalog::{
     CatalogMeta, EndpointType, config_error, init_shared_catalog_if_needed,
+    opencode_free_models_enabled,
 };
 use crate::providers::http_client;
 use crate::providers::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use crate::{AgentError, Message, ProviderEvent, RequestOptions, StreamResponse, dialect};
 
-use super::{ResolvedAuth, user_agent, with_prefix};
+use super::{KeyPool, ResolvedAuth, user_agent, with_prefix};
 
 const MESSAGES_PATH: &str = "/messages";
+const FREE_MODELS_HINT: &str = "no API key configured for provider 'opencode'; run `maki auth login opencode` \
+or set enable_free_models = true in providers.toml";
 
 static CATALOG_CHAT_CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     slug: "opencode",
@@ -40,6 +43,13 @@ pub struct Opencode {
 
 impl Opencode {
     pub fn new(timeouts: super::Timeouts) -> Result<Self, AgentError> {
+        if !opencode_free_models_enabled()
+            && KeyPool::resolve("opencode", ProviderKind::Opencode.api_key_env()).is_err()
+        {
+            return Err(AgentError::Config {
+                message: FREE_MODELS_HINT.to_string(),
+            });
+        }
         Ok(Self {
             client: http_client(timeouts),
             chat_compat: OpenAiCompatProvider::new(&CATALOG_CHAT_CONFIG, timeouts),
@@ -221,5 +231,123 @@ impl Provider for Opencode {
 
     fn reload_auth(&self) -> BoxFuture<'_, Result<(), AgentError>> {
         Box::pin(async { Ok(()) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::fs;
+
+    use maki_storage::StateDir;
+
+    use super::*;
+    use crate::providers::Timeouts;
+    use crate::providers::catalog::{Authentication, EndpointType, ProviderData, schema};
+
+    struct EnvGuard(Vec<(&'static str, Option<String>)>);
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let saved = vars
+                .iter()
+                .map(|&(key, value)| {
+                    let previous = std::env::var(key).ok();
+                    match value {
+                        Some(value) => unsafe { std::env::set_var(key, value) },
+                        None => unsafe { std::env::remove_var(key) },
+                    }
+                    (key, previous)
+                })
+                .collect();
+            Self(saved)
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+    }
+
+    fn isolated_env(tmp: &tempfile::TempDir) -> EnvGuard {
+        EnvGuard::set(&[
+            ("OPENCODE_API_KEY", None),
+            ("XDG_CONFIG_HOME", Some(tmp.path().to_str().unwrap())),
+            (
+                "XDG_STATE_HOME",
+                Some(tmp.path().join("state").to_str().unwrap()),
+            ),
+        ])
+    }
+
+    #[test]
+    fn new_rejects_without_key_or_free_models_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = isolated_env(&tmp);
+        assert!(Opencode::new(Timeouts::default()).is_err());
+    }
+
+    #[test]
+    fn new_accepts_with_free_models_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = isolated_env(&tmp);
+        let config = tmp.path().join("maki");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("providers.toml"),
+            "[opencode]\nenable_free_models = true\n",
+        )
+        .unwrap();
+        assert!(Opencode::new(Timeouts::default()).is_ok());
+    }
+
+    #[test]
+    fn new_accepts_with_env_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = isolated_env(&tmp);
+        unsafe { std::env::set_var("OPENCODE_API_KEY", "sk-test") };
+        assert!(Opencode::new(Timeouts::default()).is_ok());
+    }
+
+    #[test]
+    fn catalog_auth_resolves_config_api_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = isolated_env(&tmp);
+        let config = tmp.path().join("maki");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("providers.toml"),
+            "[opencode]\napi_key = \"sk-config\"\n",
+        )
+        .unwrap();
+
+        let provider = schema::CatalogProvider {
+            name: "Opencode".into(),
+            env: vec![],
+            npm: "@ai-sdk/openai-compatible".into(),
+            api: Some("https://opencode.ai/zen/v1".into()),
+            models: HashMap::new(),
+        };
+        let data = ProviderData::new(
+            "opencode".into(),
+            &provider,
+            EndpointType::ChatCompletions,
+            HashMap::new(),
+        );
+        let state_dir = StateDir::from_path(tmp.path().join("state"));
+        assert_eq!(
+            data.resolve_api_key(&state_dir).as_deref(),
+            Some("sk-config")
+        );
+        assert!(matches!(
+            data.build_auth(&state_dir),
+            Authentication::KeyBased(_)
+        ));
     }
 }
