@@ -2567,7 +2567,7 @@ Key mappings, modeled after `vim.keymap`. If you have written a
 Neovim keymap plugin before, this will feel familiar.
 
 ```lua
-maki.keymap.set("n", "<C-t>", function()
+maki.keymap.set("<C-t>", function()
   print("hello")
 end, { desc = "Say hello" })
 ```
@@ -2577,17 +2577,16 @@ end, { desc = "Say hello" })
 ### `maki.keymap.set()` {#maki-keymap-set}
 
 ```lua
-maki.keymap.set({mode}, {lhs}, {rhs}, {opts?})
+maki.keymap.set({lhs}, {rhs}, {opts?})
 ```
 
 Bind a key to a Lua function or builtin action, just like
-`vim.keymap.set`. Only normal mode (`"n"`) is supported right now.
+`vim.keymap.set`.
 If {lhs} is already mapped, the old binding is replaced and a
 warning is logged.
 
 **Parameters:**
 
-- `{mode}` (`string`) Mode letter. Currently only `"n"` is accepted.
 - `{lhs}` (`string`) Key in Vim notation, e.g. `"<C-t>"`, `"<Space>"`, `"a"`.
 - `{rhs}` (`function|userdata`) Either a Lua function invoked on press, or a `maki.actions.<name>` handle (zero per-keypress Lua traffic).
 - `{opts?}` (`table?`) Options:
@@ -2601,7 +2600,7 @@ warning is logged.
 **Example:**
 
 ```lua
-maki.keymap.set("n", "<C-t>", function()
+maki.keymap.set("<C-t>", function()
   print("toggle!")
 end, { desc = "Toggle panel" })
 ```
@@ -2611,21 +2610,45 @@ end, { desc = "Toggle panel" })
 ### `maki.keymap.del()` {#maki-keymap-del}
 
 ```lua
-maki.keymap.del({mode}, {lhs})
+maki.keymap.del({lhs})
 ```
 
-Remove the mapping for {lhs} in {mode}. Does nothing if no mapping
-exists for that key.
+Remove the mapping for {lhs}. Does nothing if no mapping exists
+for that key.
 
 **Parameters:**
 
-- `{mode}` (`string`) Mode letter (reserved for future modes).
 - `{lhs}` (`string`) Key to unmap, in Vim notation.
 
 **Example:**
 
 ```lua
-maki.keymap.del("n", "<C-t>")
+maki.keymap.del("<C-t>")
+```
+
+---
+
+### `maki.keymap.get()` {#maki-keymap-get}
+
+```lua
+maki.keymap.get({lhs})
+```
+
+Return the current mapping for {lhs}, or nil if unmapped.
+
+**Parameters:**
+
+- `{lhs}` (`string`) Key in Vim notation, e.g. `"<C-t>"`.
+
+**Returns:** (`table?`) Entry with `kind` (`"builtin"` or `"callback"`),
+  `action` (lua name, builtins only), `context` (comma-joined names,
+  `"General"` when unbounded), `desc`, and `plugin`.
+
+**Example:**
+
+```lua
+local entry = maki.keymap.get("<C-t>")
+print(entry and entry.kind or "unmapped")
 ```
 
 

@@ -7,7 +7,7 @@ use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
 
 use crate::api::actions::{BuiltinAction, LuaBuiltinAction};
-use crate::api::context::{ContextRef, all_names, resolve};
+use crate::api::context::{ContextRef, IDENTITIES, all_names, resolve};
 
 static NEXT_KEYMAP_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -185,6 +185,12 @@ impl KeymapStore {
         (id, old)
     }
 
+    pub fn lookup(&self, key: KeyCode, modifiers: KeyModifiers) -> Option<&StoredKeymap> {
+        self.bindings
+            .iter()
+            .find(|b| b.key == key && b.modifiers == modifiers)
+    }
+
     pub fn del(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Option<RegistryKey> {
         self.bindings
             .iter()
@@ -237,6 +243,30 @@ impl KeymapStore {
             })
     }
 }
+
+/// Lowercased names accepted by [`parse_key_name`], minus function keys.
+const KNOWN_KEY_NAMES: &[&str] = &[
+    "cr",
+    "enter",
+    "return",
+    "space",
+    "esc",
+    "escape",
+    "tab",
+    "bs",
+    "backspace",
+    "del",
+    "delete",
+    "up",
+    "down",
+    "left",
+    "right",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "insert",
+];
 
 /// Smallest edit distance between two strings; O(len(a) * len(b)).
 fn edit_distance(a: &str, b: &str) -> usize {
@@ -292,7 +322,10 @@ pub fn parse_key_notation(input: &str) -> Result<(KeyCode, KeyModifiers), String
         return Ok((KeyCode::Char(c), KeyModifiers::NONE));
     }
 
-    Err(format!("invalid key notation: {s}"))
+    Err(format!(
+        "invalid key notation: {s}{}",
+        did_you_mean_suffix(s, KNOWN_KEY_NAMES.iter().copied())
+    ))
 }
 
 fn parse_bracketed(inner: &str) -> Result<(KeyCode, KeyModifiers), String> {
@@ -366,7 +399,10 @@ fn parse_key_name(name: &str) -> Result<KeyCode, String> {
             if name.len() == 1 {
                 Ok(KeyCode::Char(name.chars().next().unwrap()))
             } else {
-                Err(format!("unknown key: {name}"))
+                Err(format!(
+                    "unknown key: {name}{}",
+                    did_you_mean_suffix(name, KNOWN_KEY_NAMES.iter().copied())
+                ))
             }
         }
     }
@@ -440,19 +476,32 @@ pub(crate) fn parse_rhs(lua: &Lua, rhs: Value) -> LuaResult<KeymapKind> {
             "keymap rhs is nil. Did you typo a maki.actions.* name? \
              Pass a function or a maki.actions.<name> value.",
         )),
-        other => Err(mlua::Error::runtime(format!(
-            "keymap rhs must be a function or maki.actions.<name>, got {}",
-            other.type_name()
-        ))),
+        other => {
+            let suggestion = match &other {
+                Value::String(s) => s
+                    .to_str()
+                    .ok()
+                    .as_ref()
+                    .and_then(|name| {
+                        did_you_mean(name, BuiltinAction::ALL.iter().map(|(_, n, _)| *n))
+                    })
+                    .map(|n| format!(" Did you mean maki.actions.{n}?")),
+                _ => None,
+            };
+            Err(mlua::Error::runtime(format!(
+                "keymap rhs must be a function or maki.actions.<name>, got {}{}",
+                other.type_name(),
+                suggestion.unwrap_or_default()
+            )))
+        }
     }
 }
 
 /// Bind a key to a Lua function or builtin action, just like
-/// `vim.keymap.set`. Only normal mode (`"n"`) is supported right now.
+/// `vim.keymap.set`.
 /// If {lhs} is already mapped, the old binding is replaced and a
 /// warning is logged.
 ///
-/// @param mode string Mode letter. Currently only `"n"` is accepted.
 /// @param lhs string Key in Vim notation, e.g. `"<C-t>"`, `"<Space>"`, `"a"`.
 /// @param rhs function|userdata Either a Lua function invoked on press, or a `maki.actions.<name>` handle (zero per-keypress Lua traffic).
 /// @param opts table? Options:
@@ -463,25 +512,19 @@ pub(crate) fn parse_rhs(lua: &Lua, rhs: Value) -> LuaResult<KeymapKind> {
 ///     `"help"`, ...). A list means AND — every named context must be
 ///     active. Defaults to General, which fires everywhere.
 /// @example
-/// maki.keymap.set("n", "<C-t>", maki.actions.plan_toggle, { desc = "Toggle panel" })
+/// maki.keymap.set("<C-t>", maki.actions.plan_toggle, { desc = "Toggle panel" })
 /// @example
-/// maki.keymap.set("n", "<C-t>", function()
+/// maki.keymap.set("<C-t>", function()
 ///   print("toggle!")
 /// end, { desc = "Toggle panel" })
 #[lua_fn]
 fn set(
     lua: &Lua,
     #[ctx] plugin: Arc<str>,
-    mode: String,
     lhs: String,
     rhs: Value,
     opts: Option<Table>,
 ) -> LuaResult<()> {
-    if mode != "n" {
-        return Err(mlua::Error::runtime(format!(
-            "unsupported keymap mode: {mode}"
-        )));
-    }
     let (key, modifiers) = parse_key_notation(&lhs).map_err(mlua::Error::runtime)?;
     let desc = opts
         .as_ref()
@@ -501,16 +544,15 @@ fn set(
     Ok(())
 }
 
-/// Remove the mapping for {lhs} in {mode}. Does nothing if no mapping
-/// exists for that key.
+/// Remove the mapping for {lhs}. Does nothing if no mapping exists
+/// for that key.
 ///
-/// @param mode string Mode letter (reserved for future modes).
 /// @param lhs string Key to unmap, in Vim notation.
 /// @example
-/// maki.keymap.del("n", "<C-t>")
+/// maki.keymap.del("<C-t>")
 #[lua_fn]
-fn del(lua: &Lua, #[ctx] plugin: Arc<str>, mode: String, lhs: String) -> LuaResult<()> {
-    let _ = (mode, &plugin);
+fn del(lua: &Lua, #[ctx] plugin: Arc<str>, lhs: String) -> LuaResult<()> {
+    let _ = &plugin;
     let (key, modifiers) = parse_key_notation(&lhs).map_err(mlua::Error::runtime)?;
     let old = lua
         .app_data_mut::<KeymapStore>()
@@ -522,24 +564,79 @@ fn del(lua: &Lua, #[ctx] plugin: Arc<str>, mode: String, lhs: String) -> LuaResu
     Ok(())
 }
 
+/// Return the current mapping for {lhs}, or nil if unmapped.
+///
+/// @param lhs string Key in Vim notation, e.g. `"<C-t>"`.
+/// @return (table?) Entry with `kind` (`"builtin"` or `"callback"`),
+///   `action` (lua name, builtins only), `context` (comma-joined names,
+///   `"General"` when unbounded), `desc`, and `plugin`.
+/// @example
+/// local entry = maki.keymap.get("<C-t>")
+/// print(entry and entry.kind or "unmapped")
+#[lua_fn]
+fn get(lua: &Lua, #[ctx] plugin: Arc<str>, lhs: String) -> LuaResult<Option<Table>> {
+    let _ = &plugin;
+    let (key, modifiers) = parse_key_notation(&lhs).map_err(mlua::Error::runtime)?;
+    let Some(store) = lua.app_data_ref::<KeymapStore>() else {
+        return Ok(None);
+    };
+    let Some(entry) = store.lookup(key, modifiers) else {
+        return Ok(None);
+    };
+    let t = lua.create_table()?;
+    match &entry.kind {
+        KeymapKind::Builtin(action) => {
+            t.set("kind", "builtin")?;
+            t.set("action", action.lua_name())?;
+        }
+        KeymapKind::Callback(_) => {
+            t.set("kind", "callback")?;
+            t.set("action", mlua::Value::Nil)?;
+        }
+    }
+    let context = if entry.context.is_empty() {
+        "General".to_string()
+    } else {
+        entry
+            .context
+            .iter()
+            .map(|r| match r {
+                ContextRef::Kind(k) => k.label(),
+                ContextRef::Identity(id) => {
+                    IDENTITIES
+                        .iter()
+                        .find(|i| i.id == *id)
+                        .expect("identity id must exist in the seed table")
+                        .name
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    t.set("context", context)?;
+    t.set("desc", entry.desc.as_str())?;
+    t.set("plugin", entry.plugin.as_ref())?;
+    Ok(Some(t))
+}
+
 lua_table! {
     /// Key mappings, modeled after `vim.keymap`. If you have written a
     /// Neovim keymap plugin before, this will feel familiar.
     ///
     /// ```lua
-    /// maki.keymap.set("n", "<C-t>", function()
+    /// maki.keymap.set("<C-t>", function()
     ///   print("hello")
     /// end, { desc = "Say hello" })
     /// ```
     "maki.keymap" => pub(crate) fn create_keymap_table(plugin: Arc<str>), DOCS [
-        set(plugin), del(plugin),
+        set(plugin), del(plugin), get(plugin),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::context::{ActiveContext, ContextKind, IDENTITIES, IdentityId, applies, tier};
+    use crate::api::context::{ActiveContext, ContextKind, IdentityId, applies, tier};
     use crossterm::event::{KeyCode, KeyModifiers};
     use test_case::test_case;
 
@@ -934,12 +1031,52 @@ mod tests {
         assert!(err.to_string().contains("unknown context \"nonsense\""));
     }
 
+    #[test]
+    fn parse_key_notation_unknown_key_suggests() {
+        let err = parse_key_notation("<C-escp>").unwrap_err();
+        assert!(
+            err.contains("unknown key: escp") && err.contains("Did you mean esc?"),
+            "got: {err}"
+        );
+        let err = parse_key_notation("spce").unwrap_err();
+        assert!(
+            err.contains("invalid key notation: spce") && err.contains("Did you mean space?"),
+            "got: {err}"
+        );
+        assert!(
+            !parse_key_notation("xyzzy")
+                .unwrap_err()
+                .contains("Did you mean"),
+            "no suggestion beyond distance 2"
+        );
+    }
+
+    #[test]
+    fn parse_rhs_string_suggests_nearest_action() {
+        let lua = Lua::new();
+        let s = lua.create_string("file_piccker").unwrap();
+        let err = parse_rhs(&lua, mlua::Value::String(s)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Did you mean maki.actions.file_picker?"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_rhs_string_without_near_action_has_no_suggestion() {
+        let lua = Lua::new();
+        let s = lua.create_string("not a function").unwrap();
+        let err = parse_rhs(&lua, mlua::Value::String(s)).unwrap_err();
+        assert!(!err.to_string().contains("Did you mean"));
+    }
+
     fn store_app(lua: &Lua) {
         lua.set_app_data(KeymapStore::new());
     }
 
     #[test]
-    fn set_binds_and_shadows() {
+    fn set_without_mode_binds_and_shadows() {
         let lua = Lua::new();
         store_app(&lua);
         let f = lua.create_function(|_, ()| Ok(())).unwrap();
@@ -947,7 +1084,6 @@ mod tests {
         set(
             &lua,
             Arc::from("plug"),
-            "n".into(),
             "<C-t>".into(),
             mlua::Value::Function(f),
             None,
@@ -959,7 +1095,6 @@ mod tests {
         set(
             &lua,
             Arc::from("plug2"),
-            "n".into(),
             "<C-t>".into(),
             mlua::Value::Function(f2),
             None,
@@ -982,7 +1117,6 @@ mod tests {
         let err = set(
             &lua,
             Arc::from("plug"),
-            "n".into(),
             "<C-t>".into(),
             mlua::Value::Function(f),
             Some(opts),
@@ -992,23 +1126,100 @@ mod tests {
     }
 
     #[test]
-    fn del_removes_binding() {
+    fn get_returns_callback_entry() {
+        let lua = Lua::new();
+        store_app(&lua);
+        let f = lua.create_function(|_, ()| Ok(())).unwrap();
+        let opts = lua.create_table().unwrap();
+        opts.set("desc", "my binding").unwrap();
+        set(
+            &lua,
+            Arc::from("plug"),
+            "<C-x>".into(),
+            mlua::Value::Function(f),
+            Some(opts),
+        )
+        .unwrap();
+
+        let t = get(&lua, Arc::from("plug"), "<C-x>".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.get::<String>("kind").unwrap(), "callback");
+        assert_eq!(t.get::<mlua::Value>("action").unwrap(), mlua::Value::Nil);
+        assert_eq!(t.get::<String>("context").unwrap(), "General");
+        assert_eq!(t.get::<String>("desc").unwrap(), "my binding");
+        assert_eq!(t.get::<String>("plugin").unwrap(), "plug");
+    }
+
+    #[test]
+    fn get_returns_builtin_entry_with_context_names() {
+        let lua = Lua::new();
+        store_app(&lua);
+        let actions = crate::api::actions::create_actions_table(&lua).unwrap();
+        let ud: mlua::AnyUserData = actions.get("scroll_top").unwrap();
+        let opts = lua.create_table().unwrap();
+        let list = lua.create_table().unwrap();
+        list.push("picker").unwrap();
+        list.push("task_picker").unwrap();
+        opts.set("context", list).unwrap();
+        set(
+            &lua,
+            Arc::from("plug"),
+            "<C-g>".into(),
+            mlua::Value::UserData(ud),
+            Some(opts),
+        )
+        .unwrap();
+
+        let t = get(&lua, Arc::from("plug"), "<C-g>".into())
+            .unwrap()
+            .unwrap();
+        assert_eq!(t.get::<String>("kind").unwrap(), "builtin");
+        assert_eq!(t.get::<String>("action").unwrap(), "scroll_top");
+        assert_eq!(
+            t.get::<String>("context").unwrap(),
+            "picker, task_picker",
+            "kind labels and identity names joined"
+        );
+    }
+
+    #[test]
+    fn get_returns_nil_when_unmapped() {
+        let lua = Lua::new();
+        store_app(&lua);
+        assert!(
+            get(&lua, Arc::from("plug"), "<C-x>".into())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn del_without_mode_removes_binding() {
         let lua = Lua::new();
         store_app(&lua);
         let f = lua.create_function(|_, ()| Ok(())).unwrap();
         set(
             &lua,
             Arc::from("plug"),
-            "n".into(),
             "<C-t>".into(),
             mlua::Value::Function(f),
             None,
         )
         .unwrap();
+        assert!(
+            get(&lua, Arc::from("plug"), "<C-t>".into())
+                .unwrap()
+                .is_some()
+        );
 
-        del(&lua, Arc::from("plug"), "n".into(), "<C-t>".into()).unwrap();
-        assert_eq!(lua.app_data_ref::<KeymapStore>().unwrap().bindings.len(), 0);
+        del(&lua, Arc::from("plug"), "<C-t>".into()).unwrap();
+        assert!(
+            get(&lua, Arc::from("plug"), "<C-t>".into())
+                .unwrap()
+                .is_none()
+        );
 
-        del(&lua, Arc::from("plug"), "n".into(), "<C-t>".into()).unwrap();
+        del(&lua, Arc::from("plug"), "<C-t>".into()).unwrap();
     }
 }

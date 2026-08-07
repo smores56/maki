@@ -763,7 +763,7 @@ mod tests {
         host.load_source(
             "kb",
             r#"
-            maki.keymap.set("n", "<C-g>", function()
+            maki.keymap.set("<C-g>", function()
                 maki.api.register_command({
                     name = "/fired",
                     description = "callback ran",

@@ -176,11 +176,11 @@ impl BuiltinAction {
     }
 }
 
-/// Opaque handle to a builtin action identity. Pass it as the third
+/// Opaque handle to a builtin action identity. Pass it as the second
 /// argument to `maki.keymap.set` instead of a function:
 ///
 /// ```lua
-/// maki.keymap.set("n", "<C-c>", maki.actions.quit)
+/// maki.keymap.set("<C-c>", maki.actions.quit)
 /// ```
 ///
 /// Cannot be constructed from Lua. The only way to obtain one is via

@@ -162,7 +162,7 @@ local function toggle()
   end
 end
 
-maki.keymap.set("n", "<C-t>", toggle, { desc = "Toggle todo panel" })
+maki.keymap.set("<C-t>", toggle, { desc = "Toggle todo panel" })
 
 local function clear_todos()
   items = {}
