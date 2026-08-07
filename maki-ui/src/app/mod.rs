@@ -85,6 +85,7 @@ const FLASH_REWIND: &str = "Press esc again to rewind...";
 const AUTH_EXPIRED_MSG: &str =
     "Token expired. Run `maki auth login` in another terminal, then press Enter to retry.";
 const FLASH_NO_PLAN: &str = "No plan file";
+const FLASH_LUA_DEAD: &str = "binding unavailable (Lua runtime not running)";
 const FAST_UNSUPPORTED_MSG: &str = "Fast mode requires an Anthropic Opus 4.6+ model (API only)";
 const FAST_ON_MSG: &str = "Fast mode: on";
 const FAST_OFF_MSG: &str = "Fast mode: off";
@@ -891,12 +892,17 @@ impl App {
         let (entry, _) = winner?;
         match entry.kind {
             maki_lua::EntryKind::Builtin(action) => Some(self.dispatch_builtin(action)),
-            maki_lua::EntryKind::Callback
-                if self.lua_event_handle.run_keybind_callback(entry.id) =>
-            {
-                Some(vec![])
+            maki_lua::EntryKind::Callback => {
+                if self.lua_event_handle.run_keybind_callback(entry.id) {
+                    Some(vec![])
+                } else {
+                    // Dead host: the send fails, so the binding cannot
+                    // fire. Flash instead of silently swallowing the press,
+                    // then fall through so the widget layer still sees it.
+                    self.flash(FLASH_LUA_DEAD.into());
+                    None
+                }
             }
-            _ => None,
         }
     }
 

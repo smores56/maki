@@ -257,9 +257,12 @@ impl App {
         if r.width > 0 {
             overlay_rect = r;
         }
-        let r = self
-            .help_modal
-            .view(frame, full, &self.keymap_reader.load());
+        let r = self.help_modal.view(
+            frame,
+            full,
+            &self.keymap_reader.load(),
+            self.lua_event_handle.is_alive(),
+        );
         if r.width > 0 {
             overlay_rect = r;
         }

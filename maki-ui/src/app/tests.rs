@@ -3509,6 +3509,36 @@ fn dead_host_callback_binding_falls_through_to_none() {
 }
 
 #[test]
+fn dead_host_callback_binding_flashes() {
+    let entry = maki_lua::KeymapEntry::callback(
+        KeyCode::Char('g'),
+        KeyModifiers::CONTROL,
+        std::sync::Arc::from("test-plugin"),
+        "plugin-only callback",
+        42,
+    );
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test();
+    app.keymap_reader = reader;
+
+    let actions = app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('g'),
+        KeyModifiers::CONTROL,
+    )));
+
+    assert!(
+        actions.is_empty(),
+        "dead-host callback press must dispatch nothing itself"
+    );
+    assert_eq!(
+        app.status_bar.flash_text(),
+        Some(FLASH_LUA_DEAD),
+        "dead-host callback press must flash the unavailable warning"
+    );
+}
+
+#[test]
 fn default_keymap_help_binding_dispatches() {
     let mut app = test_app();
     app.keymap_reader = maki_lua::test_support::keymap_reader_with(
