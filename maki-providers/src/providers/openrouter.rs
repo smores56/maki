@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use flume::Sender;
 use maki_storage::id::SessionRef;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::model::{Model, ModelEntry, ModelInfo, ModelPricing};
 use crate::provider::{BoxFuture, Provider};
@@ -27,8 +27,8 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "OpenRouter",
 };
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[]
+pub fn models() -> Vec<ModelEntry> {
+    Vec::new()
 }
 
 #[derive(Debug)]
@@ -90,6 +90,25 @@ fn effort_dialect(info: Option<&OpenRouterModelInfo>) -> EffortDialect<'_> {
     }
 }
 
+fn open_router_model_info(v: &serde_json::Map<String, Value>) -> OpenRouterModelInfo {
+    OpenRouterModelInfo {
+        reasoning_mandatory: v.get("mandatory").and_then(Value::as_bool) == Some(true),
+        reasoning_default_enabled: v.get("default_enabled").and_then(Value::as_bool) == Some(true),
+        reasoning_efforts: v
+            .get("supported_efforts")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                let mut efforts: Vec<Effort> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str()?.parse().ok())
+                    .collect();
+                efforts.sort_unstable();
+                efforts
+            })
+            .unwrap_or_default(),
+    }
+}
+
 fn parse_model(m: &Value) -> Option<ModelInfo> {
     // Filter: only text input/output models
     let architecture = m["architecture"].as_object()?;
@@ -128,31 +147,17 @@ fn parse_model(m: &Value) -> Option<ModelInfo> {
         })
         .unwrap_or_default();
 
-    let reasoning = m
-        .get("reasoning")
-        .and_then(|v| v.as_object())
-        .map(|v| OpenRouterModelInfo {
-            reasoning_mandatory: v.get("mandatory").and_then(Value::as_bool) == Some(true),
-            reasoning_default_enabled: v.get("default_enabled").and_then(Value::as_bool)
-                == Some(true),
-            reasoning_efforts: v
-                .get("supported_efforts")
-                .and_then(Value::as_array)
-                .map(|arr| {
-                    let mut efforts: Vec<Effort> = arr
-                        .iter()
-                        .filter_map(|v| v.as_str()?.parse().ok())
-                        .collect();
-                    efforts.sort_unstable();
-                    efforts
-                })
-                .unwrap_or_default(),
-        });
+    let reasoning_obj = m.get("reasoning").and_then(|v| v.as_object());
 
-    let supports_thinking = reasoning.is_some()
+    let supports_thinking = reasoning_obj.is_some()
         || m.get("supported_parameters")
             .and_then(|v| v.as_array())
             .is_some_and(|v| v.iter().any(|v| v.as_str() == Some("reasoning")));
+
+    let mut capabilities = Map::new();
+    if let Some(obj) = reasoning_obj {
+        capabilities.insert("reasoning".to_string(), Value::Object(obj.clone()));
+    }
 
     Some(ModelInfo {
         id: id.to_string(),
@@ -162,7 +167,7 @@ fn parse_model(m: &Value) -> Option<ModelInfo> {
         supports_thinking: Some(supports_thinking),
         supports_vision: Some(supports_vision),
         tier: None,
-        provider_info: reasoning.map(|r| Arc::new(r) as Arc<dyn std::any::Any + Send + Sync>),
+        capabilities,
     })
 }
 
@@ -185,19 +190,18 @@ impl Provider for OpenRouter {
 
             body["cache_control"] = json!({"type": "ephemeral"});
 
-            let reasoning_info: Option<Arc<OpenRouterModelInfo>> = {
+            let reasoning_info: Option<OpenRouterModelInfo> = {
                 let guard = crate::model_registry::model_registry().read().unwrap();
                 // Discovery keys by the builtin slug; a dynamic wrap's model
                 // carries its own slug, so don't key by model.provider.
                 guard
                     .discovered("openrouter", &model.id)
-                    .and_then(|d| d.provider_info.clone())
-                    .map(|arc| {
-                        Arc::downcast::<OpenRouterModelInfo>(arc).expect("wrong provider info type")
-                    })
+                    .and_then(|d| d.capabilities.get("reasoning"))
+                    .and_then(Value::as_object)
+                    .map(open_router_model_info)
             };
 
-            let effort_dialect = effort_dialect(reasoning_info.as_deref());
+            let effort_dialect = effort_dialect(reasoning_info.as_ref());
             if model.supports_thinking()
                 && let Some(effort) = opts.thinking.effort_str(&effort_dialect, model)
             {
@@ -210,7 +214,7 @@ impl Provider for OpenRouter {
 
             let extra_headers = [("HTTP-Referer", REFERER), ("X-OpenRouter-Title", APP_TITLE)];
             self.compat
-                .do_stream(model, &extra_headers, &body, event_tx, &auth)
+                .do_stream(model, &extra_headers, &body, event_tx, &auth, None)
                 .await
         })
     }
@@ -293,10 +297,12 @@ mod tests {
         });
 
         let info = parse_model(&m).expect("model should parse");
-        let provider_info = info.provider_info.expect("reasoning info should be set");
-        let reasoning = provider_info
-            .downcast_ref::<OpenRouterModelInfo>()
-            .expect("wrong provider info type");
+        let reasoning = info
+            .capabilities
+            .get("reasoning")
+            .and_then(Value::as_object)
+            .map(open_router_model_info)
+            .expect("reasoning info should be set");
         assert!(reasoning.reasoning_default_enabled);
         assert!(!reasoning.reasoning_mandatory);
         assert_eq!(reasoning.reasoning_efforts, vec![Effort::Low, Effort::High]);

@@ -2,7 +2,7 @@ use crate::model::ModelEntry;
 
 use super::local::OLLAMA;
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: OLLAMA.slug,
     display_name: OLLAMA.display_name,
     protocol: maki_config::providers::Protocol::Openai,
@@ -14,6 +14,6 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     needs_url: true,
 });
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[]
+pub fn models() -> Vec<ModelEntry> {
+    Vec::new()
 }

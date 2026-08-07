@@ -1,13 +1,23 @@
+pub mod auth;
+pub mod builtin;
 pub(crate) mod error;
-pub mod manifest;
+pub mod hooks;
 pub mod model;
 pub mod model_registry;
 pub mod provider;
 pub(crate) mod providers;
+pub mod registry;
 pub mod retry;
 pub(crate) mod types;
 
+pub use auth::{AuthResolver, AuthSpec, BuildOptions};
+pub use builtin::{
+    BuiltInProvider, ProviderPlan, all_builtins, base_url_env_var, base_url_override,
+    builtin_provider, configured_base_url, resolve_api_key_env, resolve_base_url,
+    resolve_default_model, resolve_display_name, resolve_login_url, resolve_protocol,
+};
 pub use error::AgentError;
+pub use hooks::{ProviderHooks, RequestCtx};
 pub use model::{
     FastPricing, Model, ModelEntry, ModelError, ModelFamily, ModelInfo, ModelPricing, ModelTier,
     TokenUsage, add_cost, format_tokens,
@@ -20,9 +30,11 @@ pub use providers::catalog::{
 };
 pub use providers::copilot::auth as copilot_auth;
 pub use providers::dynamic;
+pub use providers::lua_codec::{build_lua_body, build_lua_openai, resolve_lua_auth};
 pub use providers::openai::auth as openai_auth;
+pub use registry::{ProviderSpec, Source, all, clear_owner, get, register, remove};
 pub use types::{
-    ContentBlock, Effort, EffortDialect, IMAGE_OMITTED_NOTE, ImageMediaType, ImageSource, Message,
-    MessageKind, ProviderEvent, ProviderUsage, RequestOptions, Role, StopReason, StreamResponse,
-    ThinkingConfig, UsageLimit, adapt_images_for_model, dialect,
+    ContentBlock, Effort, EffortDialect, EffortSpec, IMAGE_OMITTED_NOTE, ImageMediaType,
+    ImageSource, Message, MessageKind, ProviderEvent, ProviderUsage, RequestOptions, Role,
+    StopReason, StreamResponse, ThinkingConfig, UsageLimit, adapt_images_for_model, dialect,
 };

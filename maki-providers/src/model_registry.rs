@@ -216,12 +216,12 @@ fn static_candidate(provider: &str, tier: ModelTier) -> Option<String> {
         .map(|prefix| format!("{provider}/{prefix}"))
 }
 
-fn static_prefixes(provider: &str, tier: ModelTier) -> impl Iterator<Item = &'static str> {
-    crate::manifest::ManifestRegistry::get(provider)
+fn static_prefixes(provider: &str, tier: ModelTier) -> impl Iterator<Item = String> {
+    crate::registry::get(provider)
         .into_iter()
-        .flat_map(|manifest| manifest.models)
+        .flat_map(|spec| spec.models.clone())
         .filter(move |entry| entry.default && entry.tier == tier)
-        .flat_map(|entry| entry.prefixes.iter().copied())
+        .flat_map(|entry| entry.prefixes.into_iter())
 }
 
 fn tier_for_position(pos: usize) -> ModelTier {
@@ -269,6 +269,7 @@ fn write_overrides(path: &Path, overrides: &BTreeMap<ModelTier, String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
     use tempfile::TempDir;
     use test_case::test_case;
 
@@ -443,7 +444,7 @@ mod tests {
                     supports_thinking: None,
                     supports_vision: None,
                     tier: None,
-                    provider_info: None,
+                    capabilities: Map::new(),
                 },
                 ModelInfo {
                     id: "model-b".into(),
@@ -453,7 +454,7 @@ mod tests {
                     supports_thinking: None,
                     supports_vision: None,
                     tier: None,
-                    provider_info: None,
+                    capabilities: Map::new(),
                 },
             ],
         );

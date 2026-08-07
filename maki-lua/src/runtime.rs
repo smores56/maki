@@ -26,12 +26,17 @@ use serde_json::Value;
 
 use maki_config::RawConfig;
 
+use maki_providers::ProviderUsage;
+use maki_providers::hooks::RequestCtx;
+use maki_providers::model::TokenUsage;
+
 use crate::api::autocmd::AutocmdStore;
 use crate::api::create_maki_global;
 use crate::api::r#fn::{JobOwner, JobStore, deliver_job_event};
 use crate::api::keymap::KeymapReader;
 use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
+use crate::api::provider::ProviderStore;
 use crate::api::slot::SlotStore;
 use crate::api::tool::{LuaTool, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply};
 use crate::api::ui::HintStore;
@@ -112,6 +117,7 @@ pub(crate) type PromptHintCallbacks = BTreeMap<Arc<str>, Vec<PromptHintRegistrat
 
 /// Load/clear drain in-flight tools first so we never mutate a
 /// plugin environment while a tool call is still running.
+#[allow(clippy::enum_variant_names)]
 pub enum Request {
     /// Plugins are loaded, so native codegen may start using idle time. Sent
     /// last so it never interleaves with the loads themselves.
@@ -207,6 +213,23 @@ pub enum Request {
         live: LiveCtx,
         ctx: Box<LuaCtx>,
         reply: flume::Sender<()>,
+    },
+    HookOnRequest {
+        slug: Arc<str>,
+        body: Arc<std::sync::Mutex<serde_json::Value>>,
+        headers: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        ctx: RequestCtx,
+        reply: flume::Sender<Result<(), maki_providers::AgentError>>,
+    },
+    HookOnUsage {
+        slug: Arc<str>,
+        raw: serde_json::Value,
+        reply: flume::Sender<Result<TokenUsage, maki_providers::AgentError>>,
+    },
+    HookUsage {
+        slug: Arc<str>,
+        ctx: RequestCtx,
+        reply: flume::Sender<Result<Option<ProviderUsage>, maki_providers::AgentError>>,
     },
 }
 
@@ -1332,6 +1355,7 @@ impl LuaRuntime {
 
         lua.set_app_data(CommandHandlerMap::new());
         lua.set_app_data(JobStore::new());
+        lua.set_app_data(ProviderStore::default());
         lua.set_app_data(SpawnQueue::new());
         lua.set_app_data(command_writer);
         lua.set_app_data(PromptHintCallbacks::default());
@@ -1343,6 +1367,7 @@ impl LuaRuntime {
         lua.set_app_data(HintStore::new());
         lua.set_app_data(hint_writer);
         lua.set_app_data(Arc::clone(&registry));
+        lua.set_app_data(crate::loader::EventHandle::from_tx(tx.clone()));
 
         let plugins: PluginMap = Rc::new(RefCell::new(HashMap::new()));
         {
@@ -2757,6 +2782,26 @@ pub fn spawn(
                                     }
                                 }).detach();
                             }
+                        }
+                        Request::HookOnRequest { slug, body, headers, ctx, reply } => {
+                            let res = crate::api::provider::dispatch_on_request(
+                                &rt.lua, &slug, body, headers, ctx,
+                            );
+                            let _ = reply.send(res);
+                        }
+                        Request::HookOnUsage { slug, raw, reply } => {
+                            let res = crate::api::provider::dispatch_on_usage(&rt.lua, &slug, &raw);
+                            let _ = reply.send(res);
+                        }
+                        Request::HookUsage { slug, ctx, reply } => {
+                            let lua = rt.lua.clone();
+                            let g = Rc::clone(&gate);
+                            ex.spawn(async move {
+                                let _gate_guard = g.acquire().await;
+                                let res = crate::api::provider::dispatch_usage(&lua, &slug, ctx).await;
+                                let _ = reply.send(res);
+                            })
+                            .detach();
                         }
                     }
                 }

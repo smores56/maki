@@ -4,7 +4,7 @@ use flume::Sender;
 use futures_lite::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tracing::{debug, warn};
 
 use super::ResolvedAuth;
@@ -41,7 +41,7 @@ impl OpenAiCompatProvider {
             None
         } else {
             let providers = maki_config::providers::ProvidersConfig::load();
-            maki_config::providers::configured_base_url(config.slug, providers.get(config.slug))
+            crate::builtin::configured_base_url(config.slug, providers.get(config.slug))
         };
         Self {
             client: super::http_client(timeouts),
@@ -168,6 +168,7 @@ impl OpenAiCompatProvider {
         body: &Value,
         event_tx: &Sender<ProviderEvent>,
         auth: &ResolvedAuth,
+        hooks: Option<&dyn crate::hooks::ProviderHooks>,
     ) -> Result<StreamResponse, AgentError> {
         let json_body = serde_json::to_vec(body)?;
         let mut request = self
@@ -193,6 +194,7 @@ impl OpenAiCompatProvider {
                 BufReader::new(response.into_body()),
                 event_tx,
                 self.stream_timeout,
+                hooks,
             )
             .await
         } else {
@@ -256,7 +258,7 @@ impl OpenAiCompatProvider {
             supports_thinking: None,
             supports_vision: None,
             tier: None,
-            provider_info: None,
+            capabilities: Map::new(),
         })
     }
 
@@ -458,9 +460,6 @@ struct ChunkUsage {
     #[serde(default)]
     completion_tokens: u32,
     prompt_tokens_details: Option<PromptTokensDetails>,
-    /// DeepSeek reports cache hits here instead of `prompt_tokens_details`.
-    #[serde(default)]
-    prompt_cache_hit_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -468,6 +467,23 @@ struct SseChunk {
     #[serde(default)]
     choices: Vec<ChunkChoice>,
     usage: Option<ChunkUsage>,
+}
+
+/// Maps an OpenAI-compatible usage chunk to [`TokenUsage`]. Cache hits arrive
+/// in `prompt_tokens_details.cached_tokens`; provider-specific reshaping (e.g.
+/// DeepSeek's `prompt_cache_hit_tokens`) is a `on_usage` hook's job, not the
+/// shared codec's.
+fn parse_chunk_usage(u: &ChunkUsage) -> TokenUsage {
+    let cached = u
+        .prompt_tokens_details
+        .as_ref()
+        .map_or(0, |d| d.cached_tokens);
+    TokenUsage {
+        input: u.prompt_tokens.saturating_sub(cached),
+        output: u.completion_tokens,
+        cache_read: cached,
+        cache_creation: 0,
+    }
 }
 
 struct ToolAccumulator {
@@ -480,6 +496,7 @@ pub async fn parse_sse(
     reader: impl AsyncBufRead + Unpin,
     event_tx: &Sender<ProviderEvent>,
     stream_timeout: Duration,
+    hooks: Option<&dyn crate::hooks::ProviderHooks>,
 ) -> Result<StreamResponse, AgentError> {
     let mut lines = reader.lines();
 
@@ -517,15 +534,20 @@ pub async fn parse_sse(
         };
 
         if let Some(u) = chunk.usage {
-            let cached = u
-                .prompt_tokens_details
-                .map_or(0, |d| d.cached_tokens)
-                .max(u.prompt_cache_hit_tokens);
-            usage = TokenUsage {
-                input: u.prompt_tokens.saturating_sub(cached),
-                output: u.completion_tokens,
-                cache_read: cached,
-                cache_creation: 0,
+            usage = match hooks {
+                Some(h) => {
+                    let raw: Value = serde_json::from_str::<Value>(data)
+                        .unwrap_or(Value::Null)
+                        .get("usage")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    if let Some(fut) = h.on_usage(&raw) {
+                        fut.await?
+                    } else {
+                        parse_chunk_usage(&u)
+                    }
+                }
+                None => parse_chunk_usage(&u),
             };
         }
 
@@ -713,7 +735,7 @@ data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prom
 data: [DONE]\n";
 
             let (tx, rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT, None)
                 .await
                 .unwrap();
 
@@ -736,22 +758,71 @@ data: [DONE]\n";
         })
     }
 
+    struct StubUsageHooks {
+        input: u32,
+        output: u32,
+        cache_read: u32,
+    }
+
+    impl crate::hooks::ProviderHooks for StubUsageHooks {
+        fn on_request<'a>(
+            &'a self,
+            _: std::sync::Arc<std::sync::Mutex<Value>>,
+            _: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+            _: crate::hooks::RequestCtx,
+        ) -> Option<crate::hooks::BoxFuture<'a, Result<(), AgentError>>> {
+            None
+        }
+
+        fn on_usage<'a>(
+            &'a self,
+            _raw: &'a Value,
+        ) -> Option<crate::hooks::BoxFuture<'a, Result<TokenUsage, AgentError>>> {
+            Some(Box::pin(async move {
+                Ok(TokenUsage {
+                    input: self.input,
+                    output: self.output,
+                    cache_read: self.cache_read,
+                    cache_creation: 0,
+                })
+            }))
+        }
+
+        fn usage(
+            &self,
+        ) -> Option<
+            crate::hooks::BoxFuture<'_, Result<Option<crate::types::ProviderUsage>, AgentError>>,
+        > {
+            None
+        }
+    }
+
     #[test]
-    fn parse_sse_deepseek_cache_hit_tokens() {
+    fn parse_sse_routes_usage_through_hooks() {
         smol::block_on(async {
-            let sse = "\
-data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"prompt_cache_hit_tokens\":80,\"prompt_cache_miss_tokens\":20}}\n\
-\n\
+            let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":40}}}\n\n\
 data: [DONE]\n";
 
+            let hooks = StubUsageHooks {
+                input: 7,
+                output: 5,
+                cache_read: 3,
+            };
             let (tx, _rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
-                .await
-                .unwrap();
+            let resp = parse_sse(
+                Cursor::new(sse.as_bytes()),
+                &tx,
+                TEST_STREAM_TIMEOUT,
+                Some(&hooks),
+            )
+            .await
+            .unwrap();
 
-            assert_eq!(resp.usage.input, 20);
-            assert_eq!(resp.usage.cache_read, 80);
-            assert_eq!(resp.usage.output, 10);
+            assert_eq!(resp.usage.input, 7);
+            assert_eq!(resp.usage.output, 5);
+            assert_eq!(resp.usage.cache_read, 3);
+            assert_eq!(resp.usage.cache_creation, 0);
         })
     }
 
@@ -770,7 +841,7 @@ data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prom
 data: [DONE]\n";
 
             let (tx, rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT, None)
                 .await
                 .unwrap();
 
@@ -898,7 +969,7 @@ data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}],\"usage\":{
 data: [DONE]\n";
 
             let (tx, rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT, None)
                 .await
                 .unwrap();
 
@@ -933,7 +1004,7 @@ data: [DONE]\n";
 data: {\"error\":{\"message\":\"Server overloaded\",\"type\":\"overloaded_error\"}}\n";
 
             let (tx, _rx) = flume::unbounded();
-            let err = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            let err = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT, None)
                 .await
                 .unwrap_err();
 
@@ -958,7 +1029,7 @@ data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}],\"usage\":{
 data: [DONE]\n";
 
             let (tx, _rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT, None)
                 .await
                 .unwrap();
 
@@ -982,7 +1053,7 @@ data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{}}],\"usage\":{
 data: [DONE]\n";
 
             let (tx, _rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT, None)
                 .await
                 .unwrap();
 
@@ -1090,7 +1161,7 @@ data: [DONE]\n";
         smol::block_on(async {
             let sse = "data: [DONE]\n";
             let (tx, _rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT, None)
                 .await
                 .unwrap();
             assert!(resp.message.content.is_empty());
@@ -1113,7 +1184,7 @@ data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\
 data: [DONE]\n";
 
             let (tx, rx) = flume::unbounded();
-            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT)
+            let resp = parse_sse(Cursor::new(sse.as_bytes()), &tx, TEST_STREAM_TIMEOUT, None)
                 .await
                 .unwrap();
 

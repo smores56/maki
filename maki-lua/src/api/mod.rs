@@ -12,6 +12,7 @@ pub(crate) mod keymap;
 pub(crate) mod log;
 pub(crate) mod net;
 pub(crate) mod options;
+pub(crate) mod provider;
 pub(crate) mod session;
 pub(crate) mod slot;
 pub(crate) mod split;
@@ -45,6 +46,7 @@ pub(crate) fn create_maki_global(
     let api = tool::create_api_table(lua, pending, Arc::clone(&plugin), opts)?;
     autocmd::add_autocmd_methods(&api, lua, Arc::clone(&plugin))?;
     slot::add_slot_methods(&api, lua, Arc::clone(&plugin))?;
+    provider::add_provider_fns(&api, lua, permissions, Arc::clone(&plugin))?;
     maki.set("api", api)?;
     maki.set("env", env::create_env_table(lua, permissions)?)?;
     maki.set("fs", fs::create_fs_table(lua, permissions)?)?;

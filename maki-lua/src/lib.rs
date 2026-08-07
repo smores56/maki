@@ -16,7 +16,7 @@ pub use api::util::command::{
 };
 pub use docs::{DocKind, FnDoc, ModuleDoc, ParamDoc, api_docs};
 pub use error::PluginError;
-pub use loader::{EventHandle, PluginHost};
+pub use loader::{EventHandle, PluginHost, bundled_providers_loaded};
 pub use plugin_permissions::{Permission, PluginPermissions};
 pub use runtime::{KILL_GRACE, RestoreItem, WARM_TOOL_CAP};
 

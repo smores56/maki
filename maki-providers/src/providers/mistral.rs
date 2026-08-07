@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use flume::Sender;
 use maki_storage::id::SessionRef;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::model::{Model, ModelEntry, ModelFamily, ModelPricing, ModelTier};
 use crate::provider::{BoxFuture, Provider};
@@ -20,7 +20,7 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "Mistral",
 };
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "mistral",
     display_name: "Mistral",
     protocol: maki_config::providers::Protocol::Openai,
@@ -30,7 +30,7 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     plans: Some(&[
         (
             "standard",
-            maki_config::providers::ProviderPlan {
+            crate::builtin::ProviderPlan {
                 display_name: "Standard",
                 base_url: "https://api.mistral.ai/v1",
                 default_model: Some("mistral/mistral-medium-latest"),
@@ -39,7 +39,7 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
         ),
         (
             "coding",
-            maki_config::providers::ProviderPlan {
+            crate::builtin::ProviderPlan {
                 display_name: "Vibe / Coding",
                 base_url: "https://api.mistral.ai/v1",
                 default_model: Some("mistral/mistral-vibe-cli-latest"),
@@ -51,13 +51,13 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &[
-                "mistral-medium-latest",
-                "mistral-medium-3.5",
-                "mistral-medium-2604",
+            prefixes: vec![
+                "mistral-medium-latest".to_string(),
+                "mistral-medium-3.5".to_string(),
+                "mistral-medium-2604".to_string(),
             ],
             tier: ModelTier::Strong,
             family: ModelFamily::Generic,
@@ -74,7 +74,10 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 262_144,
         },
         ModelEntry {
-            prefixes: &["mistral-small-latest", "mistral-small-2603"],
+            prefixes: vec![
+                "mistral-small-latest".to_string(),
+                "mistral-small-2603".to_string(),
+            ],
             tier: ModelTier::Medium,
             family: ModelFamily::Generic,
             vision: true,
@@ -90,7 +93,10 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 262_144,
         },
         ModelEntry {
-            prefixes: &["ministral-14b-latest", "ministral-14b-2512"],
+            prefixes: vec![
+                "ministral-14b-latest".to_string(),
+                "ministral-14b-2512".to_string(),
+            ],
             tier: ModelTier::Weak,
             family: ModelFamily::Generic,
             vision: false,
@@ -209,7 +215,7 @@ impl Provider for Mistral {
                 extra_headers.push(("x-affinity", session_id.as_str()));
             }
             self.compat
-                .do_stream(model, &extra_headers, &body, event_tx, &auth)
+                .do_stream(model, &extra_headers, &body, event_tx, &auth, None)
                 .await
         })
     }
@@ -254,7 +260,7 @@ impl Provider for Mistral {
                         supports_thinking,
                         supports_vision: Some(supports_vision),
                         tier: None,
-                        provider_info: None,
+                        capabilities: Map::new(),
                     })
                 })
                 .await

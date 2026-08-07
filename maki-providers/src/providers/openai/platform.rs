@@ -179,7 +179,7 @@ impl OpenAi {
 
 fn resolve_openai_base_url() -> Option<String> {
     let config = maki_config::providers::ProvidersConfig::load();
-    maki_config::providers::configured_base_url("openai", config.get("openai"))
+    crate::builtin::configured_base_url("openai", config.get("openai"))
 }
 
 impl Provider for OpenAi {
@@ -222,7 +222,7 @@ impl Provider for OpenAi {
             self.with_oauth_retry(|| async {
                 let auth = self.current_auth();
                 self.compat
-                    .do_stream(model, &[], &body, event_tx, &auth)
+                    .do_stream(model, &[], &body, event_tx, &auth, None)
                     .await
             })
             .await
@@ -236,7 +236,7 @@ impl Provider for OpenAi {
                     .iter()
                     .flat_map(|e| e.prefixes.iter())
                     .filter(|id| is_codex_model(id))
-                    .map(|&s| crate::model::ModelInfo::id_only(s.to_string()))
+                    .map(|s| crate::model::ModelInfo::id_only(s.clone()))
                     .collect();
                 return Ok(models);
             }

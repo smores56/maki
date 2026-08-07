@@ -4,7 +4,7 @@ use flume::Sender;
 use futures::future::join_all;
 use maki_storage::id::SessionRef;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tracing::warn;
 
 use maki_config::providers::Protocol;
@@ -31,7 +31,7 @@ pub(crate) struct LocalEndpointConfig {
 }
 
 fn resolve_protocol_for_local(slug: &str) -> Option<Protocol> {
-    maki_config::providers::resolve_protocol(
+    crate::builtin::resolve_protocol(
         slug,
         maki_config::providers::ProvidersConfig::load().get(slug),
     )
@@ -166,7 +166,7 @@ impl Provider for LocalEndpoint {
             }
 
             self.compat
-                .do_stream(model, &[], &body, event_tx, &auth)
+                .do_stream(model, &[], &body, event_tx, &auth, None)
                 .await
         })
     }
@@ -309,7 +309,7 @@ impl LocalEndpoint {
                     supports_thinking: None,
                     supports_vision,
                     tier: None,
-                    provider_info: None,
+                    capabilities: Map::new(),
                 })
             })
             .collect();
@@ -418,7 +418,7 @@ impl LocalEndpoint {
                 supports_thinking: None,
                 supports_vision: None,
                 tier: None,
-                provider_info: None,
+                capabilities: Map::new(),
             })
             .collect();
         models.sort_by(|a, b| a.id.cmp(&b.id));

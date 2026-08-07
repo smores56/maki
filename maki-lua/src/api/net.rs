@@ -250,7 +250,7 @@ async fn do_request(params: RequestParams) -> Result<ResponseData, String> {
     })
 }
 
-fn extract_host(url: &str) -> Option<&str> {
+pub(crate) fn extract_host(url: &str) -> Option<&str> {
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
@@ -286,7 +286,7 @@ fn check_ssrf(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn is_private_ip(ip: &IpAddr) -> bool {
+pub(crate) fn is_private_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()

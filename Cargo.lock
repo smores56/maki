@@ -2529,7 +2529,6 @@ name = "maki-config"
 version = "0.4.5"
 dependencies = [
  "dotenvy",
- "inventory",
  "maki-config-macro",
  "maki-storage",
  "serde",
@@ -2563,7 +2562,6 @@ dependencies = [
  "regex",
  "serde_json",
  "smol",
- "strum 0.27.2",
  "test-case",
 ]
 

@@ -6,8 +6,8 @@ use flume::Sender;
 use futures_lite::io::BufReader;
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
 use maki_storage::id::SessionRef;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
 use tracing::{debug, warn};
 
 use super::anthropic::shared;
@@ -24,7 +24,7 @@ pub mod auth;
 
 const DEFAULT_API_ENDPOINT: &str = "https://api.githubcopilot.com";
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "copilot",
     display_name: "Copilot",
     protocol: maki_config::providers::Protocol::Openai,
@@ -43,10 +43,14 @@ const RESPONSES_PATH: &str = "/responses";
 const MESSAGES_PATH: &str = "/v1/messages";
 const MODELS_PATH: &str = "/models";
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &["gpt-5-mini", "gpt-5 mini", "claude-haiku-4.5"],
+            prefixes: vec![
+                "gpt-5-mini".to_string(),
+                "gpt-5 mini".to_string(),
+                "claude-haiku-4.5".to_string(),
+            ],
             tier: ModelTier::Weak,
             family: ModelFamily::Generic,
             vision: true,
@@ -56,7 +60,11 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["gpt-5.2", "gpt-4.1", "claude-sonnet-4.5"],
+            prefixes: vec![
+                "gpt-5.2".to_string(),
+                "gpt-4.1".to_string(),
+                "claude-sonnet-4.5".to_string(),
+            ],
             tier: ModelTier::Medium,
             family: ModelFamily::Generic,
             vision: true,
@@ -66,11 +74,11 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &[
-                "gpt-5.4",
-                "gpt-5.3-codex",
-                "claude-opus-4.6",
-                "grok-code-fast-1",
+            prefixes: vec![
+                "gpt-5.4".to_string(),
+                "gpt-5.3-codex".to_string(),
+                "claude-opus-4.6".to_string(),
+                "grok-code-fast-1".to_string(),
             ],
             tier: ModelTier::Strong,
             family: ModelFamily::Generic,
@@ -81,7 +89,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["claude-opus-4.7"],
+            prefixes: vec!["claude-opus-4.7".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Generic,
             vision: true,
@@ -245,6 +253,7 @@ impl Copilot {
                 BufReader::new(response.into_body()),
                 event_tx,
                 self.stream_timeout,
+                None,
             )
             .await
         } else {
@@ -267,8 +276,8 @@ impl Copilot {
             .read()
             .unwrap()
             .discovered("copilot", &model.id)
-            .and_then(|info| info.provider_info.clone())
-            .and_then(|info| Arc::downcast::<CopilotModelInfo>(info).ok())
+            .and_then(|info| CopilotModelInfo::from_capabilities(&info.capabilities))
+            .map(Arc::new)
             .or_else(|| {
                 self.models
                     .lock()
@@ -391,6 +400,10 @@ impl CopilotModel {
 
     fn model_info(&self) -> ModelInfo {
         let reasoning = self.reasoning_info();
+        let mut capabilities = Map::new();
+        if let Ok(val) = serde_json::to_value(reasoning.clone()) {
+            capabilities.insert("reasoning".to_string(), val);
+        }
         ModelInfo {
             id: self.id.clone(),
             context_window: self.capabilities.limits.max_context_window_tokens,
@@ -401,7 +414,7 @@ impl CopilotModel {
             tier: self
                 .model_picker_category
                 .and_then(CopilotModelCategory::tier),
-            provider_info: Some(Arc::new(reasoning)),
+            capabilities,
         }
     }
 
@@ -512,11 +525,17 @@ struct CopilotModelSupports {
     vision: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CopilotModelInfo {
     reasoning_efforts: Vec<Effort>,
     reasoning_off: bool,
     adaptive_thinking: bool,
+}
+
+impl CopilotModelInfo {
+    fn from_capabilities(cap: &Map<String, Value>) -> Option<Self> {
+        serde_json::from_value(cap.get("reasoning")?.clone()).ok()
+    }
 }
 
 #[derive(Deserialize)]
@@ -804,11 +823,8 @@ mod tests {
         assert_eq!(info.supports_thinking, Some(true));
         assert_eq!(info.supports_vision, Some(true));
         assert_eq!(info.tier, Some(ModelTier::Strong));
-        let provider_info = info
-            .provider_info
-            .unwrap()
-            .downcast::<CopilotModelInfo>()
-            .unwrap();
+        let provider_info = CopilotModelInfo::from_capabilities(&info.capabilities)
+            .expect("reasoning info should be set");
         assert_eq!(
             provider_info.reasoning_efforts,
             vec![Effort::Low, Effort::Medium, Effort::High]

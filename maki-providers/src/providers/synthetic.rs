@@ -20,7 +20,7 @@ static CONFIG: OpenAiCompatConfig = OpenAiCompatConfig {
     provider_name: "Synthetic",
 };
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "synthetic",
     display_name: "Synthetic",
     protocol: maki_config::providers::Protocol::Openai,
@@ -32,10 +32,10 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &["hf:moonshotai/Kimi-K2.5"],
+            prefixes: vec!["hf:moonshotai/Kimi-K2.5".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Synthetic,
             vision: false,
@@ -51,7 +51,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["hf:deepseek-ai/DeepSeek-V3.2"],
+            prefixes: vec!["hf:deepseek-ai/DeepSeek-V3.2".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Synthetic,
             vision: false,
@@ -67,7 +67,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 200_000,
         },
         ModelEntry {
-            prefixes: &["hf:zai-org/GLM-4.7-Flash"],
+            prefixes: vec!["hf:zai-org/GLM-4.7-Flash".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Synthetic,
             vision: false,
@@ -137,7 +137,7 @@ impl Provider for Synthetic {
             opts.thinking
                 .apply_reasoning_effort(&mut body, &dialect::STANDARD, model);
             self.compat
-                .do_stream(model, &[], &body, event_tx, &auth)
+                .do_stream(model, &[], &body, event_tx, &auth, None)
                 .await
         })
     }

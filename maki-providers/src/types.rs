@@ -408,9 +408,32 @@ pub struct EffortDialect<'a> {
     pub off: Option<&'static str>,
 }
 
+/// Owned counterpart to [`EffortDialect`], stored on [`crate::registry::ProviderSpec`]
+/// so a Lua `register_provider` call can build one from a runtime table. The
+/// `supported` vector and `off` string are `'static` enough to borrow for the
+/// lifetime of the spec; `as_dialect` hands that borrow to the codec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffortSpec {
+    pub supported: Vec<Effort>,
+    pub adaptive: Option<Effort>,
+    /// Only the well-known opt-out string ("none") is accepted from Lua; a
+    /// runtime string would have to outlive `effort_str`'s `&'static` return.
+    pub off: Option<&'static str>,
+}
+
+impl EffortSpec {
+    pub fn as_dialect(&self) -> EffortDialect<'_> {
+        EffortDialect {
+            supported: &self.supported,
+            adaptive: self.adaptive,
+            off: self.off,
+        }
+    }
+}
+
 pub mod dialect {
     use super::EffortDialect;
-    use maki_storage::sessions::Effort::{High, Low, Max, Medium, Minimal, XHigh};
+    use maki_storage::sessions::Effort::{High, Low, Medium, Minimal, XHigh};
 
     /// Wire string that disables reasoning, for APIs that need an explicit
     /// opt-out.
@@ -440,13 +463,6 @@ pub mod dialect {
         supported: &[High, XHigh],
         adaptive: Some(High),
         off: Some(OFF),
-    };
-    /// DeepSeek accepts only "max"; Adaptive keeps the model's own default
-    /// reasoning depth by sending no effort at all.
-    pub const DEEPSEEK: EffortDialect = EffortDialect {
-        supported: &[Max],
-        adaptive: None,
-        off: None,
     };
     /// `output_config.effort` on Anthropic adaptive-thinking models. The API
     /// has native adaptive mode, so Adaptive sends no effort.
@@ -778,7 +794,7 @@ mod tests {
 
     #[test]
     fn adapt_images_borrows_when_model_has_vision_or_no_images() {
-        let model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        let model = clamp_test_model("anthropic");
         let with_image = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Image {
@@ -802,7 +818,7 @@ mod tests {
 
     #[test]
     fn adapt_images_replaces_blocks_for_text_only_model() {
-        let mut model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        let mut model = clamp_test_model("anthropic");
         model.supports_vision_override = Some(false);
         let messages = vec![Message {
             role: Role::User,
@@ -847,7 +863,7 @@ mod tests {
     fn thinking_model(id: &str) -> crate::model::Model {
         crate::model::Model {
             id: id.into(),
-            ..clamp_test_model(crate::provider::ProviderKind::Anthropic)
+            ..clamp_test_model("anthropic")
         }
     }
 
@@ -858,7 +874,6 @@ mod tests {
             &dialect::PREFER_HIGH,
             &dialect::HIGH_ONLY,
             &dialect::GLM,
-            &dialect::DEEPSEEK,
             &dialect::ANTHROPIC_ADAPTIVE,
             &dialect::TENSORX,
         ];
@@ -905,8 +920,6 @@ mod tests {
     #[test_case(&dialect::GLM, ThinkingConfig::Off,          Some("none")  ; "glm_off_explicit_none")]
     #[test_case(&dialect::GLM, ThinkingConfig::Adaptive,     Some("high")  ; "glm_adaptive")]
     #[test_case(&dialect::GLM, ThinkingConfig::Effort(Max),  Some("xhigh") ; "glm_max_snaps_to_xhigh")]
-    #[test_case(&dialect::DEEPSEEK, ThinkingConfig::Adaptive,        None        ; "deepseek_adaptive_uses_api_default")]
-    #[test_case(&dialect::DEEPSEEK, ThinkingConfig::Effort(Minimal), Some("max") ; "deepseek_minimal")]
     #[test_case(&dialect::ANTHROPIC_ADAPTIVE, ThinkingConfig::Adaptive,      None         ; "anthropic_adaptive_is_native")]
     #[test_case(&dialect::ANTHROPIC_ADAPTIVE, ThinkingConfig::Effort(XHigh), Some("high") ; "anthropic_xhigh_snaps_down")]
     #[test_case(&dialect::TENSORX, ThinkingConfig::Off,             Some("none") ; "tensorx_off_explicit_none")]
@@ -969,15 +982,16 @@ mod tests {
         assert_eq!(body["thinking_budget_tokens"], 16_384);
     }
 
-    fn clamp_test_model(provider: crate::provider::ProviderKind) -> crate::model::Model {
+    fn clamp_test_model(slug: &str) -> crate::model::Model {
+        let spec = crate::registry::get(slug).unwrap();
         crate::model::Model {
             id: "test-model".into(),
-            provider: std::sync::Arc::<str>::from(provider.to_string()),
+            provider: std::sync::Arc::<str>::from(spec.slug.as_ref()),
             tier: crate::model::ModelTier::Medium,
-            family: provider.family(),
+            family: spec.family,
             supports_tool_examples_override: None,
             supports_thinking_override: None,
-            supports_vision_override: Some(provider.family().supports_vision()),
+            supports_vision_override: Some(spec.family.supports_vision()),
             pricing: crate::model::ModelPricing::default(),
             max_output_tokens: Some(8192),
             context_window: 200_000,
@@ -991,7 +1005,7 @@ mod tests {
         thinking: ThinkingConfig,
         expected: ThinkingConfig,
     ) {
-        let mut model = clamp_test_model(crate::provider::ProviderKind::Anthropic);
+        let mut model = clamp_test_model("anthropic");
         model.supports_thinking_override = supports;
         let opts = RequestOptions {
             thinking,
@@ -1002,7 +1016,7 @@ mod tests {
 
     #[test]
     fn request_options_clamped_fast_requires_model_support() {
-        let model = clamp_test_model(crate::provider::ProviderKind::Google);
+        let model = clamp_test_model("google");
         let opts = RequestOptions {
             thinking: ThinkingConfig::Off,
             fast: true,

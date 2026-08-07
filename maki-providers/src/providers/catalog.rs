@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use crate::builtin::builtin_provider;
 use flume::Sender;
 use isahc::config::Configurable;
 use isahc::{AsyncReadResponseExt, HttpClient, Request};
-use maki_config::providers::builtin_provider;
 use serde_json::Value;
 use tracing::{debug, warn};
 
@@ -196,7 +196,7 @@ impl ProviderData {
                     supports_thinking: Some(meta.supports_thinking),
                     supports_vision: Some(meta.supports_vision),
                     tier: None,
-                    provider_info: None,
+                    capabilities: serde_json::Map::new(),
                 })
             })
             .collect();
@@ -683,7 +683,7 @@ impl Provider for CatalogProvider {
                         &stream_model,
                     );
                     self.chat_compat
-                        .do_stream(&stream_model, &[], &body, event_tx, &auth)
+                        .do_stream(&stream_model, &[], &body, event_tx, &auth, None)
                         .await
                 }
                 EndpointType::Messages => {
@@ -756,7 +756,7 @@ impl Provider for CatalogProvider {
                     supports_thinking: Some(meta.supports_thinking),
                     supports_vision: Some(meta.supports_vision),
                     tier: None,
-                    provider_info: None,
+                    capabilities: serde_json::Map::new(),
                 })
                 .collect())
         })

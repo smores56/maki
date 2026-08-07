@@ -1,227 +1,24 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use flume::Sender;
 use serde_json::Value;
-use strum::{Display, EnumIter, EnumString};
 use tracing::{debug, warn};
 
 use maki_storage::id::SessionRef;
 
-use crate::model::{Model, ModelFamily, ModelInfo};
+use crate::auth::BuildOptions;
+use crate::model::{Model, ModelInfo};
 use crate::providers::Timeouts;
-use crate::providers::anthropic::Anthropic;
-use crate::providers::anthropic::bedrock;
 use crate::providers::catalog::{
     OPENCODE_FAMILY_SLUGS, available_if_warm, catalog_providers, catalog_providers_if_available,
 };
-use crate::providers::copilot::Copilot;
-use crate::providers::deepseek::DeepSeek;
 use crate::providers::dynamic;
-use crate::providers::google::Google;
-use crate::providers::local::{LLAMACPP, LocalEndpoint, OLLAMA};
-use crate::providers::mistral::Mistral;
-use crate::providers::openai::OpenAi;
-use crate::providers::opencode::Opencode;
-use crate::providers::openrouter::OpenRouter;
-use crate::providers::synthetic::Synthetic;
-use crate::providers::tensorx::TensorX;
-use crate::providers::zai::Zai;
-use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter)]
-#[strum(serialize_all = "kebab-case")]
-pub enum ProviderKind {
-    Anthropic,
-    #[strum(serialize = "openai")]
-    OpenAi,
-    Google,
-    Copilot,
-    Ollama,
-    LlamaCpp,
-    Mistral,
-    Zai,
-    #[strum(serialize = "deepseek")]
-    DeepSeek,
-    #[strum(serialize = "openrouter")]
-    OpenRouter,
-    Synthetic,
-    #[strum(serialize = "tensorx")]
-    TensorX,
-    #[strum(serialize = "opencode")]
-    Opencode,
-}
-
-impl ProviderKind {
-    pub const fn display_name(self) -> &'static str {
-        match self {
-            Self::Anthropic => "Anthropic",
-            Self::OpenAi => "OpenAI",
-            Self::Google => "Google",
-            Self::Copilot => "Copilot",
-            Self::Ollama => "Ollama",
-            Self::LlamaCpp => "LlamaCpp",
-            Self::Mistral => "Mistral",
-            Self::Zai => "Z.AI",
-            Self::DeepSeek => "DeepSeek",
-            Self::OpenRouter => "OpenRouter",
-            Self::Synthetic => "Synthetic",
-            Self::TensorX => "TensorX",
-            Self::Opencode => "Opencode Zen",
-        }
-    }
-
-    pub const fn api_key_env(self) -> &'static str {
-        match self {
-            Self::Anthropic => "ANTHROPIC_API_KEY",
-            Self::OpenAi => "OPENAI_API_KEY",
-            Self::Google => "GEMINI_API_KEY",
-            Self::Copilot => "GH_COPILOT_TOKEN",
-            Self::Ollama => "OLLAMA_API_KEY",
-            Self::LlamaCpp => "LLAMA_CPP_API_KEY",
-            Self::Mistral => "MISTRAL_API_KEY",
-            Self::Zai => "ZHIPU_API_KEY",
-            Self::DeepSeek => "DEEPSEEK_API_KEY",
-            Self::OpenRouter => "OPENROUTER_API_KEY",
-            Self::Synthetic => "SYNTHETIC_API_KEY",
-            Self::TensorX => "TENSORX_API_KEY",
-            Self::Opencode => "OPENCODE_API_KEY",
-        }
-    }
-
-    pub const fn base_url(self) -> &'static str {
-        match self {
-            Self::Anthropic => "https://api.anthropic.com/v1/messages",
-            Self::OpenAi => "https://api.openai.com/v1",
-            Self::Google => "https://generativelanguage.googleapis.com/v1beta",
-            Self::Copilot => {
-                "https://api.githubcopilot.com (or GraphQL-discovered Copilot API endpoint)"
-            }
-            Self::Ollama => "http://localhost:11434/v1",
-            Self::LlamaCpp => "http://localhost:8080/v1",
-            Self::Mistral => "https://api.mistral.ai/v1",
-            Self::Zai => "https://api.z.ai/api/paas/v4",
-            Self::DeepSeek => "https://api.deepseek.com",
-            Self::OpenRouter => "https://openrouter.ai/api/v1",
-            Self::Synthetic => "https://api.synthetic.new/openai/v1",
-            Self::TensorX => "https://api.tensorx.ai/v1",
-            Self::Opencode => "https://opencode.ai/zen/v1",
-        }
-    }
-
-    pub const fn features(self) -> Option<&'static str> {
-        match self {
-            Self::Anthropic => {
-                Some("Prompt caching, thinking mode (adaptive/budgeted), advanced tool use")
-            }
-            Self::Google => Some("Native Gemini API with thinking support"),
-            Self::Copilot => Some("Native Copilot Chat HTTP API with model endpoint discovery"),
-            Self::Ollama => {
-                Some("Local or remote inference via OLLAMA_HOST, cloud fallback via OLLAMA_API_KEY")
-            }
-            Self::LlamaCpp => Some(
-                "Local or remote inference via LLAMA_CPP_HOST, set optional key via LLAMA_CPP_API_KEY",
-            ),
-            Self::Synthetic => {
-                Some("Reasoning effort support (low/medium/high), open-weight models")
-            }
-            Self::TensorX => Some("Open-weight models, zero data retention, prompt caching"),
-            Self::DeepSeek => Some("Thinking mode toggle (on/off), open-weight models"),
-            Self::OpenRouter => {
-                Some("300+ models from all providers, prompt caching, provider routing")
-            }
-            Self::Opencode => Some(
-                "Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Zen API",
-            ),
-            _ => None,
-        }
-    }
-
-    pub const fn family(self) -> ModelFamily {
-        match self {
-            Self::Anthropic => ModelFamily::Claude,
-            Self::OpenAi => ModelFamily::Gpt,
-            Self::Google => ModelFamily::Gemini,
-            Self::Copilot => ModelFamily::Generic,
-            Self::Ollama => ModelFamily::Generic,
-            Self::LlamaCpp => ModelFamily::Generic,
-            Self::Mistral => ModelFamily::Generic,
-            Self::Zai => ModelFamily::Glm,
-            Self::DeepSeek => ModelFamily::Generic,
-            Self::OpenRouter => ModelFamily::Generic,
-            Self::Synthetic => ModelFamily::Synthetic,
-            Self::TensorX => ModelFamily::Generic,
-            Self::Opencode => ModelFamily::Generic,
-        }
-    }
-
-    /// `None` when we honestly don't know the output window: llama.cpp
-    /// serves whatever model the user loaded, and TensorX rejects explicit
-    /// max_tokens (see tensorx.rs). Unknown means "don't limit", never
-    /// "assume small"; a `0` sentinel here once silently capped llama.cpp
-    /// thinking budgets at the floor.
-    pub const fn fallback_max_output(self) -> Option<u32> {
-        match self {
-            Self::Anthropic => Some(128_000),
-            Self::OpenAi => Some(100_000),
-            Self::Google => Some(65_536),
-            Self::Copilot => Some(100_000),
-            Self::Ollama => Some(16_384),
-            Self::LlamaCpp => None,
-            Self::Mistral => None,
-            Self::Zai => Some(16_000),
-            Self::DeepSeek => Some(384_000),
-            Self::OpenRouter => Some(128_000),
-            Self::Synthetic => Some(32_000),
-            Self::TensorX => None,
-            Self::Opencode => Some(128_000),
-        }
-    }
-
-    pub const fn fallback_context_window(self) -> u32 {
-        match self {
-            Self::Anthropic => 200_000,
-            Self::OpenAi => 200_000,
-            Self::Google => 1_000_000,
-            Self::Copilot => 200_000,
-            Self::Ollama => 128_000,
-            Self::LlamaCpp => 128_000,
-            Self::Mistral => 128_000,
-            Self::Zai => 128_000,
-            Self::DeepSeek => 1_000_000,
-            Self::OpenRouter => 200_000,
-            Self::Synthetic => 128_000,
-            Self::TensorX => 200_000,
-            Self::Opencode => 256_000,
-        }
-    }
-
-    pub fn create(self, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
-        match self {
-            Self::Anthropic => {
-                if bedrock::is_enabled() {
-                    Ok(Box::new(bedrock::Bedrock::new(timeouts)?))
-                } else {
-                    Ok(Box::new(Anthropic::new(timeouts)?))
-                }
-            }
-            Self::OpenAi => Ok(Box::new(OpenAi::new(timeouts)?)),
-            Self::Google => Ok(Box::new(Google::new(timeouts)?)),
-            Self::Copilot => Ok(Box::new(Copilot::new(timeouts)?)),
-            Self::Ollama => Ok(Box::new(LocalEndpoint::new(&OLLAMA, timeouts)?)),
-            Self::LlamaCpp => Ok(Box::new(LocalEndpoint::new(&LLAMACPP, timeouts)?)),
-            Self::Mistral => Ok(Box::new(Mistral::new(timeouts)?)),
-            Self::Zai => Ok(Box::new(Zai::new(timeouts)?)),
-            Self::DeepSeek => Ok(Box::new(DeepSeek::new(timeouts)?)),
-            Self::OpenRouter => Ok(Box::new(OpenRouter::new(timeouts)?)),
-            Self::Synthetic => Ok(Box::new(Synthetic::new(timeouts)?)),
-            Self::TensorX => Ok(Box::new(TensorX::new(timeouts)?)),
-            Self::Opencode => Ok(Box::new(Opencode::new(timeouts)?)),
-        }
-    }
-}
+use crate::registry::Source;
+use crate::{
+    AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse, registry,
+};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -262,14 +59,11 @@ pub trait Provider: Send + Sync {
 }
 
 pub fn provider_for_slug(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
-    if let Ok(kind) = ProviderKind::from_str(slug) {
-        return kind.create(timeouts);
+    if let Some(spec) = registry::get(slug) {
+        return (spec.build)(&spec, BuildOptions::from_timeouts(timeouts));
     }
     if dynamic::display_name(slug).is_some() {
         return dynamic::create(slug, timeouts);
-    }
-    if crate::providers::custom::base_kind(slug).is_some() {
-        return crate::providers::custom::create(slug, timeouts);
     }
     if let Some(catalog) = crate::providers::catalog::try_create(slug, timeouts) {
         return catalog;
@@ -280,17 +74,18 @@ pub fn provider_for_slug(slug: &str, timeouts: Timeouts) -> Result<Box<dyn Provi
 }
 
 pub fn provider_available(slug: &str) -> bool {
-    provider_for_slug(slug, Timeouts::default()).is_ok()
+    match registry::get(slug) {
+        Some(spec) => spec.auth.is_configured(slug),
+        None => provider_for_slug(slug, Timeouts::default()).is_ok(),
+    }
 }
 
 /// Non-blocking variant of [`provider_available`] for offline model discovery:
-/// catalog-backed slugs consult only the already-warm catalog, so a cold cache
-/// reports them unavailable instead of blocking on a network fetch.
+/// registry-backed slugs consult auth config, catalog-backed slugs consult only
+/// the already-warm catalog, so a cold cache reports them unavailable instead
+/// of blocking on a network fetch.
 fn provider_available_offline(slug: &str) -> bool {
-    if ProviderKind::from_str(slug).is_ok()
-        || dynamic::display_name(slug).is_some()
-        || crate::providers::custom::base_kind(slug).is_some()
-    {
+    if registry::get(slug).is_some() {
         return provider_available(slug);
     }
     available_if_warm(slug)
@@ -366,29 +161,31 @@ pub struct ModelBatch {
 /// Never blocks on catalog download; catalog-backed providers appear only once
 /// the catalog has warmed in the background.
 pub fn available_model_specs() -> Vec<String> {
-    let mut specs: Vec<String> = crate::manifest::ManifestRegistry::builtins()
-        .iter()
-        .filter(|m| provider_available_offline(m.slug))
-        .flat_map(|m| {
-            m.models
+    crate::providers::dynamic::ensure_discovered();
+    let mut specs: Vec<String> = registry::all()
+        .into_iter()
+        .filter(|s| matches!(s.source(), Source::Builtin | Source::Toml))
+        .filter(|s| provider_available_offline(s.slug.as_ref()))
+        .flat_map(|s| {
+            let slug = Arc::clone(&s.slug);
+            s.models
                 .iter()
-                .flat_map(|entry| entry.prefixes.iter())
-                .map(move |p| format!("{}/{}", m.slug, p))
+                .flat_map(|entry| entry.prefixes.iter().cloned())
+                .map(move |p| format!("{slug}/{p}"))
+                .collect::<Vec<_>>()
         })
         .collect();
     for slug in dynamic::discovered_slugs() {
-        specs.extend(dynamic::dynamic_model_specs_for(slug));
-    }
-    for spec in crate::providers::custom::declared_model_specs() {
-        if !specs.contains(&spec) {
-            specs.push(spec);
+        for spec in dynamic::dynamic_model_specs_for(slug) {
+            if !specs.contains(&spec) {
+                specs.push(spec);
+            }
         }
     }
     if let Some(catalog) = catalog_providers_if_available() {
         for cat in catalog {
-            if ProviderKind::from_str(&cat.slug).is_ok()
+            if registry::get(&cat.slug).is_some()
                 || dynamic::base_for_slug(&cat.slug).is_some()
-                || crate::providers::custom::base_kind(&cat.slug).is_some()
                 || OPENCODE_FAMILY_SLUGS.contains(&cat.slug.as_str())
             {
                 continue;
@@ -414,19 +211,26 @@ pub async fn fetch_all_models(
     let (tx, rx) = flume::unbounded();
     let timeouts = Timeouts::default();
 
-    for manifest in crate::manifest::ManifestRegistry::builtins() {
-        let slug = manifest.slug;
-        let Ok(provider) = smol::unblock(move || provider_for_slug(slug, timeouts)).await else {
-            warn!(provider = slug, "failed to create provider, skipping");
+    for spec in registry::all()
+        .into_iter()
+        .filter(|s| matches!(s.source(), Source::Builtin | Source::Toml))
+    {
+        let slug: Arc<str> = Arc::clone(&spec.slug);
+        let slug_for_create = Arc::clone(&slug);
+        let Ok(provider) =
+            smol::unblock(move || provider_for_slug(&slug_for_create, timeouts)).await
+        else {
+            warn!(provider = %slug, "failed to create provider, skipping");
             continue;
         };
-        let display_name = manifest.display_name;
+        let display_name = spec.display_name.clone();
+        let accepts_arbitrary = spec.accepts_arbitrary_models;
+        let static_models = spec.models.clone();
         let tx = tx.clone();
         smol::spawn(async move {
             let batch = match provider.list_models().await {
                 Ok(models) => {
-                    if manifest.accepts_arbitrary_models {
-                        let slug: Arc<str> = Arc::from(slug);
+                    if accepts_arbitrary {
                         crate::model_registry::model_registry()
                             .write()
                             .unwrap()
@@ -434,8 +238,8 @@ pub async fn fetch_all_models(
                     }
                     let mut specs: Vec<String> =
                         models.iter().map(|m| format!("{slug}/{}", m.id)).collect();
-                    for entry in manifest.models {
-                        for prefix in entry.prefixes {
+                    for entry in &static_models {
+                        for prefix in &entry.prefixes {
                             let spec = format!("{slug}/{prefix}");
                             if !specs.contains(&spec) {
                                 specs.push(spec);
@@ -448,9 +252,8 @@ pub async fn fetch_all_models(
                     }
                 }
                 Err(e) => {
-                    warn!(provider = slug, error = %e, "failed to list models, using static fallback");
-                    let fallback: Vec<String> = manifest
-                        .models
+                    warn!(provider = %slug, error = %e, "failed to list models, using static fallback");
+                    let fallback: Vec<String> = static_models
                         .iter()
                         .flat_map(|entry| entry.prefixes.iter())
                         .map(|p| format!("{slug}/{p}"))
@@ -502,7 +305,7 @@ pub async fn fetch_all_models(
     smol::spawn(async move {
         let catalog = smol::unblock(catalog_providers).await;
         for cat in catalog {
-            if ProviderKind::from_str(&cat.slug).is_ok()
+            if registry::get(&cat.slug).is_some()
                 || dynamic::base_for_slug(&cat.slug).is_some()
                 || OPENCODE_FAMILY_SLUGS.contains(&cat.slug.as_str())
             {
@@ -516,31 +319,6 @@ pub async fn fetch_all_models(
             let _ = tx_catalog
                 .send_async(ModelBatch {
                     models,
-                    warnings: Vec::new(),
-                })
-                .await;
-        }
-    })
-    .detach();
-
-    let custom_timeouts = timeouts;
-    let tx_custom = tx.clone();
-    smol::spawn(async move {
-        let declared = crate::providers::custom::declared_model_specs();
-        if !declared.is_empty() {
-            let _ = tx_custom
-                .send_async(ModelBatch {
-                    models: declared,
-                    warnings: Vec::new(),
-                })
-                .await;
-        }
-        let custom_specs =
-            smol::unblock(move || crate::providers::custom::discover_models(custom_timeouts)).await;
-        if !custom_specs.is_empty() {
-            let _ = tx_custom
-                .send_async(ModelBatch {
-                    models: custom_specs,
                     warnings: Vec::new(),
                 })
                 .await;

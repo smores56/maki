@@ -1,8 +1,10 @@
-use maki_providers::manifest::ManifestRegistry;
+use maki_agent::tools::ToolRegistry;
+use maki_lua::PluginHost;
+use maki_providers::AuthSpec;
 use maki_providers::model::{ModelEntry, ModelTier};
-use maki_providers::provider::ProviderKind;
+use maki_providers::registry::{self, ProviderSpec};
 use std::fmt::Write;
-use strum::IntoEnumIterator;
+use std::sync::Arc;
 
 const FRONT_MATTER: &str = r#"+++
 title = "Providers"
@@ -72,6 +74,100 @@ const OPENCODE_GO_SECTION: &str = r#"### Opencode Go
 
 No hardcoded model catalog. Use any model ID supported by this provider. An API key is required.
 "#;
+const LUA_PROVIDERS: &str = r#"## Lua Providers
+
+A provider can be defined entirely in Lua, without Rust. Today this is how DeepSeek is configured, and other OpenAI-compatible providers can follow. The definition lives in Lua; the actual HTTP codec stays in Rust, so you inherit request streaming, SSE parsing, and tool formatting for free.
+
+Call `maki.api.register_provider(spec)` in a bundled provider file. The spec is a table:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `slug` | string | Required. Identifies the provider (e.g. `deepseek`). |
+| `display_name` | string | Shown in the model picker. |
+| `family` | string | `"generic"`, or a known family name. |
+| `codec` | string or table | `"openai"` is the only supported codec in this version. A table form lets a future codec take options. |
+| `base_url` | string | The API root. `<SLUG>_BASE_URL` overrides it. |
+| `auth` | table | See the auth table below. |
+| `supports_thinking` | boolean | Whether the model exposes a thinking mode. |
+| `context_window`, `max_output_tokens` | integer | Fallback sizes. |
+| `effort` | table | `{ supported = { ... } }`. When set, the codec applies `reasoning_effort` from the thinking config itself. |
+| `models` | table | Array of model entries (prefixes, tier, default, vision, pricing, sizes). |
+| `on_request`, `on_usage`, `usage` | function | Hooks. See below. |
+
+Unknown keys are an error. A typo in a pricing field would silently mis-cost every request, so the spec is strict. `models` (as a hook that lists models) and `on_error` are deliberately unsupported in this version.
+
+### The auth table
+
+```lua
+auth = { kind = "api_key", env = "DEEPSEEK_API_KEY",
+         login_url = "https://platform.deepseek.com/api_keys", needs_url = false }
+```
+
+`kind = "api_key"` reads the key from `env`, or from stored credentials after `maki auth login <slug>`. `login_url` is printed during login. Only the `api_key` kind ships in this version.
+
+### Hooks
+
+Hooks shape requests and map responses without moving the codec into Lua. They are optional.
+
+- `on_request(body, ctx)`: mutate the request body before it is sent. `body` is a handle, not a Lua table (see the marshalling rules below).
+- `on_usage(raw)`: map the raw usage `Value` from the stream to a token-usage table. Wired for the `openai` codec only. Declaring `on_usage` with any other codec is rejected at registration.
+- `usage(ctx)`: fetch provider-side quota (balance, limits) via `ctx:request(path)`.
+
+A dead Lua host is an error, never a skipped hook. If the host that registered the provider is gone, the request fails instead of silently sending an unshaped body.
+
+### Marshalling: handles, not tables
+
+The request body is shared between Lua and the Rust codec as JSON. To avoid scrambling key order on the wire, hooks never receive a converted Lua table. They receive a handle.
+
+```lua
+on_request = function(body, ctx)
+  body:set("thinking", { type = "enabled" })   -- a small literal, converted in
+  local n = body:get("max_tokens")              -- a scalar, converted out
+  if body:has("tools") then ... end             -- no conversion, just a check
+end
+```
+
+Two handle types back every container:
+
+| Method | What it does |
+|--------|--------------|
+| `obj:get(key)` | Scalar values come back as Lua values. Containers come back as nested handles. |
+| `obj:set(key, value)` | A Lua value is written into the JSON tree. |
+| `obj:has(key)` | True if the key exists. Performs no conversion. An assistant turn's `reasoning_content` can run to thousands of tokens; use `has` instead of `get` to check for it. |
+| `arr:len()` | Number of elements. Also `#arr`. |
+| `arr:get(i)` | The element at 1-based index `i`, as a nested handle. |
+
+Mutations survive into the serialized body. The body, `ctx.messages`, `ctx.tools`, and `ctx.headers` all reach the same shared tree through handles.
+
+### ctx
+
+```lua
+ctx.model        -- { id, provider, tier, family, max_output_tokens, context_window,
+                 --   supports_thinking, supports_vision, capabilities }
+ctx.thinking     -- { enabled, mode, effort, budget }
+ctx.session_id   -- string or nil
+ctx.messages     -- JsonArray (the body's messages)
+ctx.tools        -- JsonArray (the body's tools)
+ctx.headers      -- JsonObject (extra request headers)
+ctx:request(path, opts)
+```
+
+`ctx:request(path)` does an authenticated HTTP request against the provider's `base_url`. The path is relative (starts with `/`). Auth is the provider's resolved headers. Redirects are disabled, so `Authorization` and other headers never leak to a different host. The SSRF guard is on, waived only when `base_url` itself points at a loopback or private address (for local servers like ollama). Errors redact the URL and cap the response body.
+
+Every handle and `ctx` carries a generation counter. Once `on_request` returns, stashed handles stop working. A provider file cannot save `ctx` and reuse it later, which closes a prompt-injection path where a model could reach an authenticated fetch.
+
+### Loading and rollback
+
+Bundled providers load through `plugins/providers/init.lua`, which wraps each `require` in `maki.api.provider_scope`:
+
+```lua
+local ok, err = maki.api.provider_scope("deepseek", function() require("deepseek") end)
+```
+
+A file that registers a spec and then throws leaves nothing behind: `provider_scope` rolls back to the state before the chunk ran. A bare `pcall` would isolate the error but keep a half-configured spec installed.
+
+Lua providers are bundled-only in this version. User plugins and `<cwd>/.maki/init.lua` run without the `net` permission, and `register_provider` requires it, so a repo-supplied provider cannot intercept the API key, the conversation, or network egress.
+"#;
 
 const MODEL_IDENTIFIERS: &str = r#"## Model Identifiers
 
@@ -88,7 +184,7 @@ If the model name is unique across providers, the prefix can be omitted."#;
 fn providers_toml_section() -> String {
     let mut plan_rows = String::new();
     let mut plan_examples = String::new();
-    let mut builtins: Vec<_> = maki_config::providers::all_builtins();
+    let mut builtins: Vec<_> = maki_providers::all_builtins();
     builtins.sort_by_key(|b| b.slug);
     let mut wrote_example = false;
     for b in builtins {
@@ -222,7 +318,15 @@ You can also create a custom provider interactively with `maki auth login` and c
 }
 
 fn dynamic_providers_section() -> String {
-    let valid_values: Vec<String> = ProviderKind::iter().map(|k| format!("`{k}`")).collect();
+    // A script's `base` inherits a *codec* and model catalog, which only the
+    // Rust-owned builtins provide. Lua-registered providers (owner `lua:`),
+    // toml, and script specs are not legal bases, so list `owner.is_none()`
+    // specs instead of the whole registry (§14).
+    let valid_values: Vec<String> = registry::all()
+        .iter()
+        .filter(|s| s.owner.is_none())
+        .map(|s| format!("`{}`", s.slug))
+        .collect();
 
     format!(
         r#"## Dynamic Providers
@@ -284,78 +388,77 @@ fn format_context(entry: &ModelEntry) -> String {
 }
 
 struct ProviderSection {
-    kind: ProviderKind,
-    name: &'static str,
+    slug: String,
+    name: String,
     auth_line: String,
-    urls: Vec<&'static str>,
-    features: Option<&'static str>,
-    entries: &'static [ModelEntry],
+    urls: Vec<String>,
+    features: Option<String>,
+    entries: Vec<ModelEntry>,
 }
 
-fn format_auth(kind: ProviderKind) -> String {
-    let env = kind.api_key_env();
-    if kind == ProviderKind::Ollama {
+fn format_auth(spec: &ProviderSpec) -> String {
+    let env = match &spec.auth {
+        AuthSpec::ApiKey { env, .. } => env,
+        AuthSpec::External(_) => "",
+    };
+    if spec.slug.as_ref() == "ollama" {
         format!("`OLLAMA_HOST` for local/remote (e.g. `http://localhost:11434`), `{env}` for auth")
     } else {
         format!("`{env}`")
     }
 }
 
+/// Display URLs for the docs. Separate from `ProviderSpec::base_url` (the
+/// runtime origin the provider appends paths to) because the docs show the
+/// full endpoint a user would recognize, e.g. Anthropic's `/v1/messages`.
+fn doc_urls(spec: &ProviderSpec) -> Vec<String> {
+    match spec.slug.as_ref() {
+        "anthropic" => vec!["https://api.anthropic.com/v1/messages".to_string()],
+        "openai" => vec!["https://api.openai.com/v1".to_string()],
+        "google" => vec!["https://generativelanguage.googleapis.com/v1beta".to_string()],
+        "copilot" => vec![
+            "https://api.githubcopilot.com (or GraphQL-discovered Copilot API endpoint)"
+                .to_string(),
+        ],
+        "ollama" => vec!["http://localhost:11434/v1".to_string()],
+        "llama-cpp" => vec!["http://localhost:8080/v1".to_string()],
+        "mistral" => vec!["https://api.mistral.ai/v1".to_string()],
+        "zai" => vec![
+            "https://api.z.ai/api/paas/v4".to_string(),
+            "https://api.z.ai/api/coding/paas/v4".to_string(),
+        ],
+        "deepseek" => vec!["https://api.deepseek.com".to_string()],
+        "openrouter" => vec!["https://openrouter.ai/api/v1".to_string()],
+        "synthetic" => vec!["https://api.synthetic.new/openai/v1".to_string()],
+        "tensorx" => vec!["https://api.tensorx.ai/v1".to_string()],
+        "opencode" => vec!["https://opencode.ai/zen/v1".to_string()],
+        _ => spec.base_url.clone().into_iter().collect(),
+    }
+}
+
 fn build_sections() -> Vec<ProviderSection> {
     let mut sections = Vec::new();
 
-    for kind in ProviderKind::iter() {
-        match kind {
-            ProviderKind::Zai => {
-                sections.push(ProviderSection {
-                    kind: ProviderKind::Zai,
-                    name: "Z.AI",
-                    auth_line: format!(
-                        "{} (shared across both endpoints)",
-                        format_auth(ProviderKind::Zai)
-                    ),
-                    urls: vec![
-                        ProviderKind::Zai.base_url(),
-                        "https://api.z.ai/api/coding/paas/v4",
-                    ],
-                    features: ProviderKind::Zai.features(),
-                    entries: ManifestRegistry::get("zai").unwrap().models,
-                });
-            }
-            ProviderKind::OpenAi => {
-                sections.push(ProviderSection {
-                    kind,
-                    name: kind.display_name(),
-                    auth_line: format!("{} (also supports OAuth device flow)", format_auth(kind)),
-                    urls: vec![kind.base_url()],
-                    features: kind.features(),
-                    entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
-                });
-            }
-            ProviderKind::Copilot => {
-                sections.push(ProviderSection {
-                    kind,
-                    name: kind.display_name(),
-                    auth_line: format!(
-                        "{} (or run `maki auth login copilot` to import a token from gh)",
-                        format_auth(kind)
-                    ),
-                    urls: vec![kind.base_url()],
-                    features: kind.features(),
-                    entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
-                });
-            }
-            _ => {
-                sections.push(ProviderSection {
-                    kind,
-                    name: kind.display_name(),
-                    auth_line: format_auth(kind),
-                    urls: vec![kind.base_url()],
-                    features: kind.features(),
-                    entries: ManifestRegistry::get(&kind.to_string()).unwrap().models,
-                });
-            }
-        }
+    for spec in registry::all() {
+        let slug = spec.slug.as_ref();
+        let urls = doc_urls(&spec);
+        let auth_line = match slug {
+            "zai" => format!("{} (shared across both endpoints)", format_auth(&spec)),
+            "openai" => format!("{} (also supports OAuth device flow)", format_auth(&spec)),
+            "copilot" => format!(
+                "{} (or run `maki auth login copilot` to import a token from gh)",
+                format_auth(&spec)
+            ),
+            _ => format_auth(&spec),
+        };
+        sections.push(ProviderSection {
+            slug: slug.to_string(),
+            name: spec.display_name.clone(),
+            auth_line,
+            urls,
+            features: spec.features.clone(),
+            entries: spec.models.clone(),
+        });
     }
 
     sections
@@ -397,7 +500,7 @@ fn write_model_table(out: &mut String, entries: &[ModelEntry]) {
         .map(|e| {
             format!(
                 "{} ({})",
-                e.prefixes.first().unwrap_or(&"?"),
+                e.prefixes.first().map(String::as_str).unwrap_or("?"),
                 tier_label(e.tier).to_lowercase(),
             )
         })
@@ -409,19 +512,19 @@ fn write_model_table(out: &mut String, entries: &[ModelEntry]) {
     }
 }
 
-fn no_catalog_note(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Ollama => {
+fn no_catalog_note(slug: &str) -> &'static str {
+    match slug {
+        "ollama" => {
             "This provider talks the OpenAI-compatible `/v1` API, so it also works with \
              llama.cpp's server, LocalAI, or anything else that speaks the same protocol. \
              Just point `OLLAMA_HOST` to the right address \
              (e.g. `http://localhost:8080` for llama.cpp)."
         }
-        ProviderKind::LlamaCpp => {
+        "llama-cpp" => {
             "Connects to any OpenAI-compatible `/v1` endpoint. Point `LLAMA_CPP_HOST` \
              to your server address (defaults to `http://localhost:8080`)."
         }
-        ProviderKind::OpenRouter => {
+        "openrouter" => {
             "OpenRouter aggregates models from many providers behind a single API key. \
              Browse available models at [openrouter.ai/models](https://openrouter.ai/models). \
              Use any model ID directly (e.g. `openrouter/anthropic/claude-sonnet-4`)."
@@ -443,16 +546,16 @@ fn write_section(out: &mut String, section: &ProviderSection) {
         }
     }
 
-    if let Some(features) = section.features {
+    if let Some(features) = &section.features {
         let _ = writeln!(out, "- **Features**: {features}");
     }
 
     let _ = writeln!(out);
 
     if section.entries.is_empty() {
-        let _ = writeln!(out, "{}", no_catalog_note(section.kind));
+        let _ = writeln!(out, "{}", no_catalog_note(&section.slug));
     } else {
-        write_model_table(out, section.entries);
+        write_model_table(out, &section.entries);
     }
 
     if section.name == "Anthropic" {
@@ -460,12 +563,24 @@ fn write_section(out: &mut String, section: &ProviderSection) {
         let _ = writeln!(out, "\n{BEDROCK_NOTE}");
     }
 
-    if section.kind == ProviderKind::Opencode {
+    if section.slug == "opencode" {
         let _ = writeln!(out, "\n{OPENCODE_FREE_MODELS_NOTE}");
     }
 }
 
 pub fn generate() -> String {
+    // Bundled Lua providers (deepseek) register themselves into the global
+    // registry when their init chunk runs, so boot a throwaway host and load
+    // them before snapshotting. The host is dropped; the registrations persist.
+    // `gen_tools` boots its own host in parallel and would also register them,
+    // but doing it here keeps this generator self-sufficient and order-independent.
+    let registry = Arc::new(ToolRegistry::new());
+    let host = PluginHost::new(Arc::clone(&registry)).expect("plugin host for provider docgen");
+    if let Err(e) = host.load_bundled_providers() {
+        panic!("loading bundled providers for provider docgen failed: {e}");
+    }
+    drop(host);
+
     let mut out = String::with_capacity(4096);
 
     let _ = writeln!(out, "{FRONT_MATTER}\n");
@@ -494,6 +609,7 @@ pub fn generate() -> String {
     let _ = writeln!(out, "{MODEL_IDENTIFIERS}\n");
     let _ = writeln!(out, "{}\n", providers_toml_section());
     let _ = writeln!(out, "{}", dynamic_providers_section());
+    let _ = writeln!(out, "\n{LUA_PROVIDERS}");
 
     out
 }

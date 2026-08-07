@@ -360,6 +360,11 @@ pub fn run(mut cli: Cli) -> Result<()> {
                 // background thread.
                 stack.plugin_host.begin_shutdown();
                 ToolRegistry::global().clear_lua();
+                // Mirrors the tool-registry clear above: the host is down, so
+                // nothing re-registers script/toml specs until the new host
+                // loads them. Builtins have no owner, so this is a no-op today.
+                maki_providers::registry::clear_owner(maki_providers::registry::TOML_OWNER);
+                maki_providers::registry::clear_owner(maki_providers::registry::SCRIPT_OWNER);
                 teardown.defer(move || drop(stack));
                 let (new_stack, new_warnings) = build_stack(&cli, &cwd, &storage, Some(last_good))?;
                 tabs = reloaded;

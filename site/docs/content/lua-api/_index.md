@@ -160,6 +160,16 @@ maki.api.register_tool({ name = "greet", ... })
 maki.api.register_prompt_hint({ slot = "tool_usage", content = "..." })
 ```
 
+Provider registration: define a provider from Lua (codecs stay Rust).
+`register_provider` builds a [`ProviderSpec`](../providers) and feeds
+the openai-compat codec the spec's hooks; `provider_scope` runs a
+definition chunk with rollback so a throw after a partial registration
+leaves nothing installed.
+
+```lua
+maki.api.provider_scope("deepseek", function() require("deepseek") end)
+```
+
 ---
 
 ### `maki.api.register_tool()` {#maki-api-register_tool}
@@ -608,6 +618,52 @@ for name, info in pairs(maki.api.get_slots()) do
   print(name, info.owner, info.declared)
 end
 ```
+
+---
+
+### `maki.api.register_provider()` {#maki-api-register_provider}
+
+```lua
+maki.api.register_provider({spec})
+```
+
+Register a provider spec from a Lua table. Requires the `net` permission
+(so `plugin.toml`'s `net = false` is enforceable against a provider, and
+today's `denied()` init.lua cannot register one). Unknown top-level keys are
+an error — a typo in `pricing_input` would silently mis-cost every request,
+and the reject list is how `models`/`on_error` stay honestly unsupported.
+
+**Parameters:**
+
+- `{spec}` (`table`) Provider definition (see `providers` docs).
+
+**Returns:** (``) Nothing; throws on an invalid spec.
+
+**Example:**
+
+```lua
+maki.api.register_provider({ slug = "deepseek", codec = "openai", ... })
+```
+
+---
+
+### `maki.api.provider_scope()` {#maki-api-provider_scope}
+
+```lua
+maki.api.provider_scope({name}, {func})
+```
+
+Run a provider-definition chunk with rollback: if `fn` throws after
+registering a spec, that spec (and its hook entry) is removed so a
+half-configured provider never ships. Returns `true` on success, `false`
+plus an error string otherwise.
+
+**Parameters:**
+
+- `{name}` (`string`) Logical provider name (for logging only).
+- `{func}` (`function`) Chunk that calls `maki.api.register_provider`.
+
+**Returns:** (`boolean`, `string?`) Success flag, or nil plus an error.
 
 
 ## maki.agent {#maki-agent}
@@ -2272,6 +2328,33 @@ local v, err = maki.json.schema_validator({
 })
 local errs = v:validate({ name = "maki" })
 assert(errs == nil)
+```
+
+---
+
+### `maki.json.array()` {#maki-json-array}
+
+```lua
+maki.json.array({t})
+```
+
+Tag a table as a JSON array so it round-trips through `maki.json.encode`
+as `[...]` instead of `{}`. An empty `{}` is indistinguishable from an
+empty object without this, which breaks a hook returning an empty list
+(e.g. a usage hook whose `limits` array would otherwise be rejected as a
+map by serde). Returns the same table, now array-tagged.
+
+**Parameters:**
+
+- `{t}` (`table`) The table to tag as an array.
+
+**Returns:** table The same table, tagged as a JSON array.
+
+**Example:**
+
+```lua
+local limits = maki.json.array({})
+limits[1] = { label = "Balance" }
 ```
 
 

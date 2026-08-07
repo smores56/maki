@@ -8,14 +8,15 @@ use color_eyre::eyre::{Context, bail};
 
 use maki_agent::mcp::{config as mcp_config, oauth as mcp_oauth};
 use maki_agent::tools::ToolRegistry;
-use maki_config::providers::{
-    ProviderDef, ProvidersConfig, all_builtins, builtin_provider, resolve_api_key_env,
-    resolve_base_url, resolve_default_model, resolve_display_name, resolve_login_url, slugify,
-};
+use maki_config::providers::{ProviderDef, ProvidersConfig, slugify};
 use maki_config::{load_env_files, load_permissions};
-use maki_lua::PluginHost;
+use maki_lua::{PluginHost, bundled_providers_loaded};
 use maki_providers::provider::fetch_all_models;
-use maki_providers::{ProviderData, catalog_providers};
+use maki_providers::{ProviderData, catalog_providers, registry};
+use maki_providers::{
+    all_builtins, builtin_provider, resolve_api_key_env, resolve_base_url, resolve_default_model,
+    resolve_display_name, resolve_login_url,
+};
 use maki_providers::{copilot_auth, dynamic, openai_auth};
 use maki_storage::StateDir;
 use maki_storage::auth::ProviderCredentials;
@@ -49,6 +50,9 @@ fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
     let builtin = builtin_provider(slug);
     let is_custom = ProvidersConfig::load().get(slug).is_some();
     if builtin.is_none() && dynamic::display_name(slug).is_none() && !is_custom {
+        if let Some(spec) = lazy_registry_spec(slug) {
+            return login_registry_provider(&spec, storage);
+        }
         bail!("unknown provider '{slug}'");
     }
 
@@ -252,6 +256,97 @@ fn login_catalog_provider(provider: &ProviderData, storage: &StateDir) -> Result
     Ok(())
 }
 
+/// A bundled Lua provider (e.g. deepseek) is not a static builtin, so it only
+/// appears in the global registry once the plugin host has loaded
+/// `plugins/providers`. This boots that host on demand when a slug matches no
+/// builtin, dynamic, or toml source. The host is dropped here; the registry
+/// entry is process-global and auth needs no hook dispatch.
+fn lazy_registry_spec(slug: &str) -> Option<Arc<maki_providers::ProviderSpec>> {
+    if let Some(spec) = registry::get(slug) {
+        return Some(spec);
+    }
+    boot_lua_providers();
+    registry::get(slug)
+}
+
+/// Cold-path boot of bundled Lua providers (deepseek, future ones). Loads only
+/// the always-on `plugins` plugin — never the project `init.lua` — so a
+/// credential-entry flow cannot run hostile repo Lua (design §13.4.2). The host
+/// is dropped here; the registry entries it registered are process-global and
+/// auth/model enumeration needs no hook dispatch, so the host need not survive.
+fn boot_lua_providers() {
+    if bundled_providers_loaded() {
+        return;
+    }
+    let Ok(host) = PluginHost::with_jit(Arc::clone(ToolRegistry::global_arc()), true) else {
+        return;
+    };
+    let _ = host.load_bundled_providers();
+}
+
+/// API-key login for a Lua-registered provider, driven entirely by the spec's
+/// `auth` declaration (env, login_url, needs_url). Mirrors the builtin flow
+/// without a static `BuiltInProvider` table.
+fn login_registry_provider(spec: &maki_providers::ProviderSpec, storage: &StateDir) -> Result<()> {
+    let maki_providers::AuthSpec::ApiKey {
+        env,
+        login_url,
+        needs_url,
+        ..
+    } = &spec.auth
+    else {
+        bail!("provider '{}' does not support API key login", spec.slug);
+    };
+
+    println!();
+    let display = if spec.display_name.is_empty() {
+        spec.slug.as_ref()
+    } else {
+        spec.display_name.as_str()
+    };
+    println!("  Provider: {display} (env: {env})");
+    if let Some(url) = login_url {
+        println!("  Get an API key at: {url}");
+    }
+
+    let host_url = if *needs_url {
+        print!("  Host URL: ");
+        io::stdout().flush()?;
+        let mut url = String::new();
+        io::stdin().read_line(&mut url)?;
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            bail!("host URL is required for this provider");
+        }
+        Some(url)
+    } else {
+        None
+    };
+
+    print!("  API key: ");
+    io::stdout().flush()?;
+    let mut key = String::new();
+    io::stdin().read_line(&mut key)?;
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        println!("  Skipped (no key entered)");
+        return Ok(());
+    }
+
+    let creds = ProviderCredentials {
+        api_key: key,
+        host: host_url,
+    };
+    save_provider_credentials(storage, &spec.slug, &creds).context("save credentials")?;
+    println!("  \x1b[32m✓\x1b[0m Saved credentials for {}", spec.slug);
+    println!("  Credentials: ~/.local/state/maki/auth/{}.json", spec.slug);
+    println!(
+        "  You can also set via: {env} or run: maki auth login {}",
+        spec.slug
+    );
+    Ok(())
+}
+
 fn login_custom(storage: &StateDir) -> Result<()> {
     print!("  Provider name: ");
     io::stdout().flush()?;
@@ -339,7 +434,7 @@ fn login_custom(storage: &StateDir) -> Result<()> {
 
 fn select_plan(
     slug: &str,
-    builtin: Option<&'static maki_config::providers::BuiltInProvider>,
+    builtin: Option<&'static maki_providers::BuiltInProvider>,
     def: Option<&ProviderDef>,
 ) -> Result<Option<String>> {
     let plans = builtin.and_then(|b| b.plans);
@@ -422,7 +517,11 @@ pub fn auth_logout(provider: &str, storage: &StateDir) -> Result<()> {
             if config.remove(&slug) {
                 config.save().context("save providers.toml")?;
             }
-            if !deleted && builtin_provider(&slug).is_none() {
+            // A Lua-registered provider (e.g. deepseek) is API-key only: it has
+            // no dynamic script, so avoid the "unknown provider" fallback when
+            // it had no credentials to remove.
+            if !deleted && builtin_provider(&slug).is_none() && lazy_registry_spec(&slug).is_none()
+            {
                 dynamic::logout(&slug)?;
             }
         }
@@ -430,16 +529,43 @@ pub fn auth_logout(provider: &str, storage: &StateDir) -> Result<()> {
     Ok(())
 }
 
+/// The merged list `auth_status` displays: every static builtin and every
+/// registered spec from the process-global registry (which includes Lua-registered
+/// providers like deepseek once the bundled `plugins` plugin has booted).
+/// `host_booted` boots that plugin when true; the registry entry is process-global
+/// so callers in the same process see it after a single boot. Factored out so the
+/// post-boot presence of a Lua provider is unit-testable without stdout capture.
+fn status_specs(host_booted: bool) -> Vec<Arc<maki_providers::ProviderSpec>> {
+    if host_booted {
+        boot_lua_providers();
+    }
+    registry::all()
+}
+
 pub fn auth_status(storage: &StateDir) -> Result<()> {
     let config = ProvidersConfig::load();
-    let builtins = all_builtins();
+    let specs = status_specs(true);
 
     println!();
-    for b in &builtins {
-        let def = config.get(b.slug);
-        let display = resolve_display_name(b.slug, def);
+    for spec in &specs {
+        let slug = spec.slug.as_ref();
+        let builtin = builtin_provider(slug);
+        let def = config.get(slug);
+        let display = if !spec.display_name.is_empty() {
+            spec.display_name.clone()
+        } else {
+            resolve_display_name(slug, def)
+        };
 
-        if let Some(creds) = load_provider_credentials(storage, b.slug) {
+        let source_tag = if builtin.is_none()
+            && let Some(owner) = spec.owner.as_deref()
+        {
+            format!(" (source: {owner})")
+        } else {
+            String::new()
+        };
+
+        if let Some(creds) = load_provider_credentials(storage, slug) {
             let plan_info = def
                 .and_then(|d| d.plan.as_deref())
                 .map(|p| format!(" ({})", p))
@@ -454,27 +580,35 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
                 "****".to_string()
             };
             println!(
-                "  \x1b[32m✓\x1b[0m {:<14} {} (key: {}){}",
-                b.slug, display, masked, plan_info
+                "  \x1b[32m✓\x1b[0m {:<14} {} (key: {}){}{}",
+                slug, display, masked, plan_info, source_tag
             );
-        } else if env::var(b.default_api_key_env).is_ok() {
-            println!(
-                "  \x1b[33m~\x1b[0m {:<14} {} (via {})",
-                b.slug, display, b.default_api_key_env
-            );
-        } else if def.is_some_and(|d| d.base_url.is_some()) {
-            println!("  \x1b[34m●\x1b[0m {:<14} {} (configured)", b.slug, display);
         } else {
-            println!(
-                "  \x1b[31m✗\x1b[0m {:<14} {} (run: maki auth login {})",
-                b.slug, display, b.slug
-            );
+            let env_var = resolve_api_key_env(slug, def);
+            if env::var(&env_var).is_ok() {
+                println!(
+                    "  \x1b[33m~\x1b[0m {:<14} {} (via {}){}",
+                    slug, display, env_var, source_tag
+                );
+            } else if def.is_some_and(|d| d.base_url.is_some()) || builtin.is_some() {
+                println!(
+                    "  \x1b[34m●\x1b[0m {:<14} {} (configured){}",
+                    slug, display, source_tag
+                );
+            } else {
+                println!(
+                    "  \x1b[31m✗\x1b[0m {:<14} {} (run: maki auth login {}){}",
+                    slug, display, slug, source_tag
+                );
+            }
         }
     }
 
     for (slug, def) in &config.providers {
         // 'opencode' could show up here, when the user configured free models on that provider.
-        if builtin_provider(slug).is_some()
+        // Slugs surfaced by `registry::all()` (static builtins + Lua-registered specs)
+        // were already printed above, so skip them here to avoid duplicates.
+        if specs.iter().any(|s| s.slug.as_ref() == slug.as_str())
             || (slug == "opencode" && def.enable_free_models.is_some())
         {
             continue;
@@ -534,6 +668,7 @@ pub fn auth_status(storage: &StateDir) -> Result<()> {
 }
 
 pub fn models() {
+    boot_lua_providers();
     smol::block_on(fetch_all_models(
         |batch| {
             for model in batch.models {
@@ -699,4 +834,93 @@ pub fn prompt(
 
     print!("{output}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use maki_providers::AuthSpec;
+    use maki_providers::provider::available_model_specs;
+    use maki_providers::registry::LUA_OWNER_PREFIX;
+
+    const DEEPSEEK_SLUG: &str = "deepseek";
+    const DEEPSEEK_ENV: &str = "DEEPSEEK_API_KEY";
+    const DEEPSEEK_PREFIX: &str = "deepseek-v4-flash";
+
+    /// Deepseek is a process-global registry entry whose `hooks` capture the host
+    /// that registered it. The boot here re-registers it; serialize against the
+    /// maki-lua deepseek tests so neither rewrites the live spec under the other.
+    static DEEPSEEK_LOCK: Mutex<()> = Mutex::new(());
+
+    /// §7: a Lua-defined provider surfaces in `auth status`'s enumeration after a
+    /// host boot. `status_specs` is the exact list `auth_status` iterates.
+    #[test]
+    fn status_specs_contains_lua_provider_after_boot() {
+        let _guard = DEEPSEEK_LOCK.lock().unwrap();
+        let specs = status_specs(true);
+        let deepseek = specs
+            .iter()
+            .find(|s| s.slug.as_ref() == DEEPSEEK_SLUG)
+            .unwrap_or_else(|| panic!("deepseek missing from status_specs after boot"));
+        let AuthSpec::ApiKey { env, .. } = &deepseek.auth else {
+            panic!("deepseek auth is not ApiKey");
+        };
+        assert_eq!(env, DEEPSEEK_ENV);
+        assert!(
+            deepseek
+                .owner
+                .as_deref()
+                .is_some_and(|o| o.starts_with(LUA_OWNER_PREFIX)),
+            "deepseek should be a Lua-registered spec"
+        );
+    }
+
+    /// Without a host boot, the bundled Lua provider is not yet in the registry.
+    /// This guards against the spec leaking from another test's boot (the lock
+    /// makes the prior test's boot the only one in this process under nextest's
+    /// per-process isolation, so absent is still the honest pre-boot state).
+    #[test]
+    fn status_specs_absent_without_boot() {
+        let _guard = DEEPSEEK_LOCK.lock().unwrap();
+        let already = registry::get(DEEPSEEK_SLUG).is_some();
+        if already {
+            return; // a prior test in this process booted it; skip the negative case
+        }
+        let specs = status_specs(false);
+        assert!(
+            specs.iter().all(|s| s.slug.as_ref() != DEEPSEEK_SLUG),
+            "deepseek must not appear before host boot"
+        );
+    }
+
+    /// §7: a Lua-defined provider's declared models surface in the offline model
+    /// enumeration that `models()` / `fetch_all_models` seed from, after a host
+    /// boot. Live `list_models` is network-gated, so assert the static spec set.
+    #[test]
+    fn available_model_specs_contains_lua_provider_after_boot() {
+        let _guard = DEEPSEEK_LOCK.lock().unwrap();
+        boot_lua_providers();
+        let specs = available_model_specs();
+        let expected = format!("{DEEPSEEK_SLUG}/{DEEPSEEK_PREFIX}");
+        assert!(
+            specs.iter().any(|s| s == &expected),
+            "deepseek model prefix missing from available_model_specs after boot: {specs:?}"
+        );
+    }
+
+    /// §7: a Lua-registered slug reaches logout's credential-deletion path. With
+    /// no stored credentials, logout must NOT fall through to `dynamic::logout`
+    /// (which would error "unknown provider" for a Lua slug). Verified by the
+    /// `lazy_registry_spec` guard returning Some, making the dynamic arm skipped.
+    #[test]
+    fn logout_resolves_lua_provider_slug() {
+        let _guard = DEEPSEEK_LOCK.lock().unwrap();
+        boot_lua_providers();
+        assert!(
+            lazy_registry_spec(DEEPSEEK_SLUG).is_some(),
+            "logout's lazy_registry_spec should resolve deepseek after boot"
+        );
+    }
 }

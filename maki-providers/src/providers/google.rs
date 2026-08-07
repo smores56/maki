@@ -34,7 +34,7 @@ fn max_thinking(model: &Model) -> u32 {
     model.max_thinking_budget().map_or(cap, |m| m.min(cap))
 }
 
-inventory::submit!(maki_config::providers::BuiltInProvider {
+inventory::submit!(crate::builtin::BuiltInProvider {
     slug: "google",
     display_name: "Google",
     protocol: maki_config::providers::Protocol::Google,
@@ -46,10 +46,10 @@ inventory::submit!(maki_config::providers::BuiltInProvider {
     needs_url: false,
 });
 
-pub(crate) const fn models() -> &'static [ModelEntry] {
-    &[
+pub fn models() -> Vec<ModelEntry> {
+    vec![
         ModelEntry {
-            prefixes: &["gemini-2.5-pro"],
+            prefixes: vec!["gemini-2.5-pro".to_string()],
             tier: ModelTier::Strong,
             family: ModelFamily::Gemini,
             vision: true,
@@ -65,7 +65,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_048_576,
         },
         ModelEntry {
-            prefixes: &["gemini-2.5-flash"],
+            prefixes: vec!["gemini-2.5-flash".to_string()],
             tier: ModelTier::Medium,
             family: ModelFamily::Gemini,
             vision: true,
@@ -81,7 +81,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
             context_window: 1_048_576,
         },
         ModelEntry {
-            prefixes: &["gemini-2.0-flash-lite"],
+            prefixes: vec!["gemini-2.0-flash-lite".to_string()],
             tier: ModelTier::Weak,
             family: ModelFamily::Gemini,
             vision: true,
@@ -101,7 +101,7 @@ pub(crate) const fn models() -> &'static [ModelEntry] {
 
 fn resolve_google_base_url() -> Option<String> {
     let config = maki_config::providers::ProvidersConfig::load();
-    maki_config::providers::resolve_base_url("google", config.get("google"))
+    crate::builtin::resolve_base_url("google", config.get("google"))
 }
 
 fn resolve_auth_from_key(key: &str, base_url: Option<String>) -> ResolvedAuth {

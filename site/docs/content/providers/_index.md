@@ -78,6 +78,77 @@ You will need `AWS_REGION` and one of the following for auth:
 
 You can override the model with `ANTHROPIC_MODEL` and the endpoint with `ANTHROPIC_BEDROCK_BASE_URL`. These env var names match Claude Code, so if you were already using Bedrock there, the same setup works here.
 
+### Copilot
+
+- **Env var**: `GH_COPILOT_TOKEN` (or run `maki auth login copilot` to import a token from gh)
+- **API**: `https://api.githubcopilot.com (or GraphQL-discovered Copilot API endpoint)`
+- **Features**: Native Copilot Chat HTTP API with model endpoint discovery
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Weak | **gpt-5-mini, gpt-5 mini, claude-haiku-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
+| Medium | **gpt-5.2, gpt-4.1, claude-sonnet-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
+| Strong | **gpt-5.4, gpt-5.3-codex, claude-opus-4.6, grok-code-fast-1** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
+| Strong | claude-opus-4.7 | $0.00 / $0.00 | 264K ctx / 64K out |
+
+Defaults: gpt-5-mini (weak), gpt-5.2 (medium), gpt-5.4 (strong)
+
+### DeepSeek
+
+- **Env var**: `DEEPSEEK_API_KEY`
+- **API**: `https://api.deepseek.com`
+- **Features**: Thinking mode toggle (on/off), open-weight models
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Medium | **deepseek-v4-flash** (default) | $0.14 / $0.28 | 1000K ctx / 384K out |
+| Strong | **deepseek-v4-pro** (default) | $0.43 / $0.87 | 1000K ctx / 384K out |
+
+Defaults: deepseek-v4-flash (medium), deepseek-v4-pro (strong)
+
+### Google
+
+- **Env var**: `GEMINI_API_KEY`
+- **API**: `https://generativelanguage.googleapis.com/v1beta`
+- **Features**: Native Gemini API with thinking support
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Weak | **gemini-2.0-flash-lite** (default) | $0.07 / $0.30 | 1048K ctx / 65K out |
+| Medium | **gemini-2.5-flash** (default) | $0.15 / $0.60 | 1048K ctx / 65K out |
+| Strong | **gemini-2.5-pro** (default) | $1.25 / $5.00 | 1048K ctx / 65K out |
+
+Defaults: gemini-2.5-pro (strong), gemini-2.5-flash (medium), gemini-2.0-flash-lite (weak)
+
+### LlamaCpp
+
+- **Env var**: `LLAMA_CPP_API_KEY`
+- **API**: `http://localhost:8080/v1`
+- **Features**: Local or remote inference via LLAMA_CPP_HOST, set optional key via LLAMA_CPP_API_KEY
+
+Connects to any OpenAI-compatible `/v1` endpoint. Point `LLAMA_CPP_HOST` to your server address (defaults to `http://localhost:8080`).
+
+### Mistral
+
+- **Env var**: `MISTRAL_API_KEY`
+- **API**: `https://api.mistral.ai/v1`
+
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Weak | **ministral-14b-latest, ministral-14b-2512** (default) | $0.20 / $0.20 | 262K ctx |
+| Medium | **mistral-small-latest, mistral-small-2603** (default) | $0.15 / $0.60 | 262K ctx |
+| Strong | **mistral-medium-latest, mistral-medium-3.5, mistral-medium-2604** (default) | $1.50 / $7.50 | 262K ctx |
+
+Defaults: mistral-medium-latest (strong), mistral-small-latest (medium), ministral-14b-latest (weak)
+
+### Ollama
+
+- **Env var**: `OLLAMA_HOST` for local/remote (e.g. `http://localhost:11434`), `OLLAMA_API_KEY` for auth
+- **API**: `http://localhost:11434/v1`
+- **Features**: Local or remote inference via OLLAMA_HOST, cloud fallback via OLLAMA_API_KEY
+
+This provider talks the OpenAI-compatible `/v1` API, so it also works with llama.cpp's server, LocalAI, or anything else that speaks the same protocol. Just point `OLLAMA_HOST` to the right address (e.g. `http://localhost:8080` for llama.cpp).
+
 ### OpenAI
 
 - **Env var**: `OPENAI_API_KEY` (also supports OAuth device flow)
@@ -105,96 +176,30 @@ You can override the model with `ANTHROPIC_MODEL` and the endpoint with `ANTHROP
 
 Defaults: gpt-5.6-luna (weak), gpt-5.6-terra (medium), gpt-5.6-sol (strong)
 
-### Google
+### Opencode
 
-- **Env var**: `GEMINI_API_KEY`
-- **API**: `https://generativelanguage.googleapis.com/v1beta`
-- **Features**: Native Gemini API with thinking support
+- **Env var**: `OPENCODE_API_KEY`
+- **API**: `https://opencode.ai/zen/v1`
+- **Features**: Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Zen API
 
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Weak | **gemini-2.0-flash-lite** (default) | $0.07 / $0.30 | 1048K ctx / 65K out |
-| Medium | **gemini-2.5-flash** (default) | $0.15 / $0.60 | 1048K ctx / 65K out |
-| Strong | **gemini-2.5-pro** (default) | $1.25 / $5.00 | 1048K ctx / 65K out |
+No hardcoded model catalog. Use any model ID supported by this provider.
 
-Defaults: gemini-2.5-pro (strong), gemini-2.5-flash (medium), gemini-2.0-flash-lite (weak)
+By default Maki hides free models from the Opencode catalog. To list free models (they use a public fallback, no API key needed), add this to `~/.config/maki/providers.toml`:
 
-### Copilot
+```toml
+[opencode]
+enable_free_models = true
+```
 
-- **Env var**: `GH_COPILOT_TOKEN` (or run `maki auth login copilot` to import a token from gh)
-- **API**: `https://api.githubcopilot.com (or GraphQL-discovered Copilot API endpoint)`
-- **Features**: Native Copilot Chat HTTP API with model endpoint discovery
+The default is `false`.
 
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Weak | **gpt-5-mini, gpt-5 mini, claude-haiku-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
-| Medium | **gpt-5.2, gpt-4.1, claude-sonnet-4.5** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
-| Strong | **gpt-5.4, gpt-5.3-codex, claude-opus-4.6, grok-code-fast-1** (default) | $0.00 / $0.00 | 200K ctx / 100K out |
-| Strong | claude-opus-4.7 | $0.00 / $0.00 | 264K ctx / 64K out |
+### Opencode Go
 
-Defaults: gpt-5-mini (weak), gpt-5.2 (medium), gpt-5.4 (strong)
+- **Env var**: `OPENCODE_API_KEY`
+- **API**: `https://opencode.ai/zen/go/v1`
+- **Features**: Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Go API
 
-### Ollama
-
-- **Env var**: `OLLAMA_HOST` for local/remote (e.g. `http://localhost:11434`), `OLLAMA_API_KEY` for auth
-- **API**: `http://localhost:11434/v1`
-- **Features**: Local or remote inference via OLLAMA_HOST, cloud fallback via OLLAMA_API_KEY
-
-This provider talks the OpenAI-compatible `/v1` API, so it also works with llama.cpp's server, LocalAI, or anything else that speaks the same protocol. Just point `OLLAMA_HOST` to the right address (e.g. `http://localhost:8080` for llama.cpp).
-
-### LlamaCpp
-
-- **Env var**: `LLAMA_CPP_API_KEY`
-- **API**: `http://localhost:8080/v1`
-- **Features**: Local or remote inference via LLAMA_CPP_HOST, set optional key via LLAMA_CPP_API_KEY
-
-Connects to any OpenAI-compatible `/v1` endpoint. Point `LLAMA_CPP_HOST` to your server address (defaults to `http://localhost:8080`).
-
-### Mistral
-
-- **Env var**: `MISTRAL_API_KEY`
-- **API**: `https://api.mistral.ai/v1`
-
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Weak | **ministral-14b-latest, ministral-14b-2512** (default) | $0.20 / $0.20 | 262K ctx |
-| Medium | **mistral-small-latest, mistral-small-2603** (default) | $0.15 / $0.60 | 262K ctx |
-| Strong | **mistral-medium-latest, mistral-medium-3.5, mistral-medium-2604** (default) | $1.50 / $7.50 | 262K ctx |
-
-Defaults: mistral-medium-latest (strong), mistral-small-latest (medium), ministral-14b-latest (weak)
-
-### Z.AI
-
-- **Env var**: `ZHIPU_API_KEY` (shared across both endpoints)
-- **API endpoints**:
-  - `https://api.z.ai/api/paas/v4`
-  - `https://api.z.ai/api/coding/paas/v4`
-
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Weak | **glm-4.7-flash** (default) | $0.00 / $0.00 | 200K ctx / 131K out |
-| Weak | glm-4.5-flash | $0.00 / $0.00 | 131K ctx / 98K out |
-| Weak | glm-4.5-air | $0.20 / $1.10 | 131K ctx / 98K out |
-| Medium | **glm-4.7, glm-4.6** (default) | $0.60 / $2.20 | 200K ctx / 131K out |
-| Medium | glm-4.5 | $0.60 / $2.20 | 131K ctx / 98K out |
-| Strong | **glm-5-code** (default) | $1.20 / $5.00 | 200K ctx / 131K out |
-| Strong | glm-5.2 | $1.00 / $3.20 | 1000K ctx / 131K out |
-| Strong | glm-5.1, glm-5 | $1.00 / $3.20 | 200K ctx / 131K out |
-
-Defaults: glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
-
-### DeepSeek
-
-- **Env var**: `DEEPSEEK_API_KEY`
-- **API**: `https://api.deepseek.com`
-- **Features**: Thinking mode toggle (on/off), open-weight models
-
-| Tier | Models | Pricing (in/out per 1M tokens) | Context |
-|------|--------|-------------------------------|---------|
-| Medium | **deepseek-v4-flash** (default) | $0.14 / $0.28 | 1000K ctx / 384K out |
-| Strong | **deepseek-v4-pro** (default) | $0.43 / $0.87 | 1000K ctx / 384K out |
-
-Defaults: deepseek-v4-flash (medium), deepseek-v4-pro (strong)
+No hardcoded model catalog. Use any model ID supported by this provider.
 
 ### OpenRouter
 
@@ -226,22 +231,25 @@ Defaults: hf:moonshotai/Kimi-K2.5 (strong), hf:deepseek-ai/DeepSeek-V3.2 (medium
 
 No hardcoded model catalog. Use any model ID supported by this provider.
 
-### Opencode Zen
+### Z.AI
 
-- **Env var**: `OPENCODE_API_KEY`
-- **API**: `https://opencode.ai/zen/v1`
-- **Features**: Dynamically discovered models via [models.dev](https://models.dev/) + all the models provided by Opencode Zen API
+- **Env var**: `ZHIPU_API_KEY` (shared across both endpoints)
+- **API endpoints**:
+  - `https://api.z.ai/api/paas/v4`
+  - `https://api.z.ai/api/coding/paas/v4`
 
-No hardcoded model catalog. Use any model ID supported by this provider.
+| Tier | Models | Pricing (in/out per 1M tokens) | Context |
+|------|--------|-------------------------------|---------|
+| Weak | **glm-4.7-flash** (default) | $0.00 / $0.00 | 200K ctx / 131K out |
+| Weak | glm-4.5-flash | $0.00 / $0.00 | 131K ctx / 98K out |
+| Weak | glm-4.5-air | $0.20 / $1.10 | 131K ctx / 98K out |
+| Medium | **glm-4.7, glm-4.6** (default) | $0.60 / $2.20 | 200K ctx / 131K out |
+| Medium | glm-4.5 | $0.60 / $2.20 | 131K ctx / 98K out |
+| Strong | **glm-5-code** (default) | $1.20 / $5.00 | 200K ctx / 131K out |
+| Strong | glm-5.2 | $1.00 / $3.20 | 1000K ctx / 131K out |
+| Strong | glm-5.1, glm-5 | $1.00 / $3.20 | 200K ctx / 131K out |
 
-By default Maki hides free models from the Opencode catalog. To list free models (they use a public fallback, no API key needed), add this to `~/.config/maki/providers.toml`:
-
-```toml
-[opencode]
-enable_free_models = true
-```
-
-The default is `false`.
+Defaults: glm-5-code (strong), glm-4.7-flash (weak), glm-4.7 (medium)
 
 ### Opencode Go
 
@@ -374,7 +382,7 @@ To add a custom provider or proxy, drop an executable script into the config `pr
 
 `resolve` is called each time a new agent spawns, so scripts should read tokens from disk instead of caching them in memory. That way auth changes from other processes get picked up.
 
-The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `openai`, `google`, `copilot`, `ollama`, `llama-cpp`, `mistral`, `zai`, `deepseek`, `openrouter`, `synthetic`, `tensorx`, `opencode`.
+The `base` field specifies which built-in provider to inherit the model catalog from. Valid values: `anthropic`, `copilot`, `google`, `llama-cpp`, `mistral`, `ollama`, `openai`, `opencode`, `opencode-go`, `openrouter`, `synthetic`, `tensorx`, `zai`.
 
 If your provider serves models not in the base catalog, add a `models` subcommand returning:
 
@@ -392,3 +400,98 @@ Dynamic provider models are namespaced as `{slug}/{model_id}` (e.g. `myproxy/cla
 - Only letters, digits, underscores, and hyphens after that
 - Can't reuse a built-in provider's slug
 - Must be executable
+
+## Lua Providers
+
+A provider can be defined entirely in Lua, without Rust. Today this is how DeepSeek is configured, and other OpenAI-compatible providers can follow. The definition lives in Lua; the actual HTTP codec stays in Rust, so you inherit request streaming, SSE parsing, and tool formatting for free.
+
+Call `maki.api.register_provider(spec)` in a bundled provider file. The spec is a table:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `slug` | string | Required. Identifies the provider (e.g. `deepseek`). |
+| `display_name` | string | Shown in the model picker. |
+| `family` | string | `"generic"`, or a known family name. |
+| `codec` | string or table | `"openai"` is the only supported codec in this version. A table form lets a future codec take options. |
+| `base_url` | string | The API root. `<SLUG>_BASE_URL` overrides it. |
+| `auth` | table | See the auth table below. |
+| `supports_thinking` | boolean | Whether the model exposes a thinking mode. |
+| `context_window`, `max_output_tokens` | integer | Fallback sizes. |
+| `effort` | table | `{ supported = { ... } }`. When set, the codec applies `reasoning_effort` from the thinking config itself. |
+| `models` | table | Array of model entries (prefixes, tier, default, vision, pricing, sizes). |
+| `on_request`, `on_usage`, `usage` | function | Hooks. See below. |
+
+Unknown keys are an error. A typo in a pricing field would silently mis-cost every request, so the spec is strict. `models` (as a hook that lists models) and `on_error` are deliberately unsupported in this version.
+
+### The auth table
+
+```lua
+auth = { kind = "api_key", env = "DEEPSEEK_API_KEY",
+         login_url = "https://platform.deepseek.com/api_keys", needs_url = false }
+```
+
+`kind = "api_key"` reads the key from `env`, or from stored credentials after `maki auth login <slug>`. `login_url` is printed during login. Only the `api_key` kind ships in this version.
+
+### Hooks
+
+Hooks shape requests and map responses without moving the codec into Lua. They are optional.
+
+- `on_request(body, ctx)`: mutate the request body before it is sent. `body` is a handle, not a Lua table (see the marshalling rules below).
+- `on_usage(raw)`: map the raw usage `Value` from the stream to a token-usage table. Wired for the `openai` codec only. Declaring `on_usage` with any other codec is rejected at registration.
+- `usage(ctx)`: fetch provider-side quota (balance, limits) via `ctx:request(path)`.
+
+A dead Lua host is an error, never a skipped hook. If the host that registered the provider is gone, the request fails instead of silently sending an unshaped body.
+
+### Marshalling: handles, not tables
+
+The request body is shared between Lua and the Rust codec as JSON. To avoid scrambling key order on the wire, hooks never receive a converted Lua table. They receive a handle.
+
+```lua
+on_request = function(body, ctx)
+  body:set("thinking", { type = "enabled" })   -- a small literal, converted in
+  local n = body:get("max_tokens")              -- a scalar, converted out
+  if body:has("tools") then ... end             -- no conversion, just a check
+end
+```
+
+Two handle types back every container:
+
+| Method | What it does |
+|--------|--------------|
+| `obj:get(key)` | Scalar values come back as Lua values. Containers come back as nested handles. |
+| `obj:set(key, value)` | A Lua value is written into the JSON tree. |
+| `obj:has(key)` | True if the key exists. Performs no conversion. An assistant turn's `reasoning_content` can run to thousands of tokens; use `has` instead of `get` to check for it. |
+| `arr:len()` | Number of elements. Also `#arr`. |
+| `arr:get(i)` | The element at 1-based index `i`, as a nested handle. |
+
+Mutations survive into the serialized body. The body, `ctx.messages`, `ctx.tools`, and `ctx.headers` all reach the same shared tree through handles.
+
+### ctx
+
+```lua
+ctx.model        -- { id, provider, tier, family, max_output_tokens, context_window,
+                 --   supports_thinking, supports_vision, capabilities }
+ctx.thinking     -- { enabled, mode, effort, budget }
+ctx.session_id   -- string or nil
+ctx.messages     -- JsonArray (the body's messages)
+ctx.tools        -- JsonArray (the body's tools)
+ctx.headers      -- JsonObject (extra request headers)
+ctx:request(path, opts)
+```
+
+`ctx:request(path)` does an authenticated HTTP request against the provider's `base_url`. The path is relative (starts with `/`). Auth is the provider's resolved headers. Redirects are disabled, so `Authorization` and other headers never leak to a different host. The SSRF guard is on, waived only when `base_url` itself points at a loopback or private address (for local servers like ollama). Errors redact the URL and cap the response body.
+
+Every handle and `ctx` carries a generation counter. Once `on_request` returns, stashed handles stop working. A provider file cannot save `ctx` and reuse it later, which closes a prompt-injection path where a model could reach an authenticated fetch.
+
+### Loading and rollback
+
+Bundled providers load through `plugins/providers/init.lua`, which wraps each `require` in `maki.api.provider_scope`:
+
+```lua
+local ok, err = maki.api.provider_scope("deepseek", function() require("deepseek") end)
+```
+
+A file that registers a spec and then throws leaves nothing behind: `provider_scope` rolls back to the state before the chunk ran. A bare `pcall` would isolate the error but keep a half-configured spec installed.
+
+Lua providers are bundled-only in this version. User plugins and `<cwd>/.maki/init.lua` run without the `net` permission, and `register_provider` requires it, so a repo-supplied provider cannot intercept the API key, the conversation, or network egress.
+

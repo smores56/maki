@@ -1,5 +1,7 @@
 use maki_lua_macro::{lua_fn, lua_table};
-use mlua::{AnyUserData, Lua, LuaSerdeExt, Result as LuaResult, UserData, UserDataMethods, Value};
+use mlua::{
+    AnyUserData, Lua, LuaSerdeExt, Result as LuaResult, Table, UserData, UserDataMethods, Value,
+};
 
 use super::util::convert::{json_to_lua, lua_to_json};
 use super::util::pair::{Pair, pair, try_pair};
@@ -115,6 +117,23 @@ fn schema_validator(lua: &Lua, schema: Value) -> LuaResult<Pair<AnyUserData>> {
     ))
 }
 
+/// Tag a table as a JSON array so it round-trips through `maki.json.encode`
+/// as `[...]` instead of `{}`. An empty `{}` is indistinguishable from an
+/// empty object without this, which breaks a hook returning an empty list
+/// (e.g. a usage hook whose `limits` array would otherwise be rejected as a
+/// map by serde). Returns the same table, now array-tagged.
+///
+/// @param t table The table to tag as an array.
+/// @return table The same table, tagged as a JSON array.
+/// @example
+/// local limits = maki.json.array({})
+/// limits[1] = { label = "Balance" }
+#[lua_fn]
+fn array(lua: &Lua, t: Table) -> LuaResult<Table> {
+    t.set_metatable(Some(lua.array_metatable()))?;
+    Ok(t)
+}
+
 lua_table! {
     /// JSON encoding, decoding, and schema validation. Encode Lua
     /// tables to JSON strings, decode JSON back into tables, and
@@ -125,7 +144,7 @@ lua_table! {
     /// local t = maki.json.decode(s)
     /// ```
     "maki.json" => pub(crate) fn create_json_table(), DOCS [
-        encode, decode, schema_validator,
+        encode, decode, schema_validator, array,
     ]
 }
 

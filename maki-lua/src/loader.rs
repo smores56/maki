@@ -19,6 +19,12 @@ use maki_agent::prompt::ResolvedSlots;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
+static BUNDLED_PROVIDERS_LOADED: AtomicBool = AtomicBool::new(false);
+
+pub fn bundled_providers_loaded() -> bool {
+    BUNDLED_PROVIDERS_LOADED.load(Ordering::Acquire)
+}
+
 struct BundledPlugin {
     name: &'static str,
     dir: Dir<'static>,
@@ -102,6 +108,10 @@ static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
         name: "lib",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/lib"),
+    },
+    BundledPlugin {
+        name: "providers",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/providers"),
     },
 ];
 
@@ -230,6 +240,13 @@ impl PluginHost {
 
     pub fn load_builtins(&mut self, config: &PluginsConfig) -> Result<(), PluginError> {
         let result = self.send_builtin_loads(config);
+        if let Err(e) = self.load_bundled_providers() {
+            if result.is_ok() {
+                return Err(e);
+            } else {
+                tracing::warn!(error = %e, "bundled providers failed to load");
+            }
+        }
         // Armed even when a load failed, so a caller that only warns about the
         // error is not left interpreting for the rest of the session.
         let _ = self.inner.tx.send(Request::WarmJit);
@@ -285,6 +302,39 @@ impl PluginHost {
                 opts,
             )?;
         }
+        Ok(())
+    }
+
+    /// Bundled Lua providers (deepseek, future ones) load always-on with trusted
+    /// permissions: they are not a user-toggleable builtin and not part of
+    /// `DEFAULT_BUILTINS`, so disabling a plugin or running `--no-plugins` cannot
+    /// drop a shipped provider's hooks. `register_provider` still requires the
+    /// `Net` permission, which `trusted()` grants. The dir is in `BUNDLED_PLUGINS`
+    /// so `require("deepseek")` resolves during the chunk.
+    pub fn load_bundled_providers(&self) -> Result<(), PluginError> {
+        let dir = BUNDLED_PLUGINS
+            .iter()
+            .find(|p| p.name == "providers")
+            .map(|p| &p.dir)
+            .ok_or_else(|| PluginError::Lua {
+                plugin: "providers".into(),
+                source: mlua::Error::runtime("providers plugin not bundled"),
+            })?;
+        let init = dir
+            .get_file("init.lua")
+            .and_then(|f| f.contents_utf8())
+            .ok_or_else(|| PluginError::Lua {
+                plugin: "providers".into(),
+                source: mlua::Error::runtime("providers plugin missing init.lua"),
+            })?;
+        self.send_load(
+            Arc::from("providers"),
+            init.to_owned(),
+            None,
+            PluginPermissions::trusted(),
+            PluginOpts::default(),
+        )?;
+        BUNDLED_PROVIDERS_LOADED.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -459,6 +509,10 @@ impl EventHandle {
     /// no live consumer would ever observe.
     pub fn is_disconnected(&self) -> bool {
         self.tx.is_disconnected() && self.prio_tx.is_disconnected()
+    }
+
+    pub(crate) fn request_sender(&self) -> &flume::Sender<Request> {
+        &self.tx
     }
 
     /// Test probe sibling of `from_tx`: collapses both senders onto one
