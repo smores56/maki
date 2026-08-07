@@ -721,13 +721,13 @@ impl App {
             return vec![Action::Suspend];
         }
 
-        if let Some(actions) = self.dispatch_overlay(key) {
-            return actions;
-        }
-
         if !(self.status == Status::Streaming && is_streaming_stop_key(key))
             && let Some(actions) = self.dispatch_override(key)
         {
+            return actions;
+        }
+
+        if let Some(actions) = self.dispatch_overlay(key) {
             return actions;
         }
 

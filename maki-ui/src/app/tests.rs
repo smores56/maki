@@ -3309,6 +3309,27 @@ fn install_override(
     probe
 }
 
+fn install_override_with_context(
+    app: &mut App,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+    context: Vec<maki_lua::ContextRef>,
+) -> maki_lua::test_support::RequestProbe {
+    app.keymap_reader = maki_lua::test_support::keymap_reader_with(vec![maki_lua::KeymapEntry {
+        context,
+        ..maki_lua::KeymapEntry::callback(
+            key,
+            modifiers,
+            Arc::from("test-plugin"),
+            "plugin override",
+            1,
+        )
+    }]);
+    let (handle, probe) = maki_lua::test_support::probed_event_handle();
+    app.lua_event_handle = handle;
+    probe
+}
+
 const OVERRIDE_DISPATCHED: &str = "override callback must be dispatched";
 const OVERRIDE_NOT_DISPATCHED: &str = "override callback must not be dispatched";
 
@@ -3400,23 +3421,23 @@ fn builtin_runs_when_no_override() {
 }
 
 #[test]
-fn plan_toggle_beats_override_when_open_and_after_dismiss() {
+fn override_beats_plan_toggle_when_open() {
     let mut app = plan_app();
     let probe = install_override(&mut app, kb::PLAN_TOGGLE.code, kb::PLAN_TOGGLE.modifiers);
     assert!(app.plan_form.is_visible());
 
     app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
     assert!(
-        !app.plan_form.is_visible(),
-        "open plan form must consume Ctrl+T before the override"
+        app.plan_form.is_visible(),
+        "keymap must consume Ctrl+T before the open plan form's widget handler"
     );
 
     app.update(Msg::Key(kb::PLAN_TOGGLE.to_key_event()));
     assert!(
         app.plan_form.is_visible(),
-        "Ctrl+T must reopen the dismissed plan form despite the override"
+        "keymap must win on every press while the binding is installed"
     );
-    assert!(probe.try_recv().is_none(), "{OVERRIDE_NOT_DISPATCHED}");
+    assert!(probe.try_recv().is_some(), "{OVERRIDE_DISPATCHED}");
 }
 
 #[test]
@@ -3468,6 +3489,94 @@ fn streaming_cancel_wins_over_esc_override() {
     );
     assert_eq!(app.status, Status::Idle);
     assert!(probe.try_recv().is_none(), "{OVERRIDE_NOT_DISPATCHED}");
+}
+
+#[test]
+fn binding_shadows_picker_widget_key() {
+    let mut app = app_with_subagent();
+    open_tasks_picker(&mut app);
+    assert_eq!(app.task_picker.selected_item().unwrap().chat_index, 0);
+
+    let task_picker = maki_lua::IDENTITIES
+        .iter()
+        .find(|i| i.name == "task_picker")
+        .expect("seed identity");
+    let probe = install_override_with_context(
+        &mut app,
+        KeyCode::Down,
+        KeyModifiers::NONE,
+        vec![maki_lua::ContextRef::Identity(task_picker.id)],
+    );
+
+    app.update(Msg::Key(key(KeyCode::Down)));
+
+    assert!(probe.try_recv().is_some(), "{OVERRIDE_DISPATCHED}");
+    assert_eq!(
+        app.task_picker.selected_item().unwrap().chat_index,
+        0,
+        "identity binding must consume Down before the picker navigates"
+    );
+    assert!(app.task_picker.is_open());
+}
+
+#[test]
+fn unbound_key_still_reaches_picker() {
+    let mut app = app_with_subagent();
+    open_tasks_picker(&mut app);
+    assert_eq!(app.task_picker.selected_item().unwrap().chat_index, 0);
+
+    app.update(Msg::Key(key(KeyCode::Down)));
+
+    assert_eq!(
+        app.task_picker.selected_item().unwrap().chat_index,
+        1,
+        "unbound key must fall through to the picker widget handler"
+    );
+    assert!(app.task_picker.is_open());
+}
+
+#[test]
+fn general_binding_fires_while_picker_open() {
+    let mut app = app_with_subagent();
+    open_tasks_picker(&mut app);
+    let probe = install_override(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+
+    app.update(Msg::Key(key(KeyCode::Char('x'))));
+
+    assert!(probe.try_recv().is_some(), "{OVERRIDE_DISPATCHED}");
+    assert_eq!(
+        app.task_picker.selected_item().unwrap().chat_index,
+        0,
+        "keymap must consume 'x' before the picker's search handler"
+    );
+}
+
+#[test]
+fn streaming_stop_keys_not_hijackable() {
+    let mut app = streaming_app();
+    let probe = install_override(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+    let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
+
+    assert!(
+        matches!(&actions[0], Action::CancelAgent { .. }),
+        "streaming Ctrl+C must cancel rather than dispatch the binding"
+    );
+    assert_eq!(app.status, Status::Idle);
+    assert!(probe.try_recv().is_none(), "{OVERRIDE_NOT_DISPATCHED}");
+
+    let esc_probe = install_override(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    app.status = Status::Streaming;
+    app.status_bar.flash_duration = Duration::from_secs(3600);
+    app.last_esc = Some(Instant::now());
+
+    let actions = app.update(Msg::Key(key(KeyCode::Esc)));
+
+    assert!(
+        matches!(&actions[0], Action::CancelAgent { .. }),
+        "streaming Esc must cancel rather than dispatch the binding"
+    );
+    assert!(esc_probe.try_recv().is_none(), "{OVERRIDE_NOT_DISPATCHED}");
 }
 
 #[test]
