@@ -22,7 +22,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Ctrl+T` | Toggle plan panel |
 | `Ctrl+X` | Open tasks |
 
-## Editing
+## Chat
 
 | Key | Action |
 |-----|--------|
@@ -49,7 +49,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Ctrl+Del` / `⌥Del` | Delete word forward |
 | `Ctrl+K` | Delete to end of line |
 
-## While Streaming
+## Streaming
 
 | Key | Action |
 |-----|--------|
@@ -64,7 +64,7 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `Enter` | Select option |
 | `Esc` | Close |
 
-## Pickers
+## Picker
 
 | Key | Action |
 |-----|--------|
@@ -75,53 +75,72 @@ On macOS, some bindings use Option or Fn keys instead (run `/help` for exact key
 | `PageUp` / `PageDown` | Scroll page up / down |
 | `Ctrl+U` / `Ctrl+D` | Scroll page up / down |
 
+### model_picker
+
+| Key | Action |
+|-----|--------|
+| `!/@/#/$` | Set tier (strong/medium/weak/compaction) |
+
+### queue
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Remove item |
+
+### commands
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Complete command |
+
 ## Context-Specific
 
-Some pickers add extra bindings on top of the defaults:
+Some contexts add extra bindings on top of the defaults:
 
 | Context | Key | Action |
 |---------|-----|--------|
-| Editing | `Enter` | Submit prompt |
-| Editing | `Shift+Enter` / `Ctrl+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
-| Editing | `Tab` | Toggle mode |
-| Editing | `/command` | Open command palette |
-| Editing | `Ctrl+W` | Delete word backward |
-| Editing | `Alt+←` / `Alt+→` | Move word left / right |
-| Editing | `Ctrl+Del` / `⌥Del` | Delete word forward |
-| Editing | `Ctrl+K` | Delete to end of line |
-| Editing | `Ctrl+A` | Jump to start of line |
-| Editing | `Home` / `End` | Jump to start/end of line |
-| Editing | `Ctrl+U` / `Ctrl+D` | Scroll half page up / down |
-| Editing | `Ctrl+E` | Jump to end of line |
-| Editing | `Ctrl+G` | Scroll to top |
-| Editing | `Ctrl+B` | Scroll to bottom |
-| Editing | `Ctrl+Q` | Pop queue |
-| Editing | `Esc Esc` | Rewind |
-| Editing | `Alt+O` | Edit input in external editor |
-| While Streaming | `↑` / `↓` | Navigate input history |
-| While Streaming | `Esc Esc` | Cancel agent |
+| Chat | `Enter` | Submit prompt |
+| Chat | `Shift+Enter` / `Ctrl+Enter` / `Ctrl+J` / `Alt+Enter` | Newline |
+| Chat | `Tab` | Toggle mode |
+| Chat | `/command` | Open command palette |
+| Chat | `Ctrl+W` | Delete word backward |
+| Chat | `Alt+←` / `Alt+→` | Move word left / right |
+| Chat | `Ctrl+Del` / `⌥Del` | Delete word forward |
+| Chat | `Ctrl+K` | Delete to end of line |
+| Chat | `Ctrl+A` | Jump to start of line |
+| Chat | `Home` / `End` | Jump to start/end of line |
+| Chat | `Ctrl+U` / `Ctrl+D` | Scroll half page up / down |
+| Chat | `Ctrl+E` | Jump to end of line |
+| Chat | `Ctrl+G` | Scroll to top |
+| Chat | `Ctrl+B` | Scroll to bottom |
+| Chat | `Ctrl+Q` | Pop queue |
+| Chat | `Esc Esc` | Rewind |
+| Chat | `Alt+O` | Edit input in external editor |
+| Streaming | `↑` / `↓` | Navigate input history |
+| Streaming | `Esc Esc` | Cancel agent |
 | Form | `↑` / `↓` | Navigate options |
 | Form | `Enter` | Select option |
 | Form | `Esc` | Close |
-| Pickers | `↑` / `↓` | Navigate |
-| Pickers | `Enter` | Select |
-| Pickers | `Esc` | Close |
-| Pickers | `Type` | Filter |
-| Pickers | `PageUp` / `PageDown` | Scroll page up / down |
-| Pickers | `Ctrl+U` / `Ctrl+D` | Scroll page up / down |
-| Queue | `Enter` | Remove item |
-| Commands | `Tab` | Complete command |
-| Model Picker | `!/@/#/$` | Set tier (strong/medium/weak/compaction) |
+| Picker | `↑` / `↓` | Navigate |
+| Picker | `Enter` | Select |
+| Picker | `Esc` | Close |
+| Picker | `Type` | Filter |
+| Picker | `PageUp` / `PageDown` | Scroll page up / down |
+| Picker | `Ctrl+U` / `Ctrl+D` | Scroll page up / down |
+| queue | `Enter` | Remove item |
+| commands | `Tab` | Complete command |
+| model_picker | `!/@/#/$` | Set tier (strong/medium/weak/compaction) |
 | Session Picker | `Ctrl+N` | New session |
 | Session Picker | `Ctrl+R` | Rename session |
 | Session Picker | `Ctrl+D` | Delete session (press twice) |
 
 ## Context Inheritance
 
-Child contexts inherit their parent's bindings and add their own.
+Identities inherit their kind's bindings and add their own.
 
-- **General** is the base for: Editing, While Streaming, Pickers, Form
-- **Pickers** is the base for: Task Picker, Rewind Picker, Theme Picker, Model Picker, Queue, Commands, Search, File Picker
+- **Picker** is the base for: task_picker, model_picker, theme_picker, rewind_picker, mcp_picker, login_picker, file_picker, search, queue, commands
+- **Form** is the base for: plan_form, permission
+- **Modal** is the base for: help, usage, btw, float
 
 ## Overriding Keybindings
 

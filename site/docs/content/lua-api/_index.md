@@ -2592,9 +2592,11 @@ warning is logged.
 - `{rhs}` (`function|userdata`) Either a Lua function invoked on press, or a `maki.actions.<name>` handle (zero per-keypress Lua traffic).
 - `{opts?}` (`table?`) Options:
   - `desc` (`string`) short description shown in the keymap list.
-  - `context` (`string`) where the binding fires; one of the
-    `KeybindContext` labels (case-sensitive). Defaults to `"General"`,
-    which fires everywhere.
+  - `context` (`string|list of strings`) where the binding fires: a kind
+    (`"general"`, `"chat"`, `"streaming"`, `"picker"`, `"form"`,
+    `"modal"`) or an identity name (`"task_picker"`, `"search"`,
+    `"help"`, ...). A list means AND — every named context must be
+    active. Defaults to General, which fires everywhere.
 
 **Example:**
 

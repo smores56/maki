@@ -2,7 +2,7 @@ use super::*;
 use crate::agent::shared_queue;
 use crate::chat::{CANCELLED_TEXT, DONE_TEXT, ERROR_TEXT};
 use crate::components::command::ParsedCommand;
-use crate::components::keybindings::{KeybindContext, key as kb};
+use crate::components::keybindings::key as kb;
 use crate::components::{ExitRequest, key, test_model};
 use crate::selection::{SelectableZone, SelectionState, SelectionZone};
 use arc_swap::ArcSwap;
@@ -1915,55 +1915,193 @@ fn help_modal_consumes_keys_and_esc_closes() {
     assert!(!app.help_modal.is_open());
 }
 
-#[test_case(
-    |_: &mut App| {},
-    &[KeybindContext::General, KeybindContext::Editing],
-    &[KeybindContext::Streaming]
-    ; "idle"
-)]
-#[test_case(
-    |app: &mut App| { app.status = Status::Streaming; },
-    &[KeybindContext::General, KeybindContext::Streaming, KeybindContext::Editing],
-    &[]
-    ; "streaming"
-)]
-#[test_case(
-    |app: &mut App| { app.state.mode = Mode::Plan; app.plan_form.on_plan_ready(); },
-    &[KeybindContext::FormInput],
-    &[KeybindContext::Editing]
-    ; "plan_form"
-)]
-#[test_case(
-    |app: &mut App| { app.status = Status::Streaming; app.run_id = 1; app.queue_and_notify(queued_msg("q")); app.queue.set_focus_at(0); },
-    &[KeybindContext::QueueFocus],
-    &[KeybindContext::Editing]
-    ; "queue_focus"
-)]
-#[test_case(
-    |app: &mut App| { open_tasks_picker(app); },
-    &[KeybindContext::TaskPicker],
-    &[KeybindContext::Editing]
-    ; "task_picker"
-)]
-#[test_case(
-    |app: &mut App| {
-        app.state.session_mut().push_message(Message::user("test".into()));
-        app.open_rewind_picker();
-    },
-    &[KeybindContext::RewindPicker],
-    &[KeybindContext::Editing]
-    ; "rewind_picker"
-)]
-fn active_contexts(setup: fn(&mut App), expected: &[KeybindContext], absent: &[KeybindContext]) {
+#[test]
+fn active_keybind_contexts_covers_every_overlay() {
+    use maki_lua::{ContextKind, IDENTITIES, IdentityId};
+
+    fn identity_id(name: &str) -> IdentityId {
+        IDENTITIES
+            .iter()
+            .find(|i| i.name == name)
+            .expect("seed identity")
+            .id
+    }
+
+    fn assert_active(app: &App, identity: Option<&str>, kinds: &[ContextKind], case: &str) {
+        let active = app.active_keybind_contexts();
+        assert_eq!(
+            active.identity,
+            identity.map(identity_id),
+            "{case}: identity mismatch"
+        );
+        let expected = kinds.iter().fold(0, |bits, k| bits | (1 << *k as u8));
+        assert_eq!(active.kinds, expected, "{case}: kinds mismatch");
+    }
+
+    fn check(
+        setup: impl FnOnce(&mut App),
+        identity: Option<&str>,
+        kinds: &[ContextKind],
+        case: &str,
+    ) {
+        let mut app = test_app();
+        setup(&mut app);
+        assert_active(&app, identity, kinds, case);
+    }
+
+    check(|_| {}, None, &[ContextKind::Chat], "idle main chat");
+    check(
+        |app| app.status = Status::Streaming,
+        None,
+        &[ContextKind::Streaming],
+        "streaming",
+    );
+    check(
+        |app| {
+            app.permission_prompt.open(
+                "id".into(),
+                maki_config::ToolKey::native("bash"),
+                vec!["execute".into()],
+                None,
+            );
+        },
+        Some("permission"),
+        &[ContextKind::Form],
+        "permission prompt",
+    );
+    check(
+        |app| {
+            app.state.mode = Mode::Plan;
+            app.plan_form.on_plan_ready();
+        },
+        Some("plan_form"),
+        &[ContextKind::Form],
+        "plan form",
+    );
+    check(
+        |app| app.help_modal.toggle(),
+        Some("help"),
+        &[ContextKind::Modal],
+        "help modal",
+    );
+    check(
+        |app| app.usage_modal.toggle(),
+        Some("usage"),
+        &[ContextKind::Modal],
+        "usage modal",
+    );
+    check(
+        |app| {
+            let (_tx, rx) = flume::bounded::<crate::components::btw_modal::BtwEvent>(1);
+            app.btw_modal.open("question", rx);
+        },
+        Some("btw"),
+        &[ContextKind::Modal],
+        "btw modal",
+    );
+    check(
+        |app| open_split_window(app, maki_lua::Split::Left),
+        Some("float"),
+        &[ContextKind::Modal],
+        "float window",
+    );
+    check(
+        |app| app.search_modal.open(0, true),
+        Some("search"),
+        &[ContextKind::Picker],
+        "search modal",
+    );
+    check(
+        |app| app.file_picker.open("/tmp"),
+        Some("file_picker"),
+        &[ContextKind::Picker],
+        "file picker",
+    );
+    check(
+        |app| {
+            app.status = Status::Streaming;
+            app.run_id = 1;
+            app.queue_and_notify(queued_msg("q"));
+            app.queue.set_focus_at(0);
+            app.status = Status::Idle;
+        },
+        Some("queue"),
+        &[ContextKind::Picker],
+        "queue focus",
+    );
+    check(
+        open_tasks_picker,
+        Some("task_picker"),
+        &[ContextKind::Picker],
+        "task picker",
+    );
+    check(
+        |app| {
+            app.state
+                .session_mut()
+                .push_message(Message::user("test".into()));
+            app.open_rewind_picker();
+        },
+        Some("rewind_picker"),
+        &[ContextKind::Picker],
+        "rewind picker",
+    );
+    check(
+        |app| app.theme_picker.open(),
+        Some("theme_picker"),
+        &[ContextKind::Picker],
+        "theme picker",
+    );
+    check(
+        |app| app.model_picker.open("test-model"),
+        Some("model_picker"),
+        &[ContextKind::Picker],
+        "model picker",
+    );
+    check(
+        |app| app.login_picker.open(StateDir::from_path(env::temp_dir())),
+        Some("login_picker"),
+        &[ContextKind::Picker],
+        "login picker",
+    );
+    check(
+        |app| app.mcp_picker.open(),
+        Some("mcp_picker"),
+        &[ContextKind::Picker],
+        "mcp picker",
+    );
+
+    // Priority: the first open overlay in the fixed order wins the
+    // identity; kinds union over all open overlays.
     let mut app = test_app();
-    setup(&mut app);
-    let contexts = app.active_keybind_contexts();
-    for ctx in expected {
-        assert!(contexts.contains(ctx), "{ctx:?} should be present");
-    }
-    for ctx in absent {
-        assert!(!contexts.contains(ctx), "{ctx:?} should be absent");
-    }
+    app.help_modal.toggle();
+    app.mcp_picker.open();
+    assert_active(
+        &app,
+        Some("help"),
+        &[ContextKind::Modal, ContextKind::Picker],
+        "help+mcp priority",
+    );
+
+    let mut app = test_app();
+    app.permission_prompt.open(
+        "id".into(),
+        maki_config::ToolKey::native("bash"),
+        vec!["execute".into()],
+        None,
+    );
+    app.task_picker.open(vec![], "tasks");
+    assert_active(
+        &app,
+        Some("permission"),
+        &[ContextKind::Form, ContextKind::Picker],
+        "permission+task priority",
+    );
+
+    // No overlay open and not the main chat: only General.
+    let mut app = test_app();
+    app.active_chat = 1;
+    assert_active(&app, None, &[], "non-main chat idle");
 }
 
 #[test]

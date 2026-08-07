@@ -1,13 +1,12 @@
 use crate::components::ModalScroll;
 use crate::components::Overlay;
-use crate::components::keybindings::{
-    ALT_SEP, KEYBINDS, KeybindContext, ResolvedLabel, all_contexts, key,
-};
+use crate::components::keybindings::{ALT_SEP, KEYBINDS, ResolvedLabel, key, section_title};
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
 use crate::theme;
 
 use crossterm::event::{KeyCode, KeyEvent};
+use maki_lua::{ContextKind, ContextRef, IDENTITIES};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -132,8 +131,27 @@ impl HelpModal {
             + KEY_COL_GAP;
 
         let mut first = true;
-        for ctx in all_contexts() {
-            if ctx.parent().is_some() {
+        for kind in ContextKind::ALL {
+            let kind_binds: Vec<_> = KEYBINDS
+                .iter()
+                .filter(|kb| kb.context == ContextRef::Kind(kind) && kb.platform.is_visible())
+                .collect();
+            let identity_binds: Vec<_> = IDENTITIES
+                .iter()
+                .filter(|i| i.kind == kind)
+                .map(|identity| {
+                    let binds: Vec<_> = KEYBINDS
+                        .iter()
+                        .filter(|kb| {
+                            kb.context == ContextRef::Identity(identity.id)
+                                && kb.platform.is_visible()
+                        })
+                        .collect();
+                    (identity, binds)
+                })
+                .filter(|(_, binds)| !binds.is_empty())
+                .collect();
+            if kind_binds.is_empty() && identity_binds.is_empty() {
                 continue;
             }
             if !first {
@@ -142,36 +160,23 @@ impl HelpModal {
             first = false;
 
             lines.push(Line::from(Span::styled(
-                format!("  {}", ctx.label()),
+                format!("  {}", section_title(kind)),
                 theme.keybind_section,
             )));
 
-            for kb in KEYBINDS
-                .iter()
-                .filter(|kb| kb.context == ctx && kb.platform.is_visible())
-            {
+            for kb in kind_binds {
                 let mut spans = key_spans(kb.label.resolve(), key_col_width, PREFIX_TOP);
                 spans.push(Span::styled(kb.description, theme.keybind_desc));
                 lines.push(Line::from(spans));
             }
 
-            for child in all_contexts() {
-                if child.parent() != Some(ctx) {
-                    continue;
-                }
-                let child_binds: Vec<_> = KEYBINDS
-                    .iter()
-                    .filter(|kb| kb.context == child && kb.platform.is_visible())
-                    .collect();
-                if child_binds.is_empty() {
-                    continue;
-                }
+            for (identity, binds) in identity_binds {
                 lines.push(Line::default());
                 lines.push(Line::from(Span::styled(
-                    format!("    {}", child.label()),
+                    format!("    {}", identity.name),
                     theme.keybind_section,
                 )));
-                for kb in child_binds {
+                for kb in binds {
                     let mut spans = key_spans(
                         kb.label.resolve(),
                         key_col_width - KEY_COL_GAP,
@@ -182,7 +187,7 @@ impl HelpModal {
                 }
             }
 
-            if ctx == KeybindContext::Editing {
+            if kind == ContextKind::Chat {
                 lines.push(Line::default());
                 lines.push(Line::from(Span::styled(
                     "    Input Prefixes",
