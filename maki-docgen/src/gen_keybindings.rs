@@ -1,4 +1,5 @@
-use maki_ui::keybindings::{ALT_SEP, KEYBINDS, KeyLabel, KeybindContext, Platform, all_contexts};
+use maki_lua::{ContextKind, ContextRef, IDENTITIES};
+use maki_ui::keybindings::{ALT_SEP, KEYBINDS, KeyLabel, Platform, section_title};
 
 const FRONTMATTER: &str = "\
 +++
@@ -14,12 +15,12 @@ const LUA_CONTEXT_BINDS: &[(&str, &str, &str)] = &[
     ("Session Picker", "`Ctrl+D`", "Delete session (press twice)"),
 ];
 
-const MAIN_CONTEXTS: &[KeybindContext] = &[
-    KeybindContext::General,
-    KeybindContext::Editing,
-    KeybindContext::Streaming,
-    KeybindContext::FormInput,
-    KeybindContext::Picker,
+const MAIN_CONTEXTS: &[ContextKind] = &[
+    ContextKind::General,
+    ContextKind::Chat,
+    ContextKind::Streaming,
+    ContextKind::Form,
+    ContextKind::Picker,
 ];
 
 fn label_str(label: KeyLabel) -> String {
@@ -35,6 +36,18 @@ fn label_str(label: KeyLabel) -> String {
     }
 }
 
+fn context_label(context: ContextRef) -> String {
+    match context {
+        ContextRef::Kind(kind) => section_title(kind),
+        ContextRef::Identity(id) => IDENTITIES
+            .iter()
+            .find(|i| i.id == id)
+            .expect("identity must exist in the seed table")
+            .name
+            .to_string(),
+    }
+}
+
 fn write_table_2col(out: &mut String, rows: &[(String, &str)]) {
     out.push_str("| Key | Action |\n|-----|--------|\n");
     for (key, desc) in rows {
@@ -42,10 +55,13 @@ fn write_table_2col(out: &mut String, rows: &[(String, &str)]) {
     }
 }
 
-fn write_section(out: &mut String, ctx: KeybindContext) {
-    out.push_str(&format!("\n## {}\n\n", ctx.label()));
+fn write_section(out: &mut String, ctx: ContextKind) {
+    out.push_str(&format!("\n## {}\n\n", section_title(ctx)));
 
-    let all_rows: Vec<_> = KEYBINDS.iter().filter(|kb| kb.context == ctx).collect();
+    let all_rows: Vec<_> = KEYBINDS
+        .iter()
+        .filter(|kb| kb.context == ContextRef::Kind(ctx))
+        .collect();
 
     let normal: Vec<_> = all_rows
         .iter()
@@ -67,12 +83,31 @@ fn write_section(out: &mut String, ctx: KeybindContext) {
         out.push_str("\n### macOS-specific\n\n");
         write_table_2col(out, &mac_only);
     }
+
+    for identity in IDENTITIES.iter().filter(|i| i.kind == ctx) {
+        let identity_rows: Vec<_> = KEYBINDS
+            .iter()
+            .filter(|kb| kb.context == ContextRef::Identity(identity.id))
+            .collect();
+        if identity_rows.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n### {}\n\n", identity.name));
+        let normal: Vec<_> = identity_rows
+            .iter()
+            .filter(|kb| kb.platform == Platform::All)
+            .map(|kb| (label_str(kb.label), kb.description))
+            .collect();
+        if !normal.is_empty() {
+            write_table_2col(out, &normal);
+        }
+    }
 }
 
 fn write_context_specific(out: &mut String) {
     let child_binds: Vec<_> = KEYBINDS
         .iter()
-        .filter(|kb| kb.context.parent().is_some())
+        .filter(|kb| kb.context != ContextRef::Kind(ContextKind::General))
         .collect();
 
     if child_binds.is_empty() {
@@ -80,14 +115,14 @@ fn write_context_specific(out: &mut String) {
     }
 
     out.push_str("\n## Context-Specific\n\n");
-    out.push_str("Some pickers add extra bindings on top of the defaults:\n\n");
+    out.push_str("Some contexts add extra bindings on top of the defaults:\n\n");
     out.push_str("| Context | Key | Action |\n|---------|-----|--------|\n");
 
     for kb in &child_binds {
         let key = label_str(kb.label);
         out.push_str(&format!(
             "| {} | {key} | {} |\n",
-            kb.context.label(),
+            context_label(kb.context),
             kb.description
         ));
     }
@@ -98,32 +133,22 @@ fn write_context_specific(out: &mut String) {
 }
 
 fn write_inheritance(out: &mut String) {
-    let children: Vec<_> = all_contexts()
-        .filter(|ctx| ctx.parent().is_some())
-        .collect();
-
-    if children.is_empty() {
-        return;
-    }
-
     out.push_str("\n## Context Inheritance\n\n");
-    out.push_str("Child contexts inherit their parent's bindings and add their own.\n\n");
+    out.push_str("Identities inherit their kind's bindings and add their own.\n\n");
 
-    let mut by_parent: Vec<(KeybindContext, Vec<&str>)> = Vec::new();
-    for child in &children {
-        let parent = child.parent().unwrap();
-        if let Some(entry) = by_parent.iter_mut().find(|(p, _)| *p == parent) {
-            entry.1.push(child.label());
-        } else {
-            by_parent.push((parent, vec![child.label()]));
+    for kind in ContextKind::ALL {
+        let identities: Vec<_> = IDENTITIES
+            .iter()
+            .filter(|i| i.kind == kind)
+            .map(|i| i.name)
+            .collect();
+        if identities.is_empty() {
+            continue;
         }
-    }
-
-    for (parent, kids) in &by_parent {
-        let list = kids.join(", ");
         out.push_str(&format!(
-            "- **{}** is the base for: {list}\n",
-            parent.label()
+            "- **{}** is the base for: {}\n",
+            section_title(kind),
+            identities.join(", ")
         ));
     }
 }

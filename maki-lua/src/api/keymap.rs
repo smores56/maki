@@ -5,82 +5,11 @@ use arc_swap::ArcSwap;
 use crossterm::event::{KeyCode, KeyModifiers};
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Lua, RegistryKey, Result as LuaResult, Table, Value};
-use strum::{EnumIter, IntoEnumIterator};
 
 use crate::api::actions::{BuiltinAction, LuaBuiltinAction};
+use crate::api::context::{ContextRef, all_names, resolve};
 
 static NEXT_KEYMAP_ID: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumIter)]
-pub enum KeybindContext {
-    General,
-    Editing,
-    Streaming,
-    Picker,
-    FormInput,
-    TaskPicker,
-    RewindPicker,
-    ThemePicker,
-    ModelPicker,
-    QueueFocus,
-    CommandPalette,
-    Search,
-    FilePicker,
-}
-
-impl KeybindContext {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::General => "General",
-            Self::Editing => "Editing",
-            Self::Streaming => "While Streaming",
-            Self::Picker => "Pickers",
-            Self::FormInput => "Form",
-            Self::TaskPicker => "Task Picker",
-            Self::RewindPicker => "Rewind Picker",
-            Self::ThemePicker => "Theme Picker",
-            Self::ModelPicker => "Model Picker",
-            Self::QueueFocus => "Queue",
-            Self::CommandPalette => "Commands",
-            Self::Search => "Search",
-            Self::FilePicker => "File Picker",
-        }
-    }
-
-    pub const fn parent(self) -> Option<KeybindContext> {
-        match self {
-            Self::Editing | Self::Streaming | Self::FormInput | Self::Picker => Some(Self::General),
-            Self::TaskPicker
-            | Self::RewindPicker
-            | Self::ThemePicker
-            | Self::ModelPicker
-            | Self::QueueFocus
-            | Self::CommandPalette
-            | Self::Search
-            | Self::FilePicker => Some(Self::Picker),
-            Self::General => None,
-        }
-    }
-
-    pub fn from_label(s: &str) -> Option<Self> {
-        Self::iter().find(|c| c.label() == s)
-    }
-
-    pub fn all_labels() -> Vec<&'static str> {
-        Self::iter().map(|c| c.label()).collect()
-    }
-
-    pub fn applies_in(self, active: KeybindContext) -> bool {
-        let mut ctx = Some(active);
-        while let Some(c) = ctx {
-            if c == self {
-                return true;
-            }
-            ctx = c.parent();
-        }
-        false
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct KeymapEntry {
@@ -89,7 +18,7 @@ pub struct KeymapEntry {
     pub desc: String,
     pub plugin: Arc<str>,
     pub id: u64,
-    pub context: KeybindContext,
+    pub context: Vec<ContextRef>,
     pub kind: EntryKind,
 }
 
@@ -113,7 +42,7 @@ impl KeymapEntry {
             desc: desc.into(),
             plugin,
             id,
-            context: KeybindContext::General,
+            context: Vec::new(),
             kind: EntryKind::Callback,
         }
     }
@@ -124,7 +53,7 @@ impl KeymapEntry {
         plugin: Arc<str>,
         desc: impl Into<String>,
         id: u64,
-        context: KeybindContext,
+        context: Vec<ContextRef>,
         action: BuiltinAction,
     ) -> Self {
         Self {
@@ -212,7 +141,7 @@ pub(crate) struct StoredKeymap {
     pub key: KeyCode,
     pub modifiers: KeyModifiers,
     pub kind: KeymapKind,
-    pub context: KeybindContext,
+    pub context: Vec<ContextRef>,
     pub plugin: Arc<str>,
     pub desc: String,
 }
@@ -235,7 +164,7 @@ impl KeymapStore {
         kind: KeymapKind,
         plugin: Arc<str>,
         desc: String,
-        context: KeybindContext,
+        context: Vec<ContextRef>,
     ) -> (u64, Option<RegistryKey>) {
         let id = NEXT_KEYMAP_ID.fetch_add(1, Ordering::Relaxed);
         let old = self
@@ -289,7 +218,7 @@ impl KeymapStore {
                 desc: b.desc.clone(),
                 plugin: Arc::clone(&b.plugin),
                 id: b.id,
-                context: b.context,
+                context: b.context.clone(),
                 kind: match &b.kind {
                     KeymapKind::Callback(_) => EntryKind::Callback,
                     KeymapKind::Builtin(a) => EntryKind::Builtin(*a),
@@ -307,6 +236,44 @@ impl KeymapStore {
                 KeymapKind::Builtin(_) => None,
             })
     }
+}
+
+/// Smallest edit distance between two strings; O(len(a) * len(b)).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j + 1] + 1)
+                .min(cur[j] + 1)
+                .min(prev[j] + usize::from(ca != cb));
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Nearest candidate within edit distance 2 of `name` (case-insensitive).
+fn did_you_mean<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let name = name.to_lowercase();
+    let mut best: Option<(&'a str, usize)> = None;
+    for candidate in candidates {
+        let d = edit_distance(&name, candidate);
+        if d <= 2 && best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((candidate, d));
+        }
+    }
+    best.map(|(candidate, _)| candidate)
+}
+
+/// `" Did you mean {nearest}?"` when a suggestion exists, else `""`.
+fn did_you_mean_suffix<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> String {
+    did_you_mean(name, candidates)
+        .map(|c| format!(" Did you mean {c}?"))
+        .unwrap_or_default()
 }
 
 pub fn parse_key_notation(input: &str) -> Result<(KeyCode, KeyModifiers), String> {
@@ -414,20 +381,45 @@ fn publish_keymap_snapshot(lua: &Lua) {
     }
 }
 
-fn parse_context(opts: Option<&Table>) -> LuaResult<KeybindContext> {
+/// `opts.context`: nil (General), one name, or a list of names with AND
+/// semantics (every name must resolve; empty list = General).
+fn parse_context(opts: Option<&Table>) -> LuaResult<Vec<ContextRef>> {
     let Some(opts) = opts else {
-        return Ok(KeybindContext::General);
+        return Ok(Vec::new());
     };
-    let raw: Option<String> = opts.get("context")?;
+    let raw: Option<Value> = opts.get("context")?;
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
     match raw {
-        None => Ok(KeybindContext::General),
-        Some(s) => KeybindContext::from_label(&s).ok_or_else(|| {
-            mlua::Error::runtime(format!(
-                "unknown opts.context {s:?}; expected one of: {}",
-                KeybindContext::all_labels().join(", ")
-            ))
-        }),
+        Value::String(s) => {
+            let name = s.to_str()?;
+            resolve_context_name(&name).map(|r| vec![r])
+        }
+        Value::Table(t) => {
+            let mut refs = Vec::new();
+            for name in t.sequence_values::<String>() {
+                refs.push(resolve_context_name(&name?)?);
+            }
+            Ok(refs)
+        }
+        other => Err(mlua::Error::runtime(format!(
+            "opts.context must be a string or a list of strings, got {}",
+            other.type_name()
+        ))),
     }
+}
+
+fn resolve_context_name(name: &str) -> LuaResult<ContextRef> {
+    let name = name.trim();
+    resolve(name).ok_or_else(|| {
+        let names = all_names();
+        mlua::Error::runtime(format!(
+            "unknown context {name:?}; expected one of: {}{}",
+            names.join(", "),
+            did_you_mean_suffix(name, names.into_iter())
+        ))
+    })
 }
 
 /// The single entry on the Lua-side RHS parser. Accepts (1) a
@@ -465,9 +457,11 @@ pub(crate) fn parse_rhs(lua: &Lua, rhs: Value) -> LuaResult<KeymapKind> {
 /// @param rhs function|userdata Either a Lua function invoked on press, or a `maki.actions.<name>` handle (zero per-keypress Lua traffic).
 /// @param opts table? Options:
 ///   `desc` (string) short description shown in the keymap list.
-///   `context` (string) where the binding fires; one of the
-///     `KeybindContext` labels (case-sensitive). Defaults to `"General"`,
-///     which fires everywhere.
+///   `context` (string|list of strings) where the binding fires: a kind
+///     (`"general"`, `"chat"`, `"streaming"`, `"picker"`, `"form"`,
+///     `"modal"`) or an identity name (`"task_picker"`, `"search"`,
+///     `"help"`, ...). A list means AND — every named context must be
+///     active. Defaults to General, which fires everywhere.
 /// @example
 /// maki.keymap.set("n", "<C-t>", maki.actions.plan_toggle, { desc = "Toggle panel" })
 /// @example
@@ -545,6 +539,7 @@ lua_table! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::context::{ActiveContext, ContextKind, IDENTITIES, IdentityId, applies, tier};
     use crossterm::event::{KeyCode, KeyModifiers};
     use test_case::test_case;
 
@@ -609,7 +604,7 @@ mod tests {
             KeymapKind::Callback(k1),
             Arc::from("plug"),
             "toggle".into(),
-            KeybindContext::General,
+            Vec::new(),
         );
         assert!(old1.is_none());
 
@@ -621,7 +616,7 @@ mod tests {
             KeymapKind::Callback(k2),
             Arc::from("plug2"),
             "toggle v2".into(),
-            KeybindContext::General,
+            Vec::new(),
         );
         assert!(old2.is_some());
         assert_ne!(id1, id2);
@@ -641,7 +636,7 @@ mod tests {
             KeymapKind::Callback(k),
             Arc::from("p"),
             String::new(),
-            KeybindContext::General,
+            Vec::new(),
         );
         assert_eq!(store.bindings.len(), 1);
 
@@ -668,7 +663,7 @@ mod tests {
             KeymapKind::Callback(k1),
             Arc::from("a"),
             String::new(),
-            KeybindContext::General,
+            Vec::new(),
         );
         store.set(
             KeyCode::Char('x'),
@@ -676,7 +671,7 @@ mod tests {
             KeymapKind::Callback(k2),
             Arc::from("b"),
             String::new(),
-            KeybindContext::General,
+            Vec::new(),
         );
 
         let removed = store.clear_plugin("a");
@@ -696,7 +691,7 @@ mod tests {
             desc: "test".into(),
             plugin: Arc::from("p"),
             id: 1,
-            context: KeybindContext::General,
+            context: Vec::new(),
             kind: EntryKind::Callback,
         }]);
 
@@ -705,48 +700,88 @@ mod tests {
         assert_eq!(snap.generation, 1);
     }
 
-    #[test_case(KeybindContext::General, KeybindContext::General, true ; "general_self")]
-    #[test_case(KeybindContext::General, KeybindContext::Editing, true ; "general_to_editing")]
-    #[test_case(KeybindContext::General, KeybindContext::FilePicker, true ; "general_to_picker")]
-    #[test_case(KeybindContext::Picker, KeybindContext::FilePicker, true ; "picker_to_child")]
-    #[test_case(KeybindContext::Picker, KeybindContext::TaskPicker, true ; "picker_to_other_child")]
-    #[test_case(KeybindContext::Picker, KeybindContext::General, false ; "picker_not_in_general")]
-    #[test_case(KeybindContext::FilePicker, KeybindContext::FilePicker, true ; "child_self")]
-    #[test_case(KeybindContext::Editing, KeybindContext::General, false ; "editing_not_in_general")]
-    #[test_case(KeybindContext::Editing, KeybindContext::Picker, false ; "editing_not_in_picker")]
-    #[test_case(KeybindContext::FilePicker, KeybindContext::ThemePicker, false ; "sibling_not_applies")]
-    fn applies_in_predicate(binding: KeybindContext, active: KeybindContext, expected: bool) {
-        assert_eq!(binding.applies_in(active), expected);
+    #[test_case(&[], 0 ; "empty_is_general")]
+    #[test_case(&[ContextRef::Kind(ContextKind::General)], 1 ; "kind_general")]
+    #[test_case(&[ContextRef::Kind(ContextKind::Picker)], 1 ; "kind_picker")]
+    #[test_case(&[ContextRef::Identity(0)], 2 ; "identity")]
+    #[test_case(&[ContextRef::Kind(ContextKind::Picker), ContextRef::Identity(0)], 2 ; "kind_plus_identity")]
+    #[test_case(&[ContextRef::Identity(0), ContextRef::Identity(1)], 2 ; "two_identities")]
+    fn tier_is_max_over_refs(refs: &[ContextRef], expected: u8) {
+        assert_eq!(tier(refs), expected);
+    }
+
+    fn active(identity: Option<IdentityId>, kinds: u8) -> ActiveContext {
+        ActiveContext { identity, kinds }
+    }
+
+    fn bits(kinds: &[ContextKind]) -> u8 {
+        kinds.iter().fold(0, |bits, k| bits | (1 << *k as u8))
+    }
+
+    #[test_case(&[], None, &[], true ; "empty_matches_empty")]
+    #[test_case(&[], Some(7), &[ContextKind::Picker], true ; "empty_matches_any")]
+    #[test_case(&[ContextRef::Kind(ContextKind::General)], Some(7), &[ContextKind::Picker], true ; "kind_general_matches_any")]
+    #[test_case(&[ContextRef::Kind(ContextKind::Picker)], None, &[ContextKind::Picker], true ; "kind_picker_matches_picker")]
+    #[test_case(&[ContextRef::Kind(ContextKind::Picker)], None, &[ContextKind::Chat], false ; "kind_picker_not_in_chat")]
+    #[test_case(&[ContextRef::Kind(ContextKind::Streaming)], None, &[ContextKind::Streaming, ContextKind::Picker], true ; "kind_streaming_in_union")]
+    #[test_case(&[ContextRef::Kind(ContextKind::Chat)], Some(7), &[ContextKind::Picker], false ; "kind_chat_not_in_picker_only")]
+    #[test_case(&[ContextRef::Identity(7)], Some(7), &[], true ; "identity_matches_self")]
+    #[test_case(&[ContextRef::Identity(7)], Some(8), &[ContextKind::Picker], false ; "identity_does_not_match_sibling")]
+    #[test_case(&[ContextRef::Identity(7)], None, &[ContextKind::Picker], false ; "identity_does_not_match_kind_only")]
+    #[test_case(&[ContextRef::Kind(ContextKind::Picker), ContextRef::Identity(7)], Some(7), &[ContextKind::Picker], true ; "and_both_match")]
+    #[test_case(&[ContextRef::Kind(ContextKind::Picker), ContextRef::Identity(7)], Some(7), &[ContextKind::Chat], false ; "and_requires_every_ref")]
+    fn applies_requires_every_ref(
+        refs: &[ContextRef],
+        identity: Option<IdentityId>,
+        kinds: &[ContextKind],
+        expected: bool,
+    ) {
+        assert_eq!(applies(refs, &active(identity, bits(kinds))), expected);
+    }
+
+    #[test_case("general", ContextRef::Kind(ContextKind::General) ; "kind_general")]
+    #[test_case("picker", ContextRef::Kind(ContextKind::Picker) ; "kind_picker")]
+    #[test_case("task_picker", ContextRef::Identity(0) ; "identity_task_picker")]
+    #[test_case("help", ContextRef::Identity(12) ; "identity_help")]
+    #[test_case("permission", ContextRef::Identity(11) ; "identity_permission")]
+    fn resolve_known_names(name: &str, expected: ContextRef) {
+        assert_eq!(resolve(name), Some(expected));
     }
 
     #[test]
-    fn from_label_roundtrips() {
-        for ctx in KeybindContext::iter() {
-            assert_eq!(KeybindContext::from_label(ctx.label()), Some(ctx));
+    fn resolve_unknown_names() {
+        assert_eq!(resolve("Picker"), None, "kind labels are lowercase");
+        assert_eq!(resolve("Task Picker"), None, "v2 labels are gone");
+        assert_eq!(resolve(""), None);
+        assert_eq!(resolve("nonsense"), None);
+    }
+
+    #[test]
+    fn all_names_covers_kinds_and_identities() {
+        let names = all_names();
+        for kind in ContextKind::ALL {
+            assert!(
+                names.contains(&kind.label()),
+                "missing kind {}",
+                kind.label()
+            );
         }
-        assert_eq!(KeybindContext::from_label("nonexistent"), None);
-    }
-
-    #[test]
-    fn all_labels_covers_every_variant() {
-        let labels = KeybindContext::all_labels();
-        assert_eq!(labels.len(), KeybindContext::iter().count());
-        for ctx in KeybindContext::iter() {
-            assert!(labels.contains(&ctx.label()));
+        for identity in IDENTITIES {
+            assert!(
+                names.contains(&identity.name),
+                "missing identity {}",
+                identity.name
+            );
         }
+        assert_eq!(names.len(), ContextKind::ALL.len() + IDENTITIES.len());
     }
 
     #[test]
-    fn parent_roots_at_general() {
-        for ctx in KeybindContext::iter() {
-            let mut cur = Some(ctx);
-            while let Some(c) = cur {
-                cur = c.parent();
-                if c == KeybindContext::General {
-                    assert!(cur.is_none(), "General must be the root");
-                    break;
-                }
-            }
+    fn seed_identities_have_unique_ids() {
+        let mut seen = std::collections::HashSet::new();
+        for (i, identity) in IDENTITIES.iter().enumerate() {
+            assert_eq!(identity.id as usize, i, "id must be the array index");
+            assert!(seen.insert(identity.id), "duplicate id {}", identity.id);
         }
     }
 
@@ -814,22 +849,166 @@ mod tests {
 
     #[test]
     fn parse_context_defaults_to_general() {
-        assert_eq!(parse_context(None).unwrap(), KeybindContext::General);
+        assert_eq!(parse_context(None).unwrap(), Vec::new());
         let lua = Lua::new();
         let empty = lua.create_table().unwrap();
+        assert_eq!(parse_context(Some(&empty)).unwrap(), Vec::new());
+
+        let t = lua.create_table().unwrap();
+        t.set("context", mlua::Value::Nil).unwrap();
+        assert_eq!(parse_context(Some(&t)).unwrap(), Vec::new());
+
+        let t = lua.create_table().unwrap();
+        t.set("context", lua.create_table().unwrap()).unwrap();
         assert_eq!(
-            parse_context(Some(&empty)).unwrap(),
-            KeybindContext::General
+            parse_context(Some(&t)).unwrap(),
+            Vec::new(),
+            "empty list = General"
         );
     }
 
-    #[test_case("Editing", KeybindContext::Editing ; "editing")]
-    #[test_case("Pickers", KeybindContext::Picker ; "pickers_label")]
-    #[test_case("File Picker", KeybindContext::FilePicker ; "file_picker_label")]
-    fn parse_context_accepts_known_label(label: &str, expected: KeybindContext) {
+    #[test_case("picker", vec![ContextRef::Kind(ContextKind::Picker)] ; "kind")]
+    #[test_case("task_picker", vec![ContextRef::Identity(0)] ; "identity")]
+    #[test_case("  help  ", vec![ContextRef::Identity(12)] ; "trimmed")]
+    fn parse_context_accepts_known_name(name: &str, expected: Vec<ContextRef>) {
         let lua = Lua::new();
         let t = lua.create_table().unwrap();
-        t.set("context", label).unwrap();
+        t.set("context", name).unwrap();
         assert_eq!(parse_context(Some(&t)).unwrap(), expected);
+    }
+
+    #[test]
+    fn parse_context_accepts_name_list_and_semantics() {
+        let lua = Lua::new();
+        let t = lua.create_table().unwrap();
+        let list = lua.create_table().unwrap();
+        list.push("picker").unwrap();
+        list.push("streaming").unwrap();
+        t.set("context", list).unwrap();
+        assert_eq!(
+            parse_context(Some(&t)).unwrap(),
+            vec![
+                ContextRef::Kind(ContextKind::Picker),
+                ContextRef::Kind(ContextKind::Streaming),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_context_rejects_wrong_type() {
+        let lua = Lua::new();
+        let t = lua.create_table().unwrap();
+        t.set("context", 42).unwrap();
+        let err = parse_context(Some(&t)).unwrap_err();
+        assert!(
+            err.to_string().contains("opts.context must be a string"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_context_unknown_name_lists_all_and_suggests() {
+        let lua = Lua::new();
+        let t = lua.create_table().unwrap();
+        t.set("context", "task_piccer").unwrap();
+        let err = parse_context(Some(&t)).unwrap_err();
+        let msg = err.to_string();
+        for name in all_names() {
+            assert!(msg.contains(name), "expected {name:?} in error: {msg}");
+        }
+        assert!(
+            msg.contains("Did you mean task_picker?"),
+            "expected did-you-mean, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_context_unknown_list_name_errors() {
+        let lua = Lua::new();
+        let t = lua.create_table().unwrap();
+        let list = lua.create_table().unwrap();
+        list.push("picker").unwrap();
+        list.push("nonsense").unwrap();
+        t.set("context", list).unwrap();
+        let err = parse_context(Some(&t)).unwrap_err();
+        assert!(err.to_string().contains("unknown context \"nonsense\""));
+    }
+
+    fn store_app(lua: &Lua) {
+        lua.set_app_data(KeymapStore::new());
+    }
+
+    #[test]
+    fn set_binds_and_shadows() {
+        let lua = Lua::new();
+        store_app(&lua);
+        let f = lua.create_function(|_, ()| Ok(())).unwrap();
+
+        set(
+            &lua,
+            Arc::from("plug"),
+            "n".into(),
+            "<C-t>".into(),
+            mlua::Value::Function(f),
+            None,
+        )
+        .unwrap();
+        assert_eq!(lua.app_data_ref::<KeymapStore>().unwrap().bindings.len(), 1);
+
+        let f2 = lua.create_function(|_, ()| Ok(())).unwrap();
+        set(
+            &lua,
+            Arc::from("plug2"),
+            "n".into(),
+            "<C-t>".into(),
+            mlua::Value::Function(f2),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            lua.app_data_ref::<KeymapStore>().unwrap().bindings.len(),
+            1,
+            "same key replaces the old binding"
+        );
+    }
+
+    #[test]
+    fn set_rejects_unknown_context_with_suggestion() {
+        let lua = Lua::new();
+        store_app(&lua);
+        let f = lua.create_function(|_, ()| Ok(())).unwrap();
+        let opts = lua.create_table().unwrap();
+        opts.set("context", "task_piccer").unwrap();
+        let err = set(
+            &lua,
+            Arc::from("plug"),
+            "n".into(),
+            "<C-t>".into(),
+            mlua::Value::Function(f),
+            Some(opts),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Did you mean task_picker?"));
+    }
+
+    #[test]
+    fn del_removes_binding() {
+        let lua = Lua::new();
+        store_app(&lua);
+        let f = lua.create_function(|_, ()| Ok(())).unwrap();
+        set(
+            &lua,
+            Arc::from("plug"),
+            "n".into(),
+            "<C-t>".into(),
+            mlua::Value::Function(f),
+            None,
+        )
+        .unwrap();
+
+        del(&lua, Arc::from("plug"), "n".into(), "<C-t>".into()).unwrap();
+        assert_eq!(lua.app_data_ref::<KeymapStore>().unwrap().bindings.len(), 0);
+
+        del(&lua, Arc::from("plug"), "n".into(), "<C-t>".into()).unwrap();
     }
 }

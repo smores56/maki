@@ -31,7 +31,7 @@ use crate::components::command::{CommandAction, CommandPalette, ParsedCommand};
 use crate::components::file_picker::{FilePickerModal, FilePickerModalAction};
 use crate::components::help_modal::HelpModal;
 use crate::components::input::{InputAction, InputBox, Submission};
-use crate::components::keybindings::{BuiltinAction, KeybindContext, key};
+use crate::components::keybindings::{BuiltinAction, key};
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
 use crate::components::login_picker::{LoginPicker, LoginPickerAction};
 use crate::components::lua_float::FloatManager;
@@ -756,61 +756,54 @@ impl App {
         self.handle_main_chat_key(key)
     }
 
-    fn active_keybind_context(&self) -> KeybindContext {
-        use KeybindContext as C;
-        if self.permission_prompt.is_open() {
-            return C::FormInput;
+    fn active_keybind_contexts(&self) -> maki_lua::ActiveContext {
+        use maki_lua::{ActiveContext, ContextKind, IDENTITIES, IdentityId};
+
+        fn identity_id(name: &str) -> IdentityId {
+            IDENTITIES
+                .iter()
+                .find(|i| i.name == name)
+                .expect("seed identity")
+                .id
         }
-        if self.plan_form_active() {
-            return C::FormInput;
-        }
-        if self.help_modal.is_open() {
-            return C::General;
-        }
-        if self.usage_modal.is_open() {
-            return C::General;
-        }
-        if self.btw_modal.is_open() {
-            return C::General;
-        }
-        if self.float_mgr.is_open() {
-            return C::General;
-        }
-        if self.search_modal.is_open() {
-            return C::Search;
-        }
-        if self.file_picker.is_open() {
-            return C::FilePicker;
-        }
-        if self.queue.focus().is_some() {
-            return C::QueueFocus;
-        }
-        if self.task_picker.is_open() {
-            return C::TaskPicker;
-        }
-        if self.rewind_picker.is_open() {
-            return C::RewindPicker;
-        }
-        if self.theme_picker.is_open() {
-            return C::ThemePicker;
-        }
-        if self.model_picker.is_open() {
-            return C::ModelPicker;
-        }
-        if self.login_picker.is_open() {
-            return C::Picker;
-        }
-        if self.mcp_picker.is_open() {
-            return C::Picker;
-        }
-        if !self.is_main_chat() {
-            return C::General;
+
+        let overlays: [(bool, IdentityId); 15] = [
+            (self.permission_prompt.is_open(), identity_id("permission")),
+            (self.plan_form_active(), identity_id("plan_form")),
+            (self.help_modal.is_open(), identity_id("help")),
+            (self.usage_modal.is_open(), identity_id("usage")),
+            (self.btw_modal.is_open(), identity_id("btw")),
+            (self.float_mgr.is_open(), identity_id("float")),
+            (self.search_modal.is_open(), identity_id("search")),
+            (self.file_picker.is_open(), identity_id("file_picker")),
+            (self.queue.focus().is_some(), identity_id("queue")),
+            (self.task_picker.is_open(), identity_id("task_picker")),
+            (self.rewind_picker.is_open(), identity_id("rewind_picker")),
+            (self.theme_picker.is_open(), identity_id("theme_picker")),
+            (self.model_picker.is_open(), identity_id("model_picker")),
+            (self.login_picker.is_open(), identity_id("login_picker")),
+            (self.mcp_picker.is_open(), identity_id("mcp_picker")),
+        ];
+
+        let identity = overlays.iter().find(|(open, _)| *open).map(|(_, id)| *id);
+
+        let mut kinds = 0u8;
+        for (open, id) in &overlays {
+            if *open {
+                kinds |= 1 << maki_lua::identity_kind(*id) as u8;
+            }
         }
         if self.status == Status::Streaming {
-            C::Streaming
-        } else {
-            C::Editing
+            kinds |= 1 << ContextKind::Streaming as u8;
         }
+        if !overlays.iter().any(|(open, _)| *open)
+            && self.is_main_chat()
+            && self.status != Status::Streaming
+        {
+            kinds |= 1 << ContextKind::Chat as u8;
+        }
+
+        ActiveContext { identity, kinds }
     }
 
     fn dispatch_builtin(&mut self, action: BuiltinAction) -> Vec<Action> {
@@ -933,26 +926,31 @@ impl App {
 
     fn dispatch_override(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
         let snap = self.keymap_reader.load();
-        let active = self.active_keybind_context();
+        let active = self.active_keybind_contexts();
+        let mut winner: Option<(&maki_lua::KeymapEntry, u8)> = None;
         for entry in snap
             .entries
             .iter()
             .filter(|e| e.key == key.code && e.modifiers == key.modifiers)
         {
-            if !entry.context.applies_in(active) {
+            if !maki_lua::applies(&entry.context, &active) {
                 continue;
             }
-            return match entry.kind {
-                maki_lua::EntryKind::Builtin(action) => Some(self.dispatch_builtin(action)),
-                maki_lua::EntryKind::Callback
-                    if self.lua_event_handle.run_keybind_callback(entry.id) =>
-                {
-                    Some(vec![])
-                }
-                _ => continue,
-            };
+            let t = maki_lua::tier(&entry.context);
+            if winner.is_none_or(|(_, wt)| t > wt) {
+                winner = Some((entry, t));
+            }
         }
-        None
+        let (entry, _) = winner?;
+        match entry.kind {
+            maki_lua::EntryKind::Builtin(action) => Some(self.dispatch_builtin(action)),
+            maki_lua::EntryKind::Callback
+                if self.lua_event_handle.run_keybind_callback(entry.id) =>
+            {
+                Some(vec![])
+            }
+            _ => None,
+        }
     }
 
     fn handle_main_chat_key(&mut self, key: KeyEvent) -> Vec<Action> {

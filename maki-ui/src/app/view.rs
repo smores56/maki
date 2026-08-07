@@ -1,8 +1,6 @@
 use std::sync::atomic::Ordering;
 
 use crate::components::Overlay;
-#[cfg(test)]
-use crate::components::keybindings::KeybindContext;
 use crate::components::queue_panel;
 use crate::components::split_layout::{MIN_CHAT_ROWS, SplitLayout, carve};
 use crate::components::status_bar::{StatusBarContext, UsageStats};
@@ -419,35 +417,5 @@ impl App {
             }
         }
         Some(Line::from(spans))
-    }
-
-    #[cfg(test)]
-    pub(super) fn active_keybind_contexts(&self) -> Vec<KeybindContext> {
-        let mut contexts = vec![KeybindContext::General];
-        if self.plan_form_active() {
-            contexts.push(KeybindContext::FormInput);
-        } else if self.queue.focus().is_some() {
-            contexts.push(KeybindContext::QueueFocus);
-        } else if self.rewind_picker.is_open() {
-            contexts.push(KeybindContext::RewindPicker);
-        } else if self.task_picker.is_open() {
-            contexts.push(KeybindContext::TaskPicker);
-        } else if self.theme_picker.is_open() {
-            contexts.push(KeybindContext::ThemePicker);
-        } else if self.model_picker.is_open() {
-            contexts.push(KeybindContext::ModelPicker);
-        } else if self.command_palette.is_active() {
-            contexts.push(KeybindContext::CommandPalette);
-        } else if self.search_modal.is_open() {
-            contexts.push(KeybindContext::Search);
-        } else if self.file_picker.is_open() {
-            contexts.push(KeybindContext::FilePicker);
-        } else {
-            if self.status == Status::Streaming {
-                contexts.push(KeybindContext::Streaming);
-            }
-            contexts.push(KeybindContext::Editing);
-        }
-        contexts
     }
 }

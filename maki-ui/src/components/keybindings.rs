@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fmt::Write;
+use std::sync::LazyLock;
 use unicode_width::UnicodeWidthStr;
 
 macro_rules! mod_key {
@@ -156,7 +157,20 @@ pub mod key {
     };
 }
 
-pub use maki_lua::{BuiltinAction, KeybindContext};
+pub use maki_lua::BuiltinAction;
+use maki_lua::{ContextKind, ContextRef, IDENTITIES};
+
+/// Resolve a seed identity by name; panics on names outside the seed
+/// table so a typo here breaks at startup, not at render time.
+fn identity_ref(name: &'static str) -> ContextRef {
+    ContextRef::Identity(
+        IDENTITIES
+            .iter()
+            .find(|i| i.name == name)
+            .expect("identity must exist in the seed table")
+            .id,
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -245,263 +259,269 @@ impl KeyLabel {
     }
 }
 
+/// Display title for a kind section: the lowercase label, capitalized.
+pub fn section_title(kind: ContextKind) -> String {
+    let mut chars = kind.label().chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 pub struct Keybind {
     pub label: KeyLabel,
     pub description: &'static str,
-    pub context: KeybindContext,
+    pub context: ContextRef,
     pub platform: Platform,
 }
 
-pub const KEYBINDS: &[Keybind] = &[
-    Keybind {
-        label: KeyLabel::Single(key::QUIT.label),
-        description: "Quit / clear input",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::HELP.label),
-        description: "Show keybindings",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt(key::NEXT_CHAT.label, key::PREV_CHAT.label),
-        description: "Next / previous task chat",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::SEARCH.label),
-        description: "Search messages",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::FILE_PICKER.label),
-        description: "File picker",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::OPEN_EDITOR.label),
-        description: "Open plan in editor",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::PLAN_TOGGLE.label),
-        description: "Toggle plan panel",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::TASKS.label),
-        description: "Open tasks",
-        context: KeybindContext::General,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::SUSPEND.label),
-        description: "Suspend process",
-        context: KeybindContext::General,
-        platform: Platform::UnixOnly,
-    },
-    Keybind {
-        label: KeyLabel::Single("Enter"),
-        description: "Submit prompt",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::MacMulti(
-            &["Shift+Enter", "Ctrl+Enter", "Ctrl+J", "Alt+Enter"],
-            &["⇧↵", "⌃↵", "⌃J", "⌥↵"],
-        ),
-        description: "Newline",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Tab"),
-        description: "Toggle mode",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("/command"),
-        description: "Open command palette",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::MacAlt(key::DELETE_WORD.label, "⌥⌫"),
-        description: "Delete word backward",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::MacMulti(&["Alt+←", "Alt+→"], &["⌥←", "⌥→"]),
-        description: "Move word left / right",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt(mod_key!("Del"), "⌥Del"),
-        description: "Delete word forward",
-        context: KeybindContext::Editing,
-        platform: Platform::MacOnly,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::KILL_LINE.label),
-        description: "Delete to end of line",
-        context: KeybindContext::Editing,
-        platform: Platform::MacOnly,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::LINE_START.label),
-        description: "Jump to start of line",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt("Home", "End"),
-        description: "Jump to start/end of line",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
-        description: "Scroll half page up / down",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::LINE_END.label),
-        description: "Jump to end of line",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::SCROLL_TOP.label),
-        description: "Scroll to top",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::SCROLL_BOTTOM.label),
-        description: "Scroll to bottom",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::POP_QUEUE.label),
-        description: "Pop queue",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Esc Esc"),
-        description: "Rewind",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single(key::EDIT_INPUT.label),
-        description: "Edit input in external editor",
-        context: KeybindContext::Editing,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt("↑", "↓"),
-        description: "Navigate input history",
-        context: KeybindContext::Streaming,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Esc Esc"),
-        description: "Cancel agent",
-        context: KeybindContext::Streaming,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt("↑", "↓"),
-        description: "Navigate options",
-        context: KeybindContext::FormInput,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Enter"),
-        description: "Select option",
-        context: KeybindContext::FormInput,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Esc"),
-        description: "Close",
-        context: KeybindContext::FormInput,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt("↑", "↓"),
-        description: "Navigate",
-        context: KeybindContext::Picker,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Enter"),
-        description: "Select",
-        context: KeybindContext::Picker,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Esc"),
-        description: "Close",
-        context: KeybindContext::Picker,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Type"),
-        description: "Filter",
-        context: KeybindContext::Picker,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt("PageUp", "PageDown"),
-        description: "Scroll page up / down",
-        context: KeybindContext::Picker,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
-        description: "Scroll page up / down",
-        context: KeybindContext::Picker,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Enter"),
-        description: "Remove item",
-        context: KeybindContext::QueueFocus,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("Tab"),
-        description: "Complete command",
-        context: KeybindContext::CommandPalette,
-        platform: Platform::All,
-    },
-    Keybind {
-        label: KeyLabel::Single("!/@/#/$"),
-        description: "Set tier (strong/medium/weak/compaction)",
-        context: KeybindContext::ModelPicker,
-        platform: Platform::All,
-    },
-];
-
-pub fn all_contexts() -> impl Iterator<Item = KeybindContext> {
-    use strum::IntoEnumIterator;
-    KeybindContext::iter()
-}
+pub static KEYBINDS: LazyLock<Vec<Keybind>> = LazyLock::new(|| {
+    vec![
+        Keybind {
+            label: KeyLabel::Single(key::QUIT.label),
+            description: "Quit / clear input",
+            context: ContextRef::Kind(ContextKind::General),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::HELP.label),
+            description: "Show keybindings",
+            context: ContextRef::Kind(ContextKind::General),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Alt(key::NEXT_CHAT.label, key::PREV_CHAT.label),
+            description: "Next / previous task chat",
+            context: ContextRef::Kind(ContextKind::General),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::SEARCH.label),
+            description: "Search messages",
+            context: ContextRef::Kind(ContextKind::General),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::FILE_PICKER.label),
+            description: "File picker",
+            context: ContextRef::Kind(ContextKind::General),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::OPEN_EDITOR.label),
+            description: "Open plan in editor",
+            context: ContextRef::Kind(ContextKind::General),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::PLAN_TOGGLE.label),
+            description: "Toggle plan panel",
+            context: ContextRef::Kind(ContextKind::General),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::TASKS.label),
+            description: "Open tasks",
+            context: ContextRef::Kind(ContextKind::General),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::SUSPEND.label),
+            description: "Suspend process",
+            context: ContextRef::Kind(ContextKind::General),
+            platform: Platform::UnixOnly,
+        },
+        Keybind {
+            label: KeyLabel::Single("Enter"),
+            description: "Submit prompt",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::MacMulti(
+                &["Shift+Enter", "Ctrl+Enter", "Ctrl+J", "Alt+Enter"],
+                &["⇧↵", "⌃↵", "⌃J", "⌥↵"],
+            ),
+            description: "Newline",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("Tab"),
+            description: "Toggle mode",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("/command"),
+            description: "Open command palette",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::MacAlt(key::DELETE_WORD.label, "⌥⌫"),
+            description: "Delete word backward",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::MacMulti(&["Alt+←", "Alt+→"], &["⌥←", "⌥→"]),
+            description: "Move word left / right",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Alt(mod_key!("Del"), "⌥Del"),
+            description: "Delete word forward",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::MacOnly,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::KILL_LINE.label),
+            description: "Delete to end of line",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::MacOnly,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::LINE_START.label),
+            description: "Jump to start of line",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Alt("Home", "End"),
+            description: "Jump to start/end of line",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
+            description: "Scroll half page up / down",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::LINE_END.label),
+            description: "Jump to end of line",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::SCROLL_TOP.label),
+            description: "Scroll to top",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::SCROLL_BOTTOM.label),
+            description: "Scroll to bottom",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::POP_QUEUE.label),
+            description: "Pop queue",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("Esc Esc"),
+            description: "Rewind",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single(key::EDIT_INPUT.label),
+            description: "Edit input in external editor",
+            context: ContextRef::Kind(ContextKind::Chat),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Alt("↑", "↓"),
+            description: "Navigate input history",
+            context: ContextRef::Kind(ContextKind::Streaming),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("Esc Esc"),
+            description: "Cancel agent",
+            context: ContextRef::Kind(ContextKind::Streaming),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Alt("↑", "↓"),
+            description: "Navigate options",
+            context: ContextRef::Kind(ContextKind::Form),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("Enter"),
+            description: "Select option",
+            context: ContextRef::Kind(ContextKind::Form),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("Esc"),
+            description: "Close",
+            context: ContextRef::Kind(ContextKind::Form),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Alt("↑", "↓"),
+            description: "Navigate",
+            context: ContextRef::Kind(ContextKind::Picker),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("Enter"),
+            description: "Select",
+            context: ContextRef::Kind(ContextKind::Picker),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("Esc"),
+            description: "Close",
+            context: ContextRef::Kind(ContextKind::Picker),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("Type"),
+            description: "Filter",
+            context: ContextRef::Kind(ContextKind::Picker),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Alt("PageUp", "PageDown"),
+            description: "Scroll page up / down",
+            context: ContextRef::Kind(ContextKind::Picker),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
+            description: "Scroll page up / down",
+            context: ContextRef::Kind(ContextKind::Picker),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("Enter"),
+            description: "Remove item",
+            context: identity_ref("queue"),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("Tab"),
+            description: "Complete command",
+            context: identity_ref("commands"),
+            platform: Platform::All,
+        },
+        Keybind {
+            label: KeyLabel::Single("!/@/#/$"),
+            description: "Set tier (strong/medium/weak/compaction)",
+            context: identity_ref("model_picker"),
+            platform: Platform::All,
+        },
+    ]
+});
 
 pub(crate) fn key_event_to_string(key: &KeyEvent) -> String {
     let mut s = String::new();
@@ -579,16 +599,41 @@ mod tests {
 
     #[test]
     fn every_context_has_at_least_one_keybind() {
-        for ctx in all_contexts() {
-            let has_own = KEYBINDS.iter().any(|kb| kb.context == ctx);
-            let has_parent = ctx
-                .parent()
-                .is_some_and(|p| KEYBINDS.iter().any(|kb| kb.context == p));
-            assert!(
-                has_own || has_parent,
-                "context {:?} has no keybinds and no parent with keybinds",
-                ctx,
-            );
+        for kind in ContextKind::ALL {
+            let has_own = KEYBINDS
+                .iter()
+                .any(|kb| kb.context == ContextRef::Kind(kind));
+            let has_identity = IDENTITIES.iter().any(|i| {
+                i.kind == kind
+                    && KEYBINDS
+                        .iter()
+                        .any(|kb| kb.context == ContextRef::Identity(i.id))
+            });
+            if kind == ContextKind::Modal {
+                // Display-only kind: no widget keys exist yet.
+                assert!(
+                    !has_own && !has_identity,
+                    "Modal should have no keybinds yet",
+                );
+            } else {
+                assert!(
+                    has_own || has_identity,
+                    "kind {:?} has no keybinds and no identity with keybinds",
+                    kind,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn identity_refs_exist_in_seed_table() {
+        for kb in KEYBINDS.iter() {
+            if let ContextRef::Identity(id) = kb.context {
+                assert!(
+                    IDENTITIES.iter().any(|i| i.id == id),
+                    "unknown identity id {id}"
+                );
+            }
         }
     }
 
