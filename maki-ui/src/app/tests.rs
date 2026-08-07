@@ -13,7 +13,7 @@ use maki_agent::{
     McpSnapshotReader, ToolDoneEvent, ToolOutput, ToolStartEvent, TurnCompleteEvent,
 };
 use maki_config::{PermissionsConfig, UiConfig};
-use maki_lua::{HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
+use maki_lua::{HintReader, LuaCommandInfo, LuaCommandReader};
 use maki_providers::{ContentBlock, Effort, Message, Role, TokenUsage};
 use maki_storage::sessions::{StoredMode, StoredThinking};
 use ratatui::layout::Rect;
@@ -48,7 +48,9 @@ fn build_app_with_lua(
         McpSnapshotReader::empty(),
         McpConfigErrors::new(PathBuf::new()),
         lua_commands,
-        KeymapReader::empty(),
+        maki_lua::test_support::keymap_reader_with(
+            maki_lua::test_support::loaded_default_keymap_entries(),
+        ),
         HintReader::empty(),
         writer,
         UiConfig::default(),
@@ -703,16 +705,28 @@ fn ctrl_p_n_navigation() {
     assert_eq!(app.chats.len(), 2);
     assert_eq!(app.active_chat, 0);
 
-    app.update(Msg::Key(kb::NEXT_CHAT.to_key_event()));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('n'),
+        KeyModifiers::CONTROL,
+    )));
     assert_eq!(app.active_chat, 1);
 
-    app.update(Msg::Key(kb::NEXT_CHAT.to_key_event()));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('n'),
+        KeyModifiers::CONTROL,
+    )));
     assert_eq!(app.active_chat, 1);
 
-    app.update(Msg::Key(kb::PREV_CHAT.to_key_event()));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('p'),
+        KeyModifiers::CONTROL,
+    )));
     assert_eq!(app.active_chat, 0);
 
-    app.update(Msg::Key(kb::PREV_CHAT.to_key_event()));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('p'),
+        KeyModifiers::CONTROL,
+    )));
     assert_eq!(app.active_chat, 0);
 }
 
@@ -1037,12 +1051,16 @@ fn open_tasks_picker(app: &mut App) {
 }
 
 #[test]
-fn ctrl_x_toggles_tasks_picker() {
+fn ctrl_x_opens_tasks_picker() {
     let mut app = test_app();
     app.update(Msg::Key(kb::TASKS.to_key_event()));
     assert!(app.task_picker.is_open());
+
     app.update(Msg::Key(kb::TASKS.to_key_event()));
-    assert!(!app.task_picker.is_open());
+    assert!(
+        app.task_picker.is_open(),
+        "the General tasks binding fires before the picker's close arm"
+    );
 }
 
 fn streaming_app() -> App {
@@ -1189,14 +1207,6 @@ fn picker_enter_stays_at_navigated() {
     assert_eq!(app.active_chat, 1);
 }
 
-const OVERLAY_BLOCKED_KEYS: &[KeyEvent] = &[
-    kb::NEXT_CHAT.to_key_event(),
-    kb::PREV_CHAT.to_key_event(),
-    kb::SCROLL_HALF_UP.to_key_event(),
-    kb::SCROLL_HALF_DOWN.to_key_event(),
-    kb::HELP.to_key_event(),
-];
-
 fn open_help(app: &mut App) {
     app.help_modal.toggle();
 }
@@ -1216,24 +1226,18 @@ fn focus_queue(app: &mut App) {
 #[test_case(open_help                         ; "help_modal")]
 #[test_case(open_search                       ; "search_modal")]
 #[test_case(focus_queue                       ; "queue_focus")]
-fn overlay_blocks_ctrl_shortcuts(setup: fn(&mut App)) {
+fn general_bindings_fire_over_overlays(setup: fn(&mut App)) {
     let mut app = app_with_subagent();
     setup(&mut app);
-    let before = app.active_chat;
-    let scroll_before = app.chats[app.active_chat].scroll_top();
 
-    for k in OVERLAY_BLOCKED_KEYS {
-        app.update(Msg::Key(*k));
-    }
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('n'),
+        KeyModifiers::CONTROL,
+    )));
 
     assert_eq!(
-        app.active_chat, before,
-        "active_chat changed through overlay"
-    );
-    assert_eq!(
-        app.chats[app.active_chat].scroll_top(),
-        scroll_before,
-        "scroll changed through overlay"
+        app.active_chat, 1,
+        "General keymap bindings must fire before overlay handlers"
     );
 }
 
@@ -3459,16 +3463,65 @@ fn streaming_cancel_wins_over_quit_override() {
 }
 
 #[test]
-fn dead_host_override_falls_back_to_builtin() {
+fn dead_host_still_runs_builtin() {
+    let entry = maki_lua::KeymapEntry::builtin(
+        kb::HELP.code,
+        kb::HELP.modifiers,
+        std::sync::Arc::from("test-plugin"),
+        "help",
+        9,
+        Vec::new(),
+        maki_lua::BuiltinAction::Help,
+    );
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
     let mut app = test_app();
-    let _probe = install_override(&mut app, kb::HELP.code, kb::HELP.modifiers);
     app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test();
+    app.keymap_reader = reader;
+    assert!(!app.help_modal.is_open());
 
     app.update(Msg::Key(kb::HELP.to_key_event()));
 
     assert!(
         app.help_modal.is_open(),
-        "dead lua host must fall back to the built-in HELP handler"
+        "builtin entry must fire without touching the lua host"
+    );
+}
+
+#[test]
+fn dead_host_callback_binding_falls_through_to_none() {
+    let entry = maki_lua::KeymapEntry::callback(
+        KeyCode::Char('g'),
+        KeyModifiers::CONTROL,
+        std::sync::Arc::from("test-plugin"),
+        "plugin-only callback",
+        42,
+    );
+    let reader = maki_lua::test_support::keymap_reader_with(vec![entry]);
+    let mut app = test_app();
+    app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test();
+    app.keymap_reader = reader;
+
+    let actions = app.dispatch_override(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    assert!(
+        actions.is_none(),
+        "dead host must skip the callback entry and return None"
+    );
+}
+
+#[test]
+fn default_keymap_help_binding_dispatches() {
+    let mut app = test_app();
+    app.keymap_reader = maki_lua::test_support::keymap_reader_with(
+        maki_lua::test_support::loaded_default_keymap_entries(),
+    );
+    app.lua_event_handle = maki_lua::EventHandle::disconnected_for_test();
+    assert!(!app.help_modal.is_open());
+
+    app.update(Msg::Key(kb::HELP.to_key_event()));
+
+    assert!(
+        app.help_modal.is_open(),
+        "the default C-h binding from plugins/keymap/init.lua must open help"
     );
 }
 
@@ -3589,14 +3642,17 @@ fn reset_session_closes_plan_form() {
 }
 
 #[test]
-fn ctrl_c_closes_overlay_instead_of_quitting() {
+fn ctrl_c_quits_over_open_help_modal() {
     let mut app = test_app();
     app.help_modal.toggle();
     assert!(app.help_modal.is_open());
 
     let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
-    assert_eq!(app.exit_request, ExitRequest::None);
-    assert!(!app.help_modal.is_open());
+    assert_eq!(
+        app.exit_request,
+        ExitRequest::Success,
+        "the General quit binding must fire before the help modal handler"
+    );
     assert!(actions.is_empty());
 }
 
@@ -3809,7 +3865,7 @@ fn agent_error_creates_synthetic_tool_done_with_message() {
 }
 
 #[test]
-fn ctrl_c_denies_permission_prompt() {
+fn ctrl_c_quits_over_permission_prompt() {
     let mut app = test_app();
     app.permission_prompt.open(
         "id".into(),
@@ -3820,8 +3876,11 @@ fn ctrl_c_denies_permission_prompt() {
     assert!(app.permission_prompt.is_open());
 
     let actions = app.update(Msg::Key(kb::QUIT.to_key_event()));
-    assert_eq!(app.exit_request, ExitRequest::None);
-    assert!(!app.permission_prompt.is_open());
+    assert_eq!(
+        app.exit_request,
+        ExitRequest::Success,
+        "the General quit binding must fire before the permission prompt handler"
+    );
     assert!(actions.is_empty());
 }
 
@@ -3943,7 +4002,10 @@ fn permission_prompt_takes_bottom_precedence_over_below_split() {
 
 fn app_with_active_subagent() -> App {
     let mut app = app_with_subagent();
-    app.update(Msg::Key(kb::NEXT_CHAT.to_key_event()));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('n'),
+        KeyModifiers::CONTROL,
+    )));
     assert_eq!(app.active_chat, 1);
     app
 }
@@ -3990,7 +4052,10 @@ fn esc_in_main_chat_with_active_subagent_no_cancel() {
 fn cancel_subagent_removes_answer_sender() {
     let (mut app, _sub_rx, _main_rx) = app_with_subagent_tx(TASK_ID);
     assert!(!app.subagent_answers.is_empty());
-    app.update(Msg::Key(kb::NEXT_CHAT.to_key_event()));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('n'),
+        KeyModifiers::CONTROL,
+    )));
     assert_eq!(app.active_chat, 1);
     app.last_esc = Some(Instant::now());
     app.update(Msg::Key(key(KeyCode::Esc)));
@@ -4037,7 +4102,10 @@ fn subagent_cancel_then_navigate_back_main_unaffected() {
     app.update(Msg::Key(key(KeyCode::Esc)));
     assert!(app.chats[1].is_finished());
 
-    app.update(Msg::Key(kb::PREV_CHAT.to_key_event()));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('p'),
+        KeyModifiers::CONTROL,
+    )));
     assert_eq!(app.active_chat, 0);
     assert_eq!(app.status, Status::Streaming);
     assert!(!app.chats[0].is_finished());

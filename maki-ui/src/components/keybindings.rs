@@ -129,8 +129,6 @@ pub mod key {
 
     pub const QUIT: Bind = ctrl_bind!('c');
     pub const HELP: Bind = ctrl_bind!('h');
-    pub const PREV_CHAT: Bind = ctrl_bind!('p');
-    pub const NEXT_CHAT: Bind = ctrl_bind!('n');
     pub const SCROLL_HALF_UP: Bind = ctrl_bind!('u');
     pub const SCROLL_HALF_DOWN: Bind = ctrl_bind!('d');
     pub const SCROLL_LINE_UP: Bind = ctrl_bind!('y');
@@ -268,6 +266,66 @@ pub fn section_title(kind: ContextKind) -> String {
     }
 }
 
+/// Display form of a snapshot keybind's key: `Ctrl+C`, `Alt+O`, `Esc`,
+/// `Enter`, `Shift+Tab`. Used by the help modal and docgen to render
+/// bindings whose source is the live `KeymapReader` snapshot rather than
+/// the static `KEYBINDS` table.
+pub fn display_key_label(code: KeyCode, mods: KeyModifiers) -> String {
+    let is_char = matches!(code, KeyCode::Char(_));
+    let mut parts: Vec<String> = Vec::new();
+    if mods.contains(KeyModifiers::CONTROL) {
+        parts.push("Ctrl".to_string());
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        parts.push("Alt".to_string());
+    }
+    if mods.contains(KeyModifiers::SHIFT) && !is_char {
+        parts.push("Shift".to_string());
+    }
+    let name = match code {
+        KeyCode::Char(' ') => "Space".to_string(),
+        KeyCode::Char(c) => c.to_ascii_uppercase().to_string(),
+        KeyCode::Enter => "Enter".to_string(),
+        KeyCode::Esc => "Esc".to_string(),
+        KeyCode::Tab => "Tab".to_string(),
+        KeyCode::BackTab => {
+            parts.insert(0, "Shift".to_string());
+            "Tab".to_string()
+        }
+        KeyCode::Backspace => "Backspace".to_string(),
+        KeyCode::Delete => "Delete".to_string(),
+        KeyCode::Up => "Up".to_string(),
+        KeyCode::Down => "Down".to_string(),
+        KeyCode::Left => "Left".to_string(),
+        KeyCode::Right => "Right".to_string(),
+        KeyCode::Home => "Home".to_string(),
+        KeyCode::End => "End".to_string(),
+        KeyCode::PageUp => "PageUp".to_string(),
+        KeyCode::PageDown => "PageDown".to_string(),
+        KeyCode::F(n) => format!("F{n}"),
+        KeyCode::Insert => "Insert".to_string(),
+        _ => String::new(),
+    };
+    parts.push(name);
+    parts.join("+")
+}
+
+/// Whether a snapshot entry belongs in a kind's section. General bindings
+/// carry no context refs (the empty set); non-General bindings carry
+/// exactly the kind they fire in.
+pub fn entry_in_kind(entry: &maki_lua::KeymapEntry, kind: ContextKind) -> bool {
+    if entry.context.is_empty() {
+        return kind == ContextKind::General;
+    }
+    entry.context == [ContextRef::Kind(kind)]
+}
+
+/// Whether a snapshot entry belongs in an identity's section: it must
+/// name exactly that identity.
+pub fn entry_in_identity(entry: &maki_lua::KeymapEntry, id: u16) -> bool {
+    entry.context == [ContextRef::Identity(id)]
+}
+
 pub struct Keybind {
     pub label: KeyLabel,
     pub description: &'static str,
@@ -275,62 +333,14 @@ pub struct Keybind {
     pub platform: Platform,
 }
 
+/// Static documentation of widget/component keys that are NOT
+/// `BuiltinAction`s and stay hardcoded in Rust (editing keys, overlay
+/// navigation). The help modal merges this with the live `KeymapReader`
+/// snapshot so both remappable builtins and hardcoded keys are visible.
+/// The escape hatches (`Ctrl+Z`, streaming stop) render as their own
+/// fixed section, not here.
 pub static KEYBINDS: LazyLock<Vec<Keybind>> = LazyLock::new(|| {
     vec![
-        Keybind {
-            label: KeyLabel::Single(key::QUIT.label),
-            description: "Quit / clear input",
-            context: ContextRef::Kind(ContextKind::General),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Single(key::HELP.label),
-            description: "Show keybindings",
-            context: ContextRef::Kind(ContextKind::General),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Alt(key::NEXT_CHAT.label, key::PREV_CHAT.label),
-            description: "Next / previous task chat",
-            context: ContextRef::Kind(ContextKind::General),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Single(key::SEARCH.label),
-            description: "Search messages",
-            context: ContextRef::Kind(ContextKind::General),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Single(key::FILE_PICKER.label),
-            description: "File picker",
-            context: ContextRef::Kind(ContextKind::General),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Single(key::OPEN_EDITOR.label),
-            description: "Open plan in editor",
-            context: ContextRef::Kind(ContextKind::General),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Single(key::PLAN_TOGGLE.label),
-            description: "Toggle plan panel",
-            context: ContextRef::Kind(ContextKind::General),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Single(key::TASKS.label),
-            description: "Open tasks",
-            context: ContextRef::Kind(ContextKind::General),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Single(key::SUSPEND.label),
-            description: "Suspend process",
-            context: ContextRef::Kind(ContextKind::General),
-            platform: Platform::UnixOnly,
-        },
         Keybind {
             label: KeyLabel::Single("Enter"),
             description: "Submit prompt",
@@ -395,44 +405,14 @@ pub static KEYBINDS: LazyLock<Vec<Keybind>> = LazyLock::new(|| {
             platform: Platform::All,
         },
         Keybind {
-            label: KeyLabel::Alt(key::SCROLL_HALF_UP.label, key::SCROLL_HALF_DOWN.label),
-            description: "Scroll half page up / down",
-            context: ContextRef::Kind(ContextKind::Chat),
-            platform: Platform::All,
-        },
-        Keybind {
             label: KeyLabel::Single(key::LINE_END.label),
             description: "Jump to end of line",
             context: ContextRef::Kind(ContextKind::Chat),
             platform: Platform::All,
         },
         Keybind {
-            label: KeyLabel::Single(key::SCROLL_TOP.label),
-            description: "Scroll to top",
-            context: ContextRef::Kind(ContextKind::Chat),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Single(key::SCROLL_BOTTOM.label),
-            description: "Scroll to bottom",
-            context: ContextRef::Kind(ContextKind::Chat),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Single(key::POP_QUEUE.label),
-            description: "Pop queue",
-            context: ContextRef::Kind(ContextKind::Chat),
-            platform: Platform::All,
-        },
-        Keybind {
             label: KeyLabel::Single("Esc Esc"),
             description: "Rewind",
-            context: ContextRef::Kind(ContextKind::Chat),
-            platform: Platform::All,
-        },
-        Keybind {
-            label: KeyLabel::Single(key::EDIT_INPUT.label),
-            description: "Edit input in external editor",
             context: ContextRef::Kind(ContextKind::Chat),
             platform: Platform::All,
         },
@@ -609,18 +589,23 @@ mod tests {
                         .iter()
                         .any(|kb| kb.context == ContextRef::Identity(i.id))
             });
-            if kind == ContextKind::Modal {
+            match kind {
+                // Plugin-owned: the default bindings live in
+                // plugins/keymap/init.lua, not in this table.
+                ContextKind::General => assert!(
+                    !has_own && !has_identity,
+                    "General keybinds belong in plugins/keymap/init.lua",
+                ),
                 // Display-only kind: no widget keys exist yet.
-                assert!(
+                ContextKind::Modal => assert!(
                     !has_own && !has_identity,
                     "Modal should have no keybinds yet",
-                );
-            } else {
-                assert!(
+                ),
+                _ => assert!(
                     has_own || has_identity,
                     "kind {:?} has no keybinds and no identity with keybinds",
                     kind,
-                );
+                ),
             }
         }
     }

@@ -1,5 +1,10 @@
-use maki_lua::{ContextKind, ContextRef, IDENTITIES};
-use maki_ui::keybindings::{ALT_SEP, KEYBINDS, KeyLabel, Platform, section_title};
+use maki_agent::tools::ToolRegistry;
+use maki_lua::{ContextKind, ContextRef, EntryKind, IDENTITIES, KeymapEntry, PluginHost};
+use maki_ui::keybindings::{
+    ALT_SEP, KEYBINDS, KeyLabel, Platform, display_key_label, entry_in_kind, section_title,
+};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const FRONTMATTER: &str = "\
 +++
@@ -48,25 +53,66 @@ fn context_label(context: ContextRef) -> String {
     }
 }
 
-fn write_table_2col(out: &mut String, rows: &[(String, &str)]) {
+fn write_table_2col(out: &mut String, rows: &[(String, String)]) {
     out.push_str("| Key | Action |\n|-----|--------|\n");
     for (key, desc) in rows {
         out.push_str(&format!("| {key} | {desc} |\n"));
     }
 }
 
-fn write_section(out: &mut String, ctx: ContextKind) {
+/// The bindings `plugins/keymap/init.lua` registered at startup, from a
+/// real boot of the full builtin set. The docs render from the loaded
+/// store so they can never drift from dispatch.
+fn boot_default_keymap_entries() -> Vec<KeymapEntry> {
+    let host = PluginHost::with_all_builtins(Arc::new(ToolRegistry::new()))
+        .expect("loading builtins for the keybindings docs");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let entries = host.keymap_reader().load().entries.clone();
+        if !entries.is_empty() {
+            return entries;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "keymap plugin entries never appeared"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn write_section(out: &mut String, ctx: ContextKind, defaults: &[KeymapEntry]) {
     out.push_str(&format!("\n## {}\n\n", section_title(ctx)));
+
+    let default_rows: Vec<_> = defaults
+        .iter()
+        .filter(|e| entry_in_kind(e, ctx))
+        .map(|e| {
+            let key = format!("`{}`", display_key_label(e.key, e.modifiers));
+            let desc = match &e.kind {
+                EntryKind::Builtin(action) => action.description().to_string(),
+                EntryKind::Callback if e.desc.is_empty() => {
+                    format!("[{}] callback", e.plugin)
+                }
+                EntryKind::Callback => format!("{} ({})", e.desc, e.plugin),
+            };
+            (key, desc)
+        })
+        .collect();
 
     let all_rows: Vec<_> = KEYBINDS
         .iter()
         .filter(|kb| kb.context == ContextRef::Kind(ctx))
         .collect();
 
-    let normal: Vec<_> = all_rows
+    let normal: Vec<_> = default_rows
         .iter()
-        .filter(|kb| kb.platform == Platform::All)
-        .map(|kb| (label_str(kb.label), kb.description))
+        .cloned()
+        .chain(
+            all_rows
+                .iter()
+                .filter(|kb| kb.platform == Platform::All)
+                .map(|kb| (label_str(kb.label), kb.description.to_string())),
+        )
         .collect();
 
     if !normal.is_empty() {
@@ -76,7 +122,7 @@ fn write_section(out: &mut String, ctx: ContextKind) {
     let mac_only: Vec<_> = all_rows
         .iter()
         .filter(|kb| kb.platform == Platform::MacOnly)
-        .map(|kb| (label_str(kb.label), kb.description))
+        .map(|kb| (label_str(kb.label), kb.description.to_string()))
         .collect();
 
     if !mac_only.is_empty() {
@@ -96,12 +142,30 @@ fn write_section(out: &mut String, ctx: ContextKind) {
         let normal: Vec<_> = identity_rows
             .iter()
             .filter(|kb| kb.platform == Platform::All)
-            .map(|kb| (label_str(kb.label), kb.description))
+            .map(|kb| (label_str(kb.label), kb.description.to_string()))
             .collect();
         if !normal.is_empty() {
             write_table_2col(out, &normal);
         }
     }
+}
+
+fn write_fixed(out: &mut String) {
+    out.push_str("\n## Fixed\n\n");
+    out.push_str(
+        "Escape hatches hardcoded at the top of `App::handle_key`, above \
+         the keymap: not remappable, not routable.\n\n",
+    );
+    write_table_2col(
+        out,
+        &[
+            (
+                "`Ctrl+Z`".to_string(),
+                "Suspend process (Unix only)".to_string(),
+            ),
+            ("`Ctrl+C` / `Esc`".to_string(), "Stop streaming".to_string()),
+        ],
+    );
 }
 
 fn write_context_specific(out: &mut String) {
@@ -154,14 +218,16 @@ fn write_inheritance(out: &mut String) {
 }
 
 pub fn generate() -> String {
+    let defaults = boot_default_keymap_entries();
     let mut out = String::from(FRONTMATTER);
     out.push_str("\n\n# Keybindings\n\n");
     out.push_str("On macOS, some bindings use Option or Fn keys instead (run `/help` for exact keybindings).\n");
 
     for &ctx in MAIN_CONTEXTS {
-        write_section(&mut out, ctx);
+        write_section(&mut out, ctx, &defaults);
     }
 
+    write_fixed(&mut out);
     write_context_specific(&mut out);
     write_inheritance(&mut out);
     write_overrides(&mut out);
@@ -205,14 +271,13 @@ fn write_overrides(out: &mut String) {
     );
     out.push_str("```bash\nmaki --no-plugins\n```\n\n");
     out.push_str(
-        "Skips user `init.lua` files (global and project) but keeps the \
-         Lua host and builtin plugins running, so tools still work. \
-         `permissions.toml`, custom commands, and env files load as \
-         usual.\n\n",
+        "This skips user `init.lua` files (global and project) but keeps \
+         the Lua host and every builtin plugin running, so suspend, \
+         tools, and the default keymap still work.\n\n",
     );
     out.push_str(
-        "The default keymap lives in Rust, not Lua, so `--no-plugins` \
-         never drops it.\n\n",
+        "Builtin plugins (tools, keymap, slash commands) load alongside \
+         the rest of the defaults, unaffected by `--no-plugins`.\n\n",
     );
     out.push_str("## Shell and images\n\n");
     out.push_str(

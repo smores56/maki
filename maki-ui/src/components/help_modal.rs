@@ -1,12 +1,15 @@
 use crate::components::ModalScroll;
 use crate::components::Overlay;
-use crate::components::keybindings::{ALT_SEP, KEYBINDS, ResolvedLabel, key, section_title};
+use crate::components::keybindings::{
+    ALT_SEP, KEYBINDS, ResolvedLabel, display_key_label, entry_in_identity, entry_in_kind, key,
+    section_title,
+};
 use crate::components::modal::Modal;
 use crate::components::scrollbar::render_vertical_scrollbar;
 use crate::theme;
 
 use crossterm::event::{KeyCode, KeyEvent};
-use maki_lua::{ContextKind, ContextRef, IDENTITIES};
+use maki_lua::{ContextKind, ContextRef, IDENTITIES, KeymapSnapshot};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -23,57 +26,138 @@ const INPUT_PREFIXES: &[(&str, &str)] = &[
     ("!!", "Run shell command (hidden from agent)"),
 ];
 
+/// Escape hatches hardcoded at the top of `App::handle_key`, above the
+/// keymap: not remappable, not routable, listed as their own section.
+const FIXED_KEYS: &[(&[&str], &str)] = &[
+    (&["Ctrl+Z"], "Suspend process (Unix only)"),
+    (&["Ctrl+C", "Esc"], "Stop streaming"),
+];
+
 pub struct HelpModal {
     open: bool,
     scroll: ModalScroll,
 }
 
-fn key_spans(label: ResolvedLabel, pad: usize, prefix: &str) -> Vec<Span<'static>> {
-    let theme = theme::current();
-    match label {
-        ResolvedLabel::Single(s) => {
-            let w = UnicodeWidthStr::width(s);
-            let trailing = pad.saturating_sub(w);
-            vec![Span::styled(
-                format!("{prefix}{s}{:trailing$}", ""),
-                theme.keybind_key,
-            )]
-        }
-        ResolvedLabel::Alt(a, b) => multi_key_spans(&[a, b], pad, prefix, &theme),
-        ResolvedLabel::Multi(keys) => multi_key_spans(keys, pad, prefix, &theme),
-    }
+fn key_parts_width(parts: &[String]) -> usize {
+    let sep_w = UnicodeWidthStr::width(ALT_SEP);
+    parts
+        .iter()
+        .map(|p| UnicodeWidthStr::width(p.as_str()))
+        .sum::<usize>()
+        + sep_w * parts.len().saturating_sub(1)
 }
 
-fn multi_key_spans(
-    keys: &[&'static str],
+fn row_spans(
+    parts: &[String],
     pad: usize,
     prefix: &str,
+    desc: &str,
     theme: &crate::theme::Theme,
 ) -> Vec<Span<'static>> {
-    let sep_w = UnicodeWidthStr::width(ALT_SEP);
-    let content_w: usize = keys
-        .iter()
-        .map(|k| UnicodeWidthStr::width(*k))
-        .sum::<usize>()
-        + sep_w * keys.len().saturating_sub(1);
+    let content_w = key_parts_width(parts);
     let trailing = pad.saturating_sub(content_w);
-    let mut spans = Vec::with_capacity(keys.len() * 2);
-    for (i, k) in keys.iter().enumerate() {
+    let mut spans = Vec::with_capacity(parts.len() * 2 + 1);
+    for (i, p) in parts.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(ALT_SEP, theme.keybind_desc));
         }
-        let text = if i == 0 && i == keys.len() - 1 {
-            format!("{prefix}{k}{:trailing$}", "")
+        let text = if i == 0 && i == parts.len() - 1 {
+            format!("{prefix}{p}{:trailing$}", "")
         } else if i == 0 {
-            format!("{prefix}{k}")
-        } else if i == keys.len() - 1 {
-            format!("{k}{:trailing$}", "")
+            format!("{prefix}{p}")
+        } else if i == parts.len() - 1 {
+            format!("{p}{:trailing$}", "")
         } else {
-            (*k).to_string()
+            p.clone()
         };
         spans.push(Span::styled(text, theme.keybind_key));
     }
+    spans.push(Span::styled(desc.to_string(), theme.keybind_desc));
     spans
+}
+
+/// Default bindings from the loaded keymap snapshot (Lua), rendered for
+/// one section: a kind (General entries carry no context refs) or an
+/// identity.
+fn snapshot_rows(snap: &KeymapSnapshot, ctx: ContextRef) -> Vec<(Vec<String>, String)> {
+    snap.entries
+        .iter()
+        .filter(|e| match ctx {
+            ContextRef::Kind(kind) => entry_in_kind(e, kind),
+            ContextRef::Identity(id) => entry_in_identity(e, id),
+        })
+        .map(|e| {
+            let label = display_key_label(e.key, e.modifiers);
+            let desc = match &e.kind {
+                maki_lua::EntryKind::Builtin(a) => a.description().to_string(),
+                maki_lua::EntryKind::Callback if e.desc.is_empty() => {
+                    format!("[{}] callback", e.plugin)
+                }
+                maki_lua::EntryKind::Callback => format!("{} ({})", e.desc, e.plugin),
+            };
+            (vec![label], desc)
+        })
+        .collect()
+}
+
+/// Hardcoded widget/component keys from the trimmed `KEYBINDS` table.
+fn hardcoded_rows(ctx: ContextRef) -> Vec<(Vec<String>, String)> {
+    KEYBINDS
+        .iter()
+        .filter(|kb| kb.context == ctx && kb.platform.is_visible())
+        .map(|kb| {
+            (
+                resolved_parts(kb.label.resolve()),
+                kb.description.to_string(),
+            )
+        })
+        .collect()
+}
+
+fn resolved_parts(label: ResolvedLabel) -> Vec<String> {
+    match label {
+        ResolvedLabel::Single(s) => vec![s.to_string()],
+        ResolvedLabel::Alt(a, b) => vec![a.to_string(), b.to_string()],
+        ResolvedLabel::Multi(keys) => keys.iter().map(|k| k.to_string()).collect(),
+    }
+}
+
+fn max_parts_w(rows: &[(Vec<String>, String)]) -> usize {
+    rows.iter()
+        .map(|(parts, _)| key_parts_width(parts))
+        .max()
+        .unwrap_or(0)
+}
+
+fn merged_rows(snapshot: &KeymapSnapshot, ctx: ContextRef) -> Vec<(Vec<String>, String)> {
+    let mut rows = snapshot_rows(snapshot, ctx);
+    rows.extend(hardcoded_rows(ctx));
+    rows
+}
+
+fn fixed_rows() -> Vec<(Vec<String>, String)> {
+    FIXED_KEYS
+        .iter()
+        .map(|(keys, desc)| {
+            (
+                keys.iter().map(|k| k.to_string()).collect(),
+                desc.to_string(),
+            )
+        })
+        .collect()
+}
+
+fn emit_rows(
+    rows: &[(Vec<String>, String)],
+    col_width: usize,
+    prefix: &str,
+    theme: &crate::theme::Theme,
+    lines: &mut Vec<Line<'static>>,
+) {
+    for (parts, desc) in rows {
+        let spans = row_spans(parts, col_width, prefix, desc, theme);
+        lines.push(Line::from(spans));
+    }
 }
 
 impl HelpModal {
@@ -114,77 +198,62 @@ impl HelpModal {
         true
     }
 
-    pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
+    pub fn view(&mut self, frame: &mut Frame, area: Rect, snapshot: &KeymapSnapshot) -> Rect {
         if !self.open {
             return Rect::default();
         }
 
-        let mut lines: Vec<Line> = Vec::new();
         let theme = theme::current();
 
-        let key_col_width = KEYBINDS
+        let col_width = ContextKind::ALL
             .iter()
-            .filter(|kb| kb.platform.is_visible())
-            .map(|kb| kb.label.resolve().display_width())
+            .flat_map(|kind| {
+                let ctx = ContextRef::Kind(*kind);
+                let snap = snapshot_rows(snapshot, ctx);
+                let hard = hardcoded_rows(ctx);
+                [max_parts_w(&snap), max_parts_w(&hard)]
+            })
+            .chain([max_parts_w(&fixed_rows())])
             .max()
             .unwrap_or(0)
-            + KEY_COL_GAP;
+            + KEY_COL_GAP
+            + UnicodeWidthStr::width(PREFIX_TOP);
 
+        let mut lines: Vec<Line> = Vec::new();
         let mut first = true;
         for kind in ContextKind::ALL {
-            let kind_binds: Vec<_> = KEYBINDS
-                .iter()
-                .filter(|kb| kb.context == ContextRef::Kind(kind) && kb.platform.is_visible())
-                .collect();
-            let identity_binds: Vec<_> = IDENTITIES
+            let kind_rows = merged_rows(snapshot, ContextRef::Kind(kind));
+            let identity_rows: Vec<_> = IDENTITIES
                 .iter()
                 .filter(|i| i.kind == kind)
                 .map(|identity| {
-                    let binds: Vec<_> = KEYBINDS
-                        .iter()
-                        .filter(|kb| {
-                            kb.context == ContextRef::Identity(identity.id)
-                                && kb.platform.is_visible()
-                        })
-                        .collect();
-                    (identity, binds)
+                    (
+                        identity,
+                        merged_rows(snapshot, ContextRef::Identity(identity.id)),
+                    )
                 })
-                .filter(|(_, binds)| !binds.is_empty())
+                .filter(|(_, rows)| !rows.is_empty())
                 .collect();
-            if kind_binds.is_empty() && identity_binds.is_empty() {
+            if kind_rows.is_empty() && identity_rows.is_empty() {
                 continue;
             }
             if !first {
                 lines.push(Line::default());
             }
             first = false;
-
             lines.push(Line::from(Span::styled(
                 format!("  {}", section_title(kind)),
                 theme.keybind_section,
             )));
+            emit_rows(&kind_rows, col_width, PREFIX_TOP, &theme, &mut lines);
 
-            for kb in kind_binds {
-                let mut spans = key_spans(kb.label.resolve(), key_col_width, PREFIX_TOP);
-                spans.push(Span::styled(kb.description, theme.keybind_desc));
-                lines.push(Line::from(spans));
-            }
-
-            for (identity, binds) in identity_binds {
+            for (identity, rows) in identity_rows {
                 lines.push(Line::default());
                 lines.push(Line::from(Span::styled(
                     format!("    {}", identity.name),
                     theme.keybind_section,
                 )));
-                for kb in binds {
-                    let mut spans = key_spans(
-                        kb.label.resolve(),
-                        key_col_width - KEY_COL_GAP,
-                        PREFIX_CHILD,
-                    );
-                    spans.push(Span::styled(kb.description, theme.keybind_desc));
-                    lines.push(Line::from(spans));
-                }
+                emit_rows(&rows, col_width, PREFIX_CHILD, &theme, &mut lines);
             }
 
             if kind == ContextKind::Chat {
@@ -194,16 +263,24 @@ impl HelpModal {
                     theme.keybind_section,
                 )));
                 for &(pfx, desc) in INPUT_PREFIXES {
-                    let mut spans = key_spans(
-                        ResolvedLabel::Single(pfx),
-                        key_col_width - KEY_COL_GAP,
+                    let spans = row_spans(
+                        &[pfx.to_string()],
+                        col_width - UnicodeWidthStr::width(PREFIX_TOP),
                         PREFIX_CHILD,
+                        desc,
+                        &theme,
                     );
-                    spans.push(Span::styled(desc, theme.keybind_desc));
                     lines.push(Line::from(spans));
                 }
             }
         }
+
+        let fixed = fixed_rows();
+        if !first {
+            lines.push(Line::default());
+        }
+        lines.push(Line::from(Span::styled("  Fixed", theme.keybind_section)));
+        emit_rows(&fixed, col_width, PREFIX_TOP, &theme, &mut lines);
 
         let total = lines.len() as u16;
         let modal = Modal {

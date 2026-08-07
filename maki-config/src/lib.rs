@@ -60,6 +60,7 @@ pub const DEFAULT_BUILTINS: &[&str] = &[
     "glob",
     "grep",
     "index",
+    "keymap",
     "memory",
     "question",
     "read",

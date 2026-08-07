@@ -1222,4 +1222,76 @@ mod tests {
 
         del(&lua, Arc::from("plug"), "<C-t>".into()).unwrap();
     }
+
+    /// Real-boot drift gate for `plugins/keymap/init.lua`: boots the full
+    /// builtin set, waits for the keymap plugin's entries to be published,
+    /// and asserts the loaded store matches the documented defaults. The
+    /// `todo_write` builtin registers its own General `<C-t>` callback and
+    /// loads after `keymap`, so it shadows `plan_toggle` in the shared
+    /// store (last set wins) — the snapshot pins that state too. Replaces
+    /// v2's Rust mirror const + regex parse — verification is execution,
+    /// not parsing, and catches accidental edits to the plugin file or to
+    /// the builtins' load order.
+    #[test]
+    fn booted_default_keymap_matches_documented_set() {
+        use std::collections::BTreeSet;
+        use std::time::{Duration, Instant};
+
+        const EXPECTED: &[(&str, &str)] = &[
+            ("<C-c>", "quit"),
+            ("<C-h>", "help"),
+            ("<C-p>", "prev_chat"),
+            ("<C-n>", "next_chat"),
+            ("<C-u>", "scroll_half_up"),
+            ("<C-d>", "scroll_half_down"),
+            ("<C-g>", "scroll_top"),
+            ("<C-b>", "scroll_bottom"),
+            ("<C-t>", "callback:todo_write"),
+            ("<C-x>", "tasks"),
+            ("<C-f>", "search"),
+            ("<C-s>", "file_picker"),
+            ("<C-o>", "open_editor"),
+            ("<M-o>", "edit_input"),
+            ("<C-q>", "pop_queue"),
+        ];
+
+        let host =
+            crate::PluginHost::with_all_builtins(Arc::new(maki_agent::tools::ToolRegistry::new()))
+                .expect("loading builtins");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let entries = loop {
+            let snap = host.keymap_reader().load();
+            if !snap.entries.is_empty() {
+                break snap.entries.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "keymap plugin entries never appeared"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        let actual: BTreeSet<_> = entries
+            .iter()
+            .map(|e| {
+                let label = format!("{:?}/{:?}", e.key, e.modifiers);
+                match e.kind {
+                    EntryKind::Builtin(a) => (label, a.lua_name().to_string()),
+                    EntryKind::Callback => (label, format!("callback:{}", e.plugin)),
+                }
+            })
+            .collect();
+        let expected: BTreeSet<_> = EXPECTED
+            .iter()
+            .map(|(notation, name)| {
+                let (key, modifiers) =
+                    parse_key_notation(notation).expect("default key notation parses");
+                (format!("{key:?}/{modifiers:?}"), name.to_string())
+            })
+            .collect();
+        assert_eq!(
+            expected, actual,
+            "plugins/keymap/init.lua drifted from the documented default set"
+        );
+    }
 }

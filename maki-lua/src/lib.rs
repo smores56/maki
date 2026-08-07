@@ -27,8 +27,12 @@ pub use runtime::{KILL_GRACE, RestoreItem, WARM_TOOL_CAP};
 
 pub mod test_support {
     use crate::KeymapReader;
+    use crate::PluginHost;
     use crate::api::keymap::{KeymapEntry, KeymapWriter};
     use crate::api::util::command::{LuaCommandInfo, LuaCommandReader, LuaCommandWriter};
+    use std::sync::Arc;
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
 
     pub struct LuaCommandWriterHandle(LuaCommandWriter);
 
@@ -83,5 +87,34 @@ pub mod test_support {
         let (writer, reader) = KeymapWriter::new();
         writer.publish(entries);
         reader
+    }
+
+    static DEFAULT_KEYMAP_ENTRIES: OnceLock<Vec<KeymapEntry>> = OnceLock::new();
+
+    /// The bindings `plugins/keymap/init.lua` registers at startup, from a
+    /// real one-time host boot (cached). Test harnesses seed their
+    /// `KeymapReader` with these so default keys (quit/help/tasks/scrolls)
+    /// dispatch without a live Lua runtime; the boot doubles as the drift
+    /// gate that catches accidental changes to the plugin.
+    pub fn loaded_default_keymap_entries() -> Vec<KeymapEntry> {
+        DEFAULT_KEYMAP_ENTRIES
+            .get_or_init(|| {
+                let host =
+                    PluginHost::with_all_builtins(Arc::new(maki_agent::tools::ToolRegistry::new()))
+                        .expect("loading builtins for the default keymap");
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    let entries = host.keymap_reader().load().entries.clone();
+                    if !entries.is_empty() {
+                        return entries;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "keymap plugin entries never appeared"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            })
+            .clone()
     }
 }
