@@ -711,10 +711,10 @@ impl App {
                 FilePickerModalAction::Consumed => vec![],
                 FilePickerModalAction::Select(path) => {
                     self.file_picker.close();
-                    if let InputAction::PaletteSync(val) =
+                    if let InputAction::PaletteSync { text, .. } =
                         self.input_box.handle_paste_with_spaces(&path)
                     {
-                        self.command_palette.sync(&val);
+                        self.command_palette.sync(&text);
                     }
                     vec![]
                 }
@@ -953,8 +953,8 @@ impl App {
                 return self.run_builtin(BuiltinAction::FilePicker);
             } else if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
                 self.start_image_paste();
-            } else if let InputAction::PaletteSync(val) = self.input_box.handle_key(key) {
-                self.command_palette.sync(&val);
+            } else if let InputAction::PaletteSync { text, .. } = self.input_box.handle_key(key) {
+                self.command_palette.sync(&text);
             }
             return vec![];
         }
@@ -980,8 +980,8 @@ impl App {
         let streaming = self.status == Status::Streaming;
         match self.input_box.handle_key(key) {
             InputAction::Submit(sub) => self.handle_submit(sub),
-            InputAction::PaletteSync(val) => {
-                self.command_palette.sync(&val);
+            InputAction::PaletteSync { text, .. } => {
+                self.command_palette.sync(&text);
                 vec![]
             }
             InputAction::Passthrough(key) => {
@@ -1811,8 +1811,8 @@ impl App {
         if !self.is_main_chat() {
             return;
         }
-        if let InputAction::PaletteSync(val) = self.input_box.handle_paste(text) {
-            self.command_palette.sync(&val);
+        if let InputAction::PaletteSync { text, .. } = self.input_box.handle_paste(text) {
+            self.command_palette.sync(&text);
         }
     }
 

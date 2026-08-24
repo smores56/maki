@@ -51,6 +51,14 @@ impl TextBuffer {
         self.cursor_y
     }
 
+    pub fn cursor_char_index(&self) -> usize {
+        self.lines[..self.cursor_y]
+            .iter()
+            .map(|line| line.chars().count())
+            .sum::<usize>()
+            + self.x()
+    }
+
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
@@ -91,6 +99,33 @@ impl TextBuffer {
                 self.raw_x = self.x() + chunk.chars().count();
             }
         }
+    }
+
+    /// Replaces the char range [start, end) with `text`. A cursor after the
+    /// range end shifts by the length delta; a cursor inside the range lands
+    /// at the range start plus the inserted length; a cursor at or before the
+    /// start stays put.
+    #[allow(dead_code)]
+    pub fn replace_range(&mut self, start: usize, end: usize, text: &str) {
+        let value = self.value();
+        let byte_start = Self::char_to_byte(&value, start);
+        let byte_end = Self::char_to_byte(&value, end);
+
+        let cursor = self.cursor_char_index();
+        let inserted_len = text.chars().count();
+        let new_cursor = if cursor >= end {
+            cursor + inserted_len - (end - start)
+        } else if cursor > start {
+            start + inserted_len
+        } else {
+            cursor
+        };
+
+        self.lines = format!("{}{}{}", &value[..byte_start], text, &value[byte_end..])
+            .split('\n')
+            .map(str::to_string)
+            .collect();
+        self.set_cursor_from_char_index(new_cursor);
     }
 
     pub fn add_line(&mut self) {
@@ -265,6 +300,19 @@ impl TextBuffer {
     pub fn set_cursor(&mut self, y: usize, x: usize) {
         self.cursor_y = y.min(self.lines.len().saturating_sub(1));
         self.raw_x = x.min(self.current_line_len());
+    }
+
+    #[allow(dead_code)]
+    fn set_cursor_from_char_index(&mut self, mut char_idx: usize) {
+        for (y, line) in self.lines.iter().enumerate() {
+            let line_len = line.chars().count();
+            if char_idx <= line_len {
+                self.cursor_y = y;
+                self.raw_x = char_idx;
+                return;
+            }
+            char_idx -= line_len + 1;
+        }
     }
 
     pub fn move_to_end(&mut self) {
@@ -493,6 +541,31 @@ mod tests {
         let mut buf = TextBuffer::new(String::new());
         buf.insert_text("\tindented\n\t\tdouble");
         assert_eq!(buf.lines(), &["  indented", "    double"]);
+    }
+
+    #[test_case("abcd", 2, 2, "XY", 2, "abXYcd", 4 ; "insert_into_empty_range_at_cursor")]
+    #[test_case("abcd", 4, 4, "XY", 4, "abcdXY", 6 ; "insert_at_range_at_end")]
+    #[test_case("abcdef", 1, 5, "", 3, "af", 1 ; "delete_range_cursor_inside")]
+    #[test_case("abcdef", 1, 3, "", 5, "adef", 3 ; "delete_range_cursor_after")]
+    #[test_case("abcdef", 1, 5, "XY", 0, "aXYf", 0 ; "replace_larger_with_smaller_cursor_before")]
+    #[test_case("ab", 0, 1, "XYZW", 1, "XYZWb", 4 ; "replace_smaller_with_larger_cursor_after")]
+    #[test_case("abc", 3, 3, "XY", 3, "abcXY", 5 ; "replace_at_very_end")]
+    #[test_case("ab\ncd", 1, 4, "XY", 2, "aXYd", 3 ; "replace_across_lines_cursor_inside")]
+    #[test_case("a●b", 1, 2, "XY", 2, "aXYb", 3 ; "replace_multibyte_cursor_inside")]
+    fn replace_range(
+        input: &str,
+        start: usize,
+        end: usize,
+        text: &str,
+        cursor: usize,
+        expected: &str,
+        expected_cursor: usize,
+    ) {
+        let mut buf = TextBuffer::new(input.into());
+        buf.set_cursor_from_char_index(cursor);
+        buf.replace_range(start, end, text);
+        assert_eq!(buf.value(), expected);
+        assert_eq!(buf.cursor_char_index(), expected_cursor);
     }
 
     #[test]

@@ -55,7 +55,11 @@ pub enum Placeholder {
 pub enum InputAction {
     Submit(Submission),
     ContinueLine,
-    PaletteSync(String),
+    PaletteSync {
+        text: String,
+        #[allow(dead_code)]
+        cursor: usize,
+    },
     Passthrough(KeyEvent),
     None,
 }
@@ -124,7 +128,10 @@ impl InputBox {
         }
 
         match self.buffer.handle_key(key) {
-            EditResult::Changed => InputAction::PaletteSync(self.buffer.value()),
+            EditResult::Changed => InputAction::PaletteSync {
+                text: self.buffer.value(),
+                cursor: self.buffer.cursor_char_index(),
+            },
             EditResult::Moved | EditResult::Ignored => InputAction::None,
         }
     }
@@ -132,7 +139,10 @@ impl InputBox {
     pub fn handle_paste(&mut self, text: &str) -> InputAction {
         self.follow_cursor = true;
         self.buffer.insert_text(text);
-        InputAction::PaletteSync(self.buffer.value())
+        InputAction::PaletteSync {
+            text: self.buffer.value(),
+            cursor: self.buffer.cursor_char_index(),
+        }
     }
 
     /// Inserting a file path mid-word looks broken ("read/tmp/x" instead of
