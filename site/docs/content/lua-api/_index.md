@@ -345,6 +345,48 @@ maki.api.register_command({
 
 ---
 
+### `maki.api.register_completion()` {#maki-api-register_completion}
+
+```lua
+maki.api.register_completion({spec})
+```
+
+Register a completion provider for a trigger.
+
+Typing a word that starts with {trigger} in the input bar opens the
+completion popup. Every provider registered for that trigger is asked
+for candidates; results are merged and shown grouped by plugin.
+
+**Parameters:**
+
+- `{spec}` (`table`) Registration specification:
+  - `trigger` (`string`) Required. The trigger string that opens the
+    completion popup (e.g. "@"). Must be non-empty
+    and contain no whitespace.
+  - `provider` (`function`) Required. Called as `provider(query, ctx)` where
+    `query` is the text after the trigger and `ctx.cwd`
+    the session working directory. Must return an array
+    of candidate tables: `{ label, insert, kind }`.
+    label is shown in the popup, insert is the text
+    placed in the input when chosen, kind is one of
+    "file", "dir", "text", ... (missing fields default
+    to empty strings).
+
+**Example:**
+
+```lua
+maki.api.register_completion({
+  trigger = "@",
+  provider = function(query, ctx)
+    return {
+      { label = "src/main.rs", insert = "@src/main.rs", kind = "file" },
+    }
+  end,
+})
+```
+
+---
+
 ### `maki.api.register_prompt_hint()` {#maki-api-register_prompt_hint}
 
 ```lua
@@ -2126,6 +2168,37 @@ for _, file in ipairs(hits) do
     end
   end
 end
+```
+
+---
+
+### `maki.fs.fuzzy_files()` {#maki-fs-fuzzy_files}
+
+```lua
+maki.fs.fuzzy_files({query}, {opts?})
+```
+
+Fuzzy-search files and directories under {cwd}, like the native file picker.
+Results are ranked against paths relative to {cwd} and returned as absolute
+paths. The walk is cached by (cwd, max_depth, root mtime), so repeated calls
+only pay for matching. Directory symlinks are never followed and `.git` is
+skipped; hidden files are included.
+
+Requires the `fs_read` [plugin permission](#plugin-permissions).
+
+**Parameters:**
+
+- `{query}` (`string`) Fuzzy search pattern. Empty or whitespace-only returns the first {max_results} entries in walk order.
+- `{opts?}` (`table?`) `cwd` (string, default process cwd): walk root; `~/` is expanded and relative paths resolve against the process cwd. `max_depth` (integer, default 10, at least 1): recursion depth, 1 = direct children. `max_results` (integer, default 50): maximum entries returned.
+
+**Returns:** (`table?`, `string?`) Array of `{path, kind}` tables with `kind` `"file"` or `"dir"`, or nil plus an error message.
+
+**Example:**
+
+```lua
+local files, err = maki.fs.fuzzy_files("auth", { cwd = "." })
+if err then return end
+for _, entry in ipairs(files) do print(entry.path, entry.kind) end
 ```
 
 
