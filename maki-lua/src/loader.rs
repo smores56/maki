@@ -30,6 +30,10 @@ struct BundledPlugin {
 /// `require()` shared modules across boundaries.
 static BUNDLED_PLUGINS: &[BundledPlugin] = &[
     BundledPlugin {
+        name: "at_mention",
+        dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/at_mention"),
+    },
+    BundledPlugin {
         name: "sessions",
         dir: include_dir!("$CARGO_MANIFEST_DIR/../plugins/sessions"),
     },
@@ -709,6 +713,18 @@ mod tests {
     }
 
     #[test]
+    fn at_mention_builtin_registers_at_trigger() {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::with_all_builtins(Arc::clone(&reg)).unwrap();
+        let snap = host.completion_reader().load();
+        assert!(
+            snap.triggers.iter().any(|t| t == "@"),
+            "expected @ trigger, found: {:?}",
+            snap.triggers
+        );
+    }
+
+    #[test]
     fn run_command_sends_correct_request() {
         let (prio_tx, prio_rx) = flume::bounded(8);
         let (tx, _rx) = flume::bounded(8);
@@ -891,6 +907,78 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].items[0].label, "async_lib");
         assert_eq!(groups[0].items[0].kind, "text");
+    }
+
+    #[test]
+    fn at_mention_resolves_files_under_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("src.rs"), "pub fn main() {}").unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub fn lib() {}").unwrap();
+
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::with_all_builtins(Arc::clone(&reg)).unwrap();
+        let rx = host
+            .event_handle()
+            .resolve_completion("@", "src", dir.path().to_str().unwrap());
+        let groups = rx.recv().unwrap();
+        let group = groups
+            .iter()
+            .find(|g| g.provider == "at_mention")
+            .expect("at_mention provider group");
+        let inserts: Vec<&str> = group.items.iter().map(|i| i.insert.as_str()).collect();
+        assert!(!inserts.is_empty());
+        assert!(inserts.iter().all(|i| i.starts_with("@")));
+        assert!(inserts.iter().any(|i| i.contains("src/lib.rs")));
+        assert!(inserts.iter().any(|i| i.contains("src.rs")));
+    }
+
+    #[test]
+    fn at_mention_relative_anchors() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "a").unwrap();
+        let cwd = dir.path().join("sub");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(cwd.join("b.txt"), "b").unwrap();
+
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::with_all_builtins(Arc::clone(&reg)).unwrap();
+        let handle = host.event_handle();
+        let cwd = cwd.to_str().unwrap();
+
+        let parent = handle.resolve_completion("@", "../a", cwd);
+        let groups = parent.recv().unwrap();
+        let items = &groups
+            .iter()
+            .find(|g| g.provider == "at_mention")
+            .expect("at_mention provider group")
+            .items;
+        assert!(items.iter().any(|i| i.insert == "@../a.txt"));
+
+        let here = handle.resolve_completion("@", "./b", cwd);
+        let groups = here.recv().unwrap();
+        let items = &groups
+            .iter()
+            .find(|g| g.provider == "at_mention")
+            .expect("at_mention provider group")
+            .items;
+        assert!(items.iter().any(|i| i.insert == "@./b.txt"));
+    }
+
+    #[test_case("/", "@/"; "absolute_root")]
+    #[test_case("~", "@~/"; "home_root")]
+    fn at_mention_anchored_root(query: &str, expected_prefix: &str) {
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::with_all_builtins(Arc::clone(&reg)).unwrap();
+        let rx = host.event_handle().resolve_completion("@", query, "/tmp");
+        let groups = rx.recv().unwrap();
+        let items = &groups
+            .iter()
+            .find(|g| g.provider == "at_mention")
+            .expect("at_mention provider group")
+            .items;
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|i| i.insert.starts_with(expected_prefix)));
     }
 
     #[test]
