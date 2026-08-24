@@ -605,9 +605,10 @@ impl EventHandle {
 mod tests {
     use super::*;
     use crate::api::util::command::{LuaCommandInfo, LuaCommandWriter};
+    use crate::runtime::COMPLETION_MAX_ITEMS;
     use maki_agent::prompt::{PromptId, ResolvedSlots, Slot};
     use maki_agent::tools::ToolRegistry;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use test_case::test_case;
 
     /// jit=true is exercised by the whole integration suite
@@ -799,7 +800,10 @@ mod tests {
     "#;
 
     #[test_case::test_case("", "non-empty" ; "empty_trigger")]
-    #[test_case::test_case("a b", "whitespace" ; "whitespace_trigger")]
+    #[test_case::test_case("ab", "exactly one" ; "multi_char_trigger")]
+    #[test_case::test_case("a", "punctuation or symbol" ; "alphanumeric_trigger")]
+    #[test_case::test_case(" ", "punctuation or symbol" ; "whitespace_trigger")]
+    #[test_case::test_case("\t", "punctuation or symbol" ; "control_trigger")]
     fn register_completion_rejects_invalid_triggers(trigger: &str, expected: &str) {
         let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
         let r = host.load_source(
@@ -833,34 +837,28 @@ mod tests {
     }
 
     #[test]
-    fn resolve_completion_replies_with_provider_groups() {
+    fn resolve_completion_replies_flat_items() {
         let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
         host.load_source("picker", COMPLETION_SOURCE).unwrap();
         let rx = host
             .event_handle()
             .resolve_completion("@", "src", "/home/u");
-        let groups = rx.recv().unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].provider, "picker");
-        assert_eq!(groups[0].items[0].label, "src|/home/u");
-        assert_eq!(groups[0].items[0].insert, "@pick");
-        assert_eq!(groups[0].items[0].kind, "file");
-        assert_eq!(groups[0].items[1].insert, "");
-        assert_eq!(groups[0].items[1].kind, "dir");
+        let items = rx.recv().unwrap();
+        assert_eq!(items.len(), 1, "item without insert must be skipped");
+        assert_eq!(items[0].label, "src|/home/u");
+        assert_eq!(items[0].insert, "@pick");
+        assert_eq!(items[0].kind, "file");
     }
 
     #[test]
-    fn multiple_providers_same_trigger_merge_grouped_by_plugin_name() {
+    fn multiple_providers_same_trigger_merge_in_registration_order() {
         let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
         host.load_source("zeta", COMPLETION_SOURCE).unwrap();
         host.load_source("alpha", COMPLETION_SOURCE).unwrap();
         let rx = host.event_handle().resolve_completion("@", "q", "/tmp");
-        let groups = rx.recv().unwrap();
-        let providers: Vec<&str> = groups.iter().map(|g| g.provider.as_str()).collect();
-        assert_eq!(providers, ["alpha", "zeta"]);
-        for group in &groups {
-            assert_eq!(group.items[0].label, "q|/tmp");
-        }
+        let items = rx.recv().unwrap();
+        assert_eq!(items.len(), 2, "one item per provider, no plugin-name sort");
+        assert!(items.iter().all(|i| i.label == "q|/tmp"));
     }
 
     #[test]
@@ -870,9 +868,8 @@ mod tests {
         host.load_source("alpha", COMPLETION_SOURCE).unwrap();
         host.unload("zeta").unwrap();
         let rx = host.event_handle().resolve_completion("@", "q", "/tmp");
-        let groups = rx.recv().unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].provider, "alpha");
+        let items = rx.recv().unwrap();
+        assert_eq!(items.len(), 1);
     }
 
     #[test]
@@ -880,6 +877,55 @@ mod tests {
         let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
         let rx = host.event_handle().resolve_completion("$", "q", "/tmp");
         assert!(rx.recv().unwrap().is_empty());
+    }
+
+    #[test]
+    fn completion_reply_is_capped_per_provider() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.load_source(
+            "flooder",
+            r#"
+            maki.api.register_completion({
+                trigger = "@",
+                provider = function(query)
+                    local out = {}
+                    for i = 1, 500 do
+                        out[i] = { label = query .. i, insert = "@" .. i, kind = "text" }
+                    end
+                    return out
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+        let rx = host.event_handle().resolve_completion("@", "q", "/tmp");
+        let items = rx.recv().unwrap();
+        assert_eq!(items.len(), COMPLETION_MAX_ITEMS);
+    }
+
+    /// `while true do end` only stops when the watchdog interrupt fires, so
+    /// the reply arriving at all proves the provider deadline is enforced
+    /// (2s deadline + one poll + [`KILL_GRACE`]; 10s is pure headroom).
+    #[test]
+    fn completion_provider_deadline_kills_infinite_loop() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.load_source(
+            "looper",
+            r#"
+            maki.api.register_completion({
+                trigger = "@",
+                provider = function()
+                    while true do end
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+        let rx = host.event_handle().resolve_completion("@", "q", "/tmp");
+        let items = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("provider deadline must kill the infinite loop");
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -903,10 +949,10 @@ mod tests {
         )
         .unwrap();
         let rx = host.event_handle().resolve_completion("@", "lib", "/tmp");
-        let groups = rx.recv().unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].items[0].label, "async_lib");
-        assert_eq!(groups[0].items[0].kind, "text");
+        let items = rx.recv().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "async_lib");
+        assert_eq!(items[0].kind, "text");
     }
 
     #[test]
@@ -921,12 +967,8 @@ mod tests {
         let rx = host
             .event_handle()
             .resolve_completion("@", "src", dir.path().to_str().unwrap());
-        let groups = rx.recv().unwrap();
-        let group = groups
-            .iter()
-            .find(|g| g.provider == "at_mention")
-            .expect("at_mention provider group");
-        let inserts: Vec<&str> = group.items.iter().map(|i| i.insert.as_str()).collect();
+        let items = rx.recv().unwrap();
+        let inserts: Vec<&str> = items.iter().map(|i| i.insert.as_str()).collect();
         assert!(!inserts.is_empty());
         assert!(inserts.iter().all(|i| i.starts_with("@")));
         assert!(inserts.iter().any(|i| i.contains("src/lib.rs")));
@@ -947,22 +989,43 @@ mod tests {
         let cwd = cwd.to_str().unwrap();
 
         let parent = handle.resolve_completion("@", "../a", cwd);
-        let groups = parent.recv().unwrap();
-        let items = &groups
-            .iter()
-            .find(|g| g.provider == "at_mention")
-            .expect("at_mention provider group")
-            .items;
+        let items = parent.recv().unwrap();
         assert!(items.iter().any(|i| i.insert == "@../a.txt"));
 
         let here = handle.resolve_completion("@", "./b", cwd);
-        let groups = here.recv().unwrap();
-        let items = &groups
-            .iter()
-            .find(|g| g.provider == "at_mention")
-            .expect("at_mention provider group")
-            .items;
+        let items = here.recv().unwrap();
         assert!(items.iter().any(|i| i.insert == "@./b.txt"));
+    }
+
+    #[test]
+    fn at_mention_dot_queries_resolve_cwd_and_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "a").unwrap();
+        let cwd = dir.path().join("sub");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(cwd.join("b.txt"), "b").unwrap();
+        fs::create_dir(cwd.join("nested")).unwrap();
+
+        let reg = Arc::new(ToolRegistry::new());
+        let host = PluginHost::with_all_builtins(Arc::clone(&reg)).unwrap();
+        let handle = host.event_handle();
+        let cwd = cwd.to_str().unwrap();
+
+        let here = handle.resolve_completion("@", ".", cwd);
+        let items = here.recv().unwrap();
+        assert!(items.iter().any(|i| i.insert == "@b.txt"));
+        assert!(
+            items.iter().any(|i| i.insert == "@nested/"),
+            "dir labels get a trailing slash"
+        );
+
+        let parent = handle.resolve_completion("@", "..", cwd);
+        let items = parent.recv().unwrap();
+        assert!(items.iter().any(|i| i.insert == "@../a.txt"));
+        assert!(
+            items.iter().any(|i| i.insert == "@./"),
+            "the cwd itself resolves via the relpath-empty fallback, with the dir slash"
+        );
     }
 
     #[test_case("/", "@/"; "absolute_root")]
@@ -971,12 +1034,7 @@ mod tests {
         let reg = Arc::new(ToolRegistry::new());
         let host = PluginHost::with_all_builtins(Arc::clone(&reg)).unwrap();
         let rx = host.event_handle().resolve_completion("@", query, "/tmp");
-        let groups = rx.recv().unwrap();
-        let items = &groups
-            .iter()
-            .find(|g| g.provider == "at_mention")
-            .expect("at_mention provider group")
-            .items;
+        let items = rx.recv().unwrap();
         assert!(!items.is_empty());
         assert!(items.iter().all(|i| i.insert.starts_with(expected_prefix)));
     }

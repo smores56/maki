@@ -10,7 +10,9 @@ use crate::components::{ExitRequest, buffer_text, key, test_model};
 use crate::repaint::expect::{OWED, QUIET};
 use crate::selection::{SelectableZone, SelectionState, SelectionZone};
 use arc_swap::ArcSwap;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEventKind,
+};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
     DoneReason, ImageMediaType, McpConfigErrors, McpServerInfo, McpServerStatus, McpSnapshot,
@@ -919,6 +921,87 @@ fn mention_backspace_and_fix_reopens_with_new_query() {
         app.command_palette.match_label(0).as_deref(),
         Some("s|/tmp/test"),
         "backspace must re-resolve with the shortened query"
+    );
+}
+
+#[test]
+fn mention_esc_then_arrow_into_token_reopens() {
+    let host = host_with_completion(COMPLETION_PROVIDER);
+    let mut app = app_with_completion_host(&host);
+    for c in "@src".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    assert!(app.command_palette.is_active());
+    app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(!app.command_palette.is_active());
+
+    app.update(Msg::Key(key(KeyCode::Left)));
+    assert!(
+        app.command_palette.is_active(),
+        "arrow into the token must reopen the popup"
+    );
+}
+
+#[test]
+fn mention_esc_then_mouse_click_into_token_reopens() {
+    let host = host_with_completion(COMPLETION_PROVIDER);
+    let mut app = app_with_completion_host(&host);
+    for c in "@src".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(!app.command_palette.is_active());
+
+    set_zone(&mut app, SelectionZone::Messages, Rect::new(0, 0, 80, 15));
+    set_zone(&mut app, SelectionZone::Input, Rect::new(0, 15, 80, 5));
+    app.update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 16));
+    assert!(
+        app.command_palette.is_active(),
+        "click into the token must reopen the popup"
+    );
+}
+
+#[test]
+fn mention_opens_on_second_line_with_newline_aware_indices() {
+    let host = host_with_completion(COMPLETION_PROVIDER);
+    let mut app = app_with_completion_host(&host);
+    for c in "first line".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    app.update(Msg::Key(KeyEvent {
+        code: KeyCode::Enter,
+        modifiers: KeyModifiers::SHIFT,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    }));
+    for c in "@src".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    assert!(app.command_palette.is_active());
+    wait_for_mention(&mut app);
+    assert_eq!(
+        app.command_palette.match_label(0).as_deref(),
+        Some("src|/tmp/test"),
+        "the query must resolve from line two with newline-aware char indices"
+    );
+
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(app.input_box.buffer.value(), "first line\n@src.rs ");
+}
+
+#[test]
+fn slash_command_with_mention_arg_opens_mention_popup() {
+    let host = host_with_completion(COMPLETION_PROVIDER);
+    let mut app = app_with_completion_host(&host);
+    for c in "/help @fil".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    assert!(app.command_palette.mention_pending());
+    wait_for_mention(&mut app);
+    assert_eq!(
+        app.command_palette.match_label(0).as_deref(),
+        Some("fil|/tmp/test"),
+        "an @-token in a slash command's args must open the mention popup"
     );
 }
 

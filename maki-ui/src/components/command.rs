@@ -158,7 +158,6 @@ struct MentionItem {
 
 enum MentionState {
     Pending {
-        generation: u64,
         rx: flume::Receiver<CompletionReply>,
     },
     Settled,
@@ -192,7 +191,6 @@ pub struct CommandPalette {
     mention_query: String,
     mention_range: Option<(usize, usize)>,
     mention_state: Option<MentionState>,
-    mention_generation: u64,
     active_trigger: Option<char>,
     nucleo: Nucleo<CommandItem>,
     matcher: Matcher,
@@ -238,7 +236,6 @@ impl CommandPalette {
             mention_query: String::new(),
             mention_range: None,
             mention_state: None,
-            mention_generation: 0,
             active_trigger: None,
             nucleo,
             matcher: Matcher::new(Config::DEFAULT),
@@ -335,7 +332,7 @@ impl CommandPalette {
             }
             KeyCode::Enter => {
                 if mention_mode {
-                    self.complete_mention(self.selected)
+                    self.complete_mention(self.selected, input)
                 } else {
                     match self.confirm(input) {
                         Some(cmd) => {
@@ -348,7 +345,7 @@ impl CommandPalette {
             }
             KeyCode::Tab => {
                 if mention_mode {
-                    self.complete_mention(0)
+                    self.complete_mention(0, input)
                 } else if let Some(item) = self.filtered.get(self.selected) {
                     let name = self.item_name(item);
                     let text = if self.item_has_args(item) {
@@ -409,22 +406,29 @@ impl CommandPalette {
             );
         }
 
+        if let Some((trigger, start, end)) = trigger_at(input, cursor, &self.triggers) {
+            if trigger == '/' {
+                if start == 0 {
+                    self.enter_slash_mode(input);
+                } else {
+                    self.close();
+                }
+                return;
+            }
+            self.start_mention(trigger, start, end, input, cwd);
+            return;
+        }
         if input.starts_with('/') {
-            self.mention_state = None;
-            self.active_trigger = Some('/');
-            self.sync_slash(input);
+            self.enter_slash_mode(input);
             return;
         }
+        self.close();
+    }
 
-        let Some((trigger, start, end)) = trigger_at(input, cursor, &self.triggers) else {
-            self.close();
-            return;
-        };
-        if trigger == '/' {
-            self.close();
-            return;
-        }
-        self.start_mention(trigger, start, end, input, cwd);
+    fn enter_slash_mode(&mut self, input: &str) {
+        self.mention_state = None;
+        self.active_trigger = Some('/');
+        self.sync_slash(input);
     }
 
     fn sync_slash(&mut self, input: &str) {
@@ -451,40 +455,38 @@ impl CommandPalette {
     }
 
     fn start_mention(&mut self, trigger: char, start: usize, end: usize, input: &str, cwd: &str) {
-        self.mention_range = Some((start, end));
-        self.mention_items.clear();
-        self.mention_query = input
+        let query = input
             [TextBuffer::char_to_byte(input, start + 1)..TextBuffer::char_to_byte(input, end)]
             .to_string();
+        self.mention_range = Some((start, end));
+        if self.active_trigger == Some(trigger) && self.mention_query == query {
+            return;
+        }
+        self.active_trigger = Some(trigger);
+        self.mention_query = query;
+        self.mention_items.clear();
         self.filtered.clear();
         self.selected = 0;
-        self.active_trigger = Some(trigger);
 
         if self.event_handle.is_disconnected() {
             self.mention_state = Some(MentionState::Settled);
         } else {
-            self.mention_generation += 1;
             let rx = self.event_handle.resolve_completion(
                 &trigger.to_string(),
                 &self.mention_query,
                 cwd,
             );
-            self.mention_state = Some(MentionState::Pending {
-                generation: self.mention_generation,
-                rx,
-            });
+            self.mention_state = Some(MentionState::Pending { rx });
         }
     }
 
     fn apply_mention_reply(&mut self, reply: CompletionReply) {
         self.mention_items = reply
             .into_iter()
-            .flat_map(|group| {
-                group.items.into_iter().map(|item| MentionItem {
-                    label: item.label,
-                    insert: item.insert,
-                    kind: item.kind,
-                })
+            .map(|item| MentionItem {
+                label: sanitize_mention_text(&item.label),
+                insert: sanitize_mention_text(&item.insert),
+                kind: item.kind,
             })
             .collect();
         self.nucleo = Self::build_nucleo(
@@ -496,7 +498,7 @@ impl CommandPalette {
         self.nucleo.pattern.reparse(
             0,
             &self.mention_query,
-            CaseMatching::Ignore,
+            CaseMatching::Smart,
             Normalization::Smart,
             false,
         );
@@ -504,12 +506,9 @@ impl CommandPalette {
     }
 
     fn drain_mentions(&mut self) -> bool {
-        let Some(MentionState::Pending { generation, rx }) = self.mention_state.take() else {
+        let Some(MentionState::Pending { rx }) = self.mention_state.take() else {
             return false;
         };
-        if generation != self.mention_generation {
-            return false;
-        }
         let mut applied = false;
         loop {
             match rx.try_recv() {
@@ -518,11 +517,14 @@ impl CommandPalette {
                     applied = true;
                 }
                 Err(flume::TryRecvError::Empty) => break,
-                Err(flume::TryRecvError::Disconnected) => break,
+                Err(flume::TryRecvError::Disconnected) => {
+                    self.mention_state = Some(MentionState::Settled);
+                    return true;
+                }
             }
         }
         if !applied {
-            self.mention_state = Some(MentionState::Pending { generation, rx });
+            self.mention_state = Some(MentionState::Pending { rx });
         }
         applied
     }
@@ -657,7 +659,7 @@ impl CommandPalette {
         }
     }
 
-    fn complete_mention(&self, index: usize) -> CommandAction {
+    fn complete_mention(&self, index: usize, input: &str) -> CommandAction {
         let Some(item) = self.filtered.get(index).and_then(|m| self.mention_item(m)) else {
             return CommandAction::Consumed;
         };
@@ -665,7 +667,9 @@ impl CommandPalette {
             return CommandAction::Consumed;
         };
         let mut text = item.insert.clone();
-        if !text.ends_with(char::is_whitespace) {
+        let after_is_whitespace =
+            input[TextBuffer::char_to_byte(input, end)..].starts_with(char::is_whitespace);
+        if !text.ends_with(char::is_whitespace) && !after_is_whitespace {
             text.push(' ');
         }
         CommandAction::CompleteRange { start, end, text }
@@ -812,12 +816,15 @@ impl CommandPalette {
         };
 
         let (max_label, max_kind) = rows.iter().fold((0, 0), |(label, kind), row| match row {
-            MentionRow::Status(text) => (label.max(text.len()), kind),
+            MentionRow::Status(text) => (label.max(text.chars().count()), kind),
             MentionRow::Item {
                 label: item_label,
                 kind: item_kind,
                 ..
-            } => (label.max(item_label.len()), kind.max(item_kind.len())),
+            } => (
+                label.max(item_label.chars().count()),
+                kind.max(item_kind.chars().count()),
+            ),
         });
         let popup_height = (rows.len() as u16).min(input_area.y);
         if popup_height == 0 {
@@ -845,7 +852,7 @@ impl CommandPalette {
                     indices,
                     selected,
                 } => {
-                    let label_pad = max_label - label.len() + GAP;
+                    let label_pad = max_label - label.chars().count() + GAP;
                     if selected {
                         let s = t.item_selected;
                         let mut spans = vec![Span::styled(" ".repeat(PAD), s)];
@@ -921,11 +928,21 @@ enum MentionRow<'a> {
 
 /// The cursor token is the contiguous non-whitespace run containing
 /// `cursor` (a char index; the position right after the last char counts
-/// as inside the trailing token). When the token's first char is a
+/// as inside the trailing token). Prose punctuation (`, . ; : ( ) [ ] {
+/// } " '`) is trimmed from both token ends so completing `(see @foo)`
+/// keeps the parentheses, but never below the trigger char plus one char
+/// so `@.` and `@,` anchors survive. When the token's first char is a
 /// registered trigger, returns (trigger char, token start, token end) in
 /// char indices. A token mid-word (e.g. `user@example.com`) never
 /// triggers.
 fn trigger_at(input: &str, cursor: usize, triggers: &[String]) -> Option<(char, usize, usize)> {
+    fn is_prose_punctuation(c: char) -> bool {
+        matches!(
+            c,
+            ',' | '.' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\''
+        )
+    }
+
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let cursor = cursor.min(len);
@@ -943,9 +960,24 @@ fn trigger_at(input: &str, cursor: usize, triggers: &[String]) -> Option<(char, 
     if start == end {
         return None;
     }
+    while end - start > 2 && is_prose_punctuation(chars[end - 1]) {
+        end -= 1;
+    }
+    while end - start > 2 && is_prose_punctuation(chars[start]) {
+        start += 1;
+    }
     let trigger = chars[start];
     let registered = trigger == '/' || triggers.iter().any(|t| t.starts_with(trigger));
     registered.then_some((trigger, start, end))
+}
+
+/// Untrusted provider/file-name data reaches the buffer and terminal:
+/// strip C0 control chars and DEL so a `\n` cannot split the buffer, an
+/// ESC cannot escape into the terminal, and a tab cannot misalign spans.
+fn sanitize_mention_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(*c, '\u{0}'..='\u{1F}' | '\u{7F}'))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1519,6 +1551,11 @@ mod tests {
     #[test_case("$foo", 0, None                    ; "unregistered_trigger")]
     #[test_case("", 0, None                        ; "empty_input")]
     #[test_case("foo ", 4, None                    ; "cursor_on_space")]
+    #[test_case("@foo,", 4, Some(('@', 0, 4))     ; "cursor_on_trailing_comma")]
+    #[test_case("(@foo)", 5, Some(('@', 1, 5))    ; "parenthesized_token")]
+    #[test_case("see (@foo)", 9, Some(('@', 5, 9)) ; "cursor_before_closing_paren")]
+    #[test_case("@.", 2, Some(('@', 0, 2))        ; "anchor_keeps_one_char")]
+    #[test_case("@,", 2, Some(('@', 0, 2))        ; "comma_anchor_keeps_one_char")]
     fn trigger_detection(input: &str, cursor: usize, expected: Option<(char, usize, usize)>) {
         assert_eq!(trigger_at(input, cursor, &trigger_list(&["@"])), expected);
     }
@@ -1570,7 +1607,6 @@ mod tests {
         p.active_trigger = Some('@');
         p.mention_range = Some((0, 8));
         p.mention_state = Some(MentionState::Pending {
-            generation: 1,
             rx: flume::bounded(1).1,
         });
         assert!(matches!(
@@ -1682,36 +1718,17 @@ mod tests {
     }
 
     #[test]
-    fn stale_mention_reply_is_dropped() {
-        let mut p = palette_with_triggers(&["@"]);
-        let (tx, rx) = flume::bounded(1);
-        p.active_trigger = Some('@');
-        p.mention_range = Some((0, 5));
-        p.mention_generation = 2;
-        p.mention_state = Some(MentionState::Pending { generation: 1, rx });
-        tx.send(vec![]).unwrap();
-        let _ = p.tick();
-        assert!(!p.mention_pending(), "stale reply never settles the popup");
-        assert_eq!(p.match_count(), 0);
-        assert!(p.mention_items.is_empty());
-    }
-
-    #[test]
     fn fresh_mention_reply_populates_corpus() {
         let mut p = palette_with_triggers(&["@"]);
         let (tx, rx) = flume::bounded(1);
         p.active_trigger = Some('@');
         p.mention_range = Some((0, 8));
         p.mention_query = "src/fo".into();
-        p.mention_generation = 1;
-        p.mention_state = Some(MentionState::Pending { generation: 1, rx });
-        tx.send(vec![maki_lua::CompletionGroup {
-            provider: "picker".into(),
-            items: vec![maki_lua::CompletionItem {
-                label: "src/foo.rs".into(),
-                insert: "@src/foo.rs".into(),
-                kind: "file".into(),
-            }],
+        p.mention_state = Some(MentionState::Pending { rx });
+        tx.send(vec![maki_lua::CompletionItem {
+            label: "src/foo.rs".into(),
+            insert: "@src/foo.rs".into(),
+            kind: "file".into(),
         }])
         .unwrap();
         assert_eq!(p.tick(), Dirty::YES, "reply owes a frame");
@@ -1722,6 +1739,183 @@ mod tests {
         assert!(matches!(
             action,
             CommandAction::CompleteRange { start: 0, end: 8, text } if text == "@src/foo.rs "
+        ));
+    }
+
+    #[test]
+    fn disconnected_reply_settles_popup() {
+        let mut p = palette_with_triggers(&["@"]);
+        let (tx, rx) = flume::bounded(1);
+        drop(tx);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((0, 8));
+        p.mention_state = Some(MentionState::Pending { rx });
+        assert_eq!(p.tick(), Dirty::YES, "settling owes a frame");
+        assert!(!p.mention_pending(), "disconnected reply settles the popup");
+        assert!(p.mention_items.is_empty());
+    }
+
+    #[test]
+    fn same_query_cursor_move_fires_no_new_request() {
+        let (handle, probe) = maki_lua::test_support::probed_event_handle();
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            handle,
+        )
+        .with_triggers(&["@"]);
+        p.sync("@src/fo", 7, "/tmp");
+        assert!(probe.try_recv().is_some(), "initial resolve request fired");
+        p.sync("@src/fo", 3, "/tmp");
+        assert!(
+            probe.try_recv().is_none(),
+            "cursor move with the same query must not re-resolve"
+        );
+        assert_eq!(p.mention_range, Some((0, 7)));
+        assert!(p.mention_pending());
+    }
+
+    #[test]
+    fn query_change_fires_new_request() {
+        let (handle, probe) = maki_lua::test_support::probed_event_handle();
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            handle,
+        )
+        .with_triggers(&["@"]);
+        p.sync("@src/fo", 7, "/tmp");
+        assert!(probe.try_recv().is_some());
+        p.sync("@src/foo", 8, "/tmp");
+        assert!(probe.try_recv().is_some(), "query change re-resolves");
+    }
+
+    #[test]
+    fn esc_then_move_into_token_reopens() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.sync("@src", 4, "/tmp");
+        assert!(p.is_active());
+        p.handle_key(key(KeyCode::Esc), "@src");
+        assert!(!p.is_active());
+        p.sync("@src", 2, "/tmp");
+        assert!(p.is_active(), "cursor move into a token reopens the popup");
+        assert_eq!(p.mention_range, Some((0, 4)));
+    }
+
+    #[test_case("first line\n@src", 15, (11, 15) ; "second_line")]
+    #[test_case("l1\nl2\n@src", 10, (6, 10)     ; "third_line")]
+    fn mention_opens_at_line_start_after_newline(
+        input: &str,
+        cursor: usize,
+        range: (usize, usize),
+    ) {
+        let mut p = palette_with_triggers(&["@"]);
+        p.sync(input, cursor, "/tmp");
+        assert!(p.is_active());
+        assert_eq!(p.mention_range, Some(range));
+    }
+
+    #[test]
+    fn mention_completes_range_on_multiline_input() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((11, 15));
+        p.mention_state = Some(MentionState::Settled);
+        p.mention_items = vec![MentionItem {
+            label: "src/foo.rs".into(),
+            insert: "@src/foo.rs".into(),
+            kind: "file".into(),
+        }];
+        p.filtered = vec![Match {
+            command_type: CommandType::Mention(0),
+            indices: vec![],
+        }];
+        let action = p.handle_key(key(KeyCode::Enter), "first line\n@src");
+        assert!(matches!(
+            action,
+            CommandAction::CompleteRange { start: 11, end: 15, text } if text == "@src/foo.rs "
+        ));
+    }
+
+    #[test]
+    fn slash_command_with_mention_arg_opens_mention() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.sync("/help @file", 11, "/tmp");
+        assert_eq!(p.mention_trigger(), Some('@'));
+        assert_eq!(p.mention_range, Some((6, 11)));
+    }
+
+    #[test_case("/help foo", 4  ; "cursor_on_command_word")]
+    #[test_case("/help foo", 10 ; "cursor_on_args")]
+    fn slash_command_keeps_slash_mode(input: &str, cursor: usize) {
+        let mut p = palette_with_triggers(&["@"]);
+        p.sync(input, cursor, "/tmp");
+        assert_eq!(p.active_trigger, Some('/'));
+    }
+
+    #[test]
+    fn mention_reply_strips_control_chars() {
+        let mut p = palette_with_triggers(&["@"]);
+        let (tx, rx) = flume::bounded(1);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((0, 8));
+        p.mention_query = "bad".into();
+        p.mention_state = Some(MentionState::Pending { rx });
+        tx.send(vec![maki_lua::CompletionItem {
+            label: "bad\nlabel\u{1b}esc".into(),
+            insert: "@bad\u{7f}\t".into(),
+            kind: "file".into(),
+        }])
+        .unwrap();
+        let _ = p.tick();
+        assert_eq!(p.mention_items[0].label, "badlabelesc");
+        assert_eq!(p.mention_items[0].insert, "@bad");
+    }
+
+    #[test]
+    fn mention_complete_does_not_double_space_mid_sentence() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((4, 11));
+        p.mention_state = Some(MentionState::Settled);
+        p.mention_items = vec![MentionItem {
+            label: "src/foo.rs".into(),
+            insert: "@src/foo.rs".into(),
+            kind: "file".into(),
+        }];
+        p.filtered = vec![Match {
+            command_type: CommandType::Mention(0),
+            indices: vec![],
+        }];
+        let action = p.handle_key(key(KeyCode::Enter), "see @src/fo here");
+        assert!(matches!(
+            action,
+            CommandAction::CompleteRange { start: 4, end: 11, text } if text == "@src/foo.rs"
+        ));
+    }
+
+    #[test]
+    fn mention_completes_token_before_trailing_punctuation() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.sync("(@foo)", 5, "/tmp");
+        assert_eq!(p.mention_range, Some((1, 5)));
+        p.mention_items = vec![MentionItem {
+            label: "foo.rs".into(),
+            insert: "@foo.rs".into(),
+            kind: "file".into(),
+        }];
+        p.filtered = vec![Match {
+            command_type: CommandType::Mention(0),
+            indices: vec![],
+        }];
+        let action = p.handle_key(key(KeyCode::Enter), "(@foo)");
+        assert!(matches!(
+            action,
+            CommandAction::CompleteRange { start: 1, end: 5, text } if text == "@foo.rs "
         ));
     }
 

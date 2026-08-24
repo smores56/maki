@@ -25,6 +25,10 @@ impl App {
                         let focused = !self.any_overlay_open();
                         self.input_box
                             .handle_click(zone.area, event.row, event.column, focused);
+                        self.sync_palette(
+                            &self.input_box.buffer.value(),
+                            self.input_box.buffer.cursor_char_index(),
+                        );
                     }
                     let scroll = self.scroll_offset(zone.zone);
                     self.selection_state = Some(SelectionState::Dragging {

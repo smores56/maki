@@ -1417,12 +1417,9 @@ pub struct CompletionItem {
     pub kind: String,
 }
 
-pub struct CompletionGroup {
-    pub provider: String,
-    pub items: Vec<CompletionItem>,
-}
-
-pub type CompletionReply = Vec<CompletionGroup>;
+/// Flat list of candidates in provider registration order; the UI re-ranks
+/// them by fuzzy score, so provider boundaries are not preserved.
+pub type CompletionReply = Vec<CompletionItem>;
 
 #[derive(Clone, Default)]
 pub struct TriggerSnapshot {
@@ -1488,17 +1485,23 @@ pub(crate) fn publish_completion_snapshot(
 }
 
 const COMPLETION_TRIGGER_EMPTY_ERR: &str = "register_completion: trigger must be non-empty";
-const COMPLETION_TRIGGER_WS_ERR: &str = "register_completion: trigger must not contain whitespace";
+const COMPLETION_TRIGGER_LEN_ERR: &str =
+    "register_completion: trigger must be exactly one character";
+const COMPLETION_TRIGGER_CHAR_ERR: &str = "register_completion: trigger must be a punctuation or symbol (e.g. '@', '#', ':'), not a letter, digit, whitespace, or control char";
 
 fn register_completion_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaResult<()> {
     let trigger: String = spec
         .get("trigger")
         .map_err(|_| mlua::Error::runtime("register_completion: missing 'trigger'"))?;
-    if trigger.is_empty() {
+    let mut chars = trigger.chars();
+    let Some(c) = chars.next() else {
         return Err(mlua::Error::runtime(COMPLETION_TRIGGER_EMPTY_ERR));
+    };
+    if chars.next().is_some() {
+        return Err(mlua::Error::runtime(COMPLETION_TRIGGER_LEN_ERR));
     }
-    if trigger.chars().any(char::is_whitespace) {
-        return Err(mlua::Error::runtime(COMPLETION_TRIGGER_WS_ERR));
+    if c.is_whitespace() || c.is_control() || c.is_alphanumeric() {
+        return Err(mlua::Error::runtime(COMPLETION_TRIGGER_CHAR_ERR));
     }
     let provider: Function = spec
         .get("provider")
@@ -1536,20 +1539,22 @@ fn register_completion_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> Lu
 ///
 /// Typing a word that starts with {trigger} in the input bar opens the
 /// completion popup. Every provider registered for that trigger is asked
-/// for candidates; results are merged and shown grouped by plugin.
+/// for candidates; results are merged into one flat list.
 ///
 /// @param spec table Registration specification:
-///   trigger  (string)   Required. The trigger string that opens the
-///                        completion popup (e.g. "@"). Must be non-empty
-///                        and contain no whitespace.
+///   trigger  (string)   Required. The single character that opens the
+///                        completion popup (e.g. "@"). Must be a punctuation
+///                        or symbol: letters, digits, whitespace, and control
+///                        characters are rejected.
 ///   provider (function) Required. Called as `provider(query, ctx)` where
 ///                        `query` is the text after the trigger and `ctx.cwd`
 ///                        the session working directory. Must return an array
 ///                        of candidate tables: `{ label, insert, kind }`.
 ///                        label is shown in the popup, insert is the text
-///                        placed in the input when chosen, kind is one of
-///                        "file", "dir", "text", ... (missing fields default
-///                        to empty strings).
+///                        placed in the input when chosen (required, items
+///                        without it are dropped), kind is one of
+///                        "file", "dir", "text", ... (missing label and kind
+///                        default to empty strings).
 /// @return
 /// @example
 /// maki.api.register_completion({

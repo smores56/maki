@@ -1,5 +1,4 @@
 use std::cmp::Reverse;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fs::FileType;
 use std::io::ErrorKind;
@@ -18,6 +17,7 @@ use crate::plugin_permissions::PluginPermissions;
 const DEFAULT_MAX_DEPTH: u32 = 10;
 const DEFAULT_MAX_RESULTS: usize = 50;
 const MAX_WALK_ENTRIES: usize = 50_000;
+const WALK_CACHE_MAX_ENTRIES: usize = 8;
 const GIT_DIR: &str = ".git";
 const KIND_FILE: &str = "file";
 const KIND_DIR: &str = "dir";
@@ -676,14 +676,60 @@ async fn grep(lua: Lua, pattern: String, opts: Option<Table>) -> LuaResult<Pair<
     Ok((Some(arr), None))
 }
 
+#[derive(Clone)]
 struct WalkEntry {
     rel: String,
     abs: String,
     kind: &'static str,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct WalkSignature {
+    root: PathBuf,
+    max_depth: u32,
+    root_mtime: Option<SystemTime>,
+    subdir_mtimes: Vec<(String, SystemTime)>,
+}
+
+#[derive(Clone)]
+enum WalkCacheEntry {
+    Entries(Vec<WalkEntry>),
+    Error(String),
+}
+
 #[derive(Default)]
-struct WalkCache(Mutex<HashMap<(PathBuf, SystemTime, u32), Vec<WalkEntry>>>);
+struct WalkCache(Mutex<HashMap<WalkSignature, WalkCacheEntry>>);
+
+/// Keyed by max_depth, the root mtime, and the mtimes of the root's direct
+/// subdirectories, so `touch src/new.rs` invalidates while a deep tree stays
+/// a cache hit. Deeper changes are accepted as stale: they would cost a full
+/// signature walk of the tree, and the popup refreshes on every keystroke.
+fn walk_signature(root: &Path, max_depth: u32) -> WalkSignature {
+    let root_mtime = std::fs::metadata(root)
+        .and_then(|meta| meta.modified())
+        .ok();
+    let mut subdir_mtimes = Vec::new();
+    if root_mtime.is_some()
+        && let Ok(read) = std::fs::read_dir(root)
+    {
+        for entry in read.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir()
+                && entry.file_name() != GIT_DIR
+                && let Ok(mtime) = entry.metadata().and_then(|meta| meta.modified())
+            {
+                subdir_mtimes.push((entry.file_name().to_string_lossy().into_owned(), mtime));
+            }
+        }
+        subdir_mtimes.sort();
+    }
+    WalkSignature {
+        root: root.to_owned(),
+        max_depth,
+        root_mtime,
+        subdir_mtimes,
+    }
+}
 
 fn walk_root(root: &Path, max_depth: u32) -> Result<Vec<WalkEntry>, String> {
     let mut entries = Vec::new();
@@ -746,9 +792,11 @@ fn entry_table(lua: &Lua, entry: &WalkEntry) -> LuaResult<Table> {
 
 /// Fuzzy-search files and directories under {cwd}, like the native file picker.
 /// Results are ranked against paths relative to {cwd} and returned as absolute
-/// paths. The walk is cached by (cwd, max_depth, root mtime), so repeated calls
-/// only pay for matching. Directory symlinks are never followed and `.git` is
-/// skipped; hidden files are included.
+/// paths. The walk is cached by (max_depth, root mtime, direct-subdir mtimes):
+/// a new file anywhere in the root's direct subdirectories invalidates, but
+/// deeper changes may stay stale until the mtime of an ancestor subdirectory
+/// changes. Directory symlinks are never followed and `.git` is skipped;
+/// hidden files are included.
 ///
 /// @param query string Fuzzy search pattern. Empty or whitespace-only returns the first {max_results} entries in walk order.
 /// @param opts table? `cwd` (string, default process cwd): walk root; `~/` is expanded and relative paths resolve against the process cwd. `max_depth` (integer, default 10, at least 1): recursion depth, 1 = direct children. `max_results` (integer, default 50): maximum entries returned.
@@ -758,7 +806,7 @@ fn entry_table(lua: &Lua, entry: &WalkEntry) -> LuaResult<Table> {
 /// if err then return end
 /// for _, entry in ipairs(files) do print(entry.path, entry.kind) end
 #[lua_fn(guard = FsRead)]
-fn fuzzy_files(lua: &Lua, query: String, opts: Option<Table>) -> LuaResult<Pair<Table>> {
+async fn fuzzy_files(lua: Lua, query: String, opts: Option<Table>) -> LuaResult<Pair<Table>> {
     let opts = opts.as_ref();
     let root = match opts.and_then(|t| t.get::<String>("cwd").ok()) {
         Some(cwd) => make_absolute(&cwd)?,
@@ -775,32 +823,61 @@ fn fuzzy_files(lua: &Lua, query: String, opts: Option<Table>) -> LuaResult<Pair<
         .and_then(|t| t.get::<usize>("max_results").ok())
         .unwrap_or(DEFAULT_MAX_RESULTS);
 
-    let mtime = match std::fs::metadata(&root).and_then(|meta| meta.modified()) {
-        Ok(mtime) => mtime,
-        Err(e) => {
-            return Ok(err_pair(format!(
-                "cannot stat root {}: {e}",
-                root.display()
-            )));
-        }
-    };
+    let sig = walk_signature(&root, max_depth);
     if lua.app_data_ref::<WalkCache>().is_none() {
         lua.set_app_data(WalkCache::default());
     }
-    let cache = lua
-        .app_data_mut::<WalkCache>()
-        .expect("walk cache just ensured");
-    let mut guard = cache.0.lock().expect("walk cache poisoned");
-    let entries = match guard.entry((root.clone(), mtime, max_depth)) {
-        Entry::Occupied(slot) => slot.into_mut(),
-        Entry::Vacant(slot) => slot.insert(try_pair!(walk_root(&root, max_depth))),
+    let cached = {
+        let cache = lua
+            .app_data_ref::<WalkCache>()
+            .expect("walk cache just ensured");
+        cache
+            .0
+            .lock()
+            .expect("walk cache poisoned")
+            .get(&sig)
+            .cloned()
+    };
+    let entries = match cached {
+        Some(WalkCacheEntry::Entries(entries)) => entries,
+        Some(WalkCacheEntry::Error(err)) => return Ok(err_pair(err)),
+        None => {
+            // The walk is bounded at MAX_WALK_ENTRIES but a cold walk can still
+            // take a while, so it runs on a blocking thread and never stalls
+            // the single Lua runtime thread. The cache is only touched here,
+            // back on the runtime thread, after the walk completes.
+            let walked = smol::unblock({
+                let root = root.clone();
+                move || walk_root(&root, max_depth)
+            })
+            .await;
+            let cache = lua
+                .app_data_ref::<WalkCache>()
+                .expect("walk cache just ensured");
+            let mut guard = cache.0.lock().expect("walk cache poisoned");
+            if !guard.contains_key(&sig) && guard.len() >= WALK_CACHE_MAX_ENTRIES {
+                // Signature-stale roots are rare; dropping the whole cache is
+                // simpler than LRU and costs one re-walk per root.
+                guard.clear();
+            }
+            match walked {
+                Ok(entries) => {
+                    guard.insert(sig, WalkCacheEntry::Entries(entries.clone()));
+                    entries
+                }
+                Err(err) => {
+                    guard.insert(sig, WalkCacheEntry::Error(err.clone()));
+                    return Ok(err_pair(err));
+                }
+            }
+        }
     };
 
     let arr = lua.create_table()?;
     let query = query.trim();
     if query.is_empty() {
         for (i, entry) in entries.iter().take(max_results).enumerate() {
-            arr.set(i + 1, entry_table(lua, entry)?)?;
+            arr.set(i + 1, entry_table(&lua, entry)?)?;
         }
         return Ok((Some(arr), None));
     }
@@ -815,9 +892,9 @@ fn fuzzy_files(lua: &Lua, query: String, opts: Option<Table>) -> LuaResult<Pair<
                 .map(|score| (score, entry))
         })
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|b| std::cmp::Reverse(b.0));
     for (i, (_, entry)) in scored.iter().take(max_results).enumerate() {
-        arr.set(i + 1, entry_table(lua, entry)?)?;
+        arr.set(i + 1, entry_table(&lua, entry)?)?;
     }
     Ok((Some(arr), None))
 }
@@ -1689,10 +1766,11 @@ mod tests {
     fn call_fuzzy(lua: &Lua, query: &str, opts: Option<Table>) -> (Option<Table>, Value) {
         let tbl = create_fs_table(lua, &PluginPermissions::trusted()).unwrap();
         let f: mlua::Function = tbl.get("fuzzy_files").unwrap();
-        match opts {
-            Some(o) => f.call((query, o)).unwrap(),
-            None => f.call(query).unwrap(),
-        }
+        let result = match opts {
+            Some(o) => f.call_async((query, o)),
+            None => f.call_async(query),
+        };
+        smol::block_on(result).unwrap()
     }
 
     fn extract_entries(tbl: &Table) -> Vec<(String, String)> {
@@ -1814,6 +1892,71 @@ mod tests {
             2,
             "mtime change must re-walk"
         );
+    }
+
+    #[test]
+    fn fuzzy_files_cache_invalidates_on_subdir_mtime_change() {
+        let tmp = TempDir::new().unwrap();
+        let sub = tmp.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("old.rs"), "").unwrap();
+
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+        let (result, err) = call_fuzzy(&lua, "", Some(opts.clone()));
+        assert!(matches!(err, Value::Nil));
+        assert!(
+            extract_paths(&result.unwrap())
+                .iter()
+                .any(|p| p.ends_with("old.rs"))
+        );
+
+        std::fs::write(sub.join("new.rs"), "").unwrap();
+        let (result, err) = call_fuzzy(&lua, "", Some(opts));
+        assert!(matches!(err, Value::Nil));
+        assert!(
+            extract_paths(&result.unwrap())
+                .iter()
+                .any(|p| p.ends_with("new.rs")),
+            "subdir mtime change must invalidate the cache"
+        );
+    }
+
+    #[test]
+    fn fuzzy_files_caches_missing_root_error() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("nope");
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", missing.to_str().unwrap()).unwrap();
+        let (result, err) = call_fuzzy(&lua, "", Some(opts));
+        assert!(result.is_none());
+        assert!(matches!(err, Value::String(_)));
+
+        let cache = lua.app_data_ref::<WalkCache>().unwrap();
+        let guard = cache.0.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert!(
+            matches!(guard.values().next(), Some(WalkCacheEntry::Error(_))),
+            "failing root must be cached as an error marker"
+        );
+    }
+
+    #[test]
+    fn fuzzy_files_cache_evicts_overflow() {
+        let lua = Lua::new();
+        for _ in 0..WALK_CACHE_MAX_ENTRIES + 2 {
+            let tmp = TempDir::new().unwrap();
+            std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+            let opts = lua.create_table().unwrap();
+            opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+            let (result, err) = call_fuzzy(&lua, "", Some(opts));
+            assert!(matches!(err, Value::Nil));
+            assert_eq!(extract_paths(&result.unwrap()).len(), 1);
+        }
+        let cache = lua.app_data_ref::<WalkCache>().unwrap();
+        assert!(cache.0.lock().unwrap().len() <= WALK_CACHE_MAX_ENTRIES);
     }
 
     #[test]

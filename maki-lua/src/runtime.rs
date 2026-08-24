@@ -35,8 +35,8 @@ use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
 use crate::api::slot::SlotStore;
 use crate::api::tool::{
-    CompletionGroup, CompletionItem, CompletionProviderEntry, CompletionRegistry, CompletionReply,
-    LuaTool, PendingRules, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply,
+    CompletionItem, CompletionProviderEntry, CompletionRegistry, CompletionReply, LuaTool,
+    PendingRules, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply,
     TriggerSnapshotReader, TriggerSnapshotWriter, publish_completion_snapshot,
 };
 use crate::api::ui::HintStore;
@@ -100,6 +100,14 @@ static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
 /// tool's rendered output.
 const RESTORE_ITEM_TIMEOUT: Duration = Duration::from_secs(60);
 const TURN_END_EVENT: &str = "TurnEnd";
+/// Hard wall-clock budget for one completion provider. The watchdog interrupt
+/// kills a provider stuck in a tight Lua loop; a provider parked in an await
+/// (e.g. `maki.fs.fuzzy_files`) is not interruptible mid-Rust-call, but the
+/// walk now runs on a blocking thread, so the runtime thread stays free and
+/// the kill lands the moment control returns to Lua.
+const COMPLETION_PROVIDER_DEADLINE: Duration = Duration::from_secs(2);
+/// Per-provider cap so a hostile or buggy reply cannot flood the UI.
+pub(crate) const COMPLETION_MAX_ITEMS: usize = 200;
 /// Without a cap, a runaway plugin OOM-kills the whole process.
 /// With one, it hits a catchable Lua error instead.
 const LUA_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
@@ -2384,20 +2392,15 @@ async fn resolve_completion(
     query: &str,
     cwd: &str,
 ) -> CompletionReply {
-    let mut entries: Vec<&CompletionProviderEntry> = providers.iter().collect();
-    entries.sort_by_key(|entry| entry.plugin.as_ref());
-    let mut groups = Vec::new();
-    for entry in entries {
-        if let Some(items) =
+    let mut items = Vec::new();
+    for entry in providers {
+        if let Some(provider_items) =
             run_completion_provider(lua, &entry.plugin, trigger, &entry.provider, query, cwd).await
         {
-            groups.push(CompletionGroup {
-                provider: entry.plugin.to_string(),
-                items,
-            });
+            items.extend(provider_items);
         }
     }
-    groups
+    items
 }
 
 async fn run_completion_provider(
@@ -2408,16 +2411,26 @@ async fn run_completion_provider(
     query: &str,
     cwd: &str,
 ) -> Option<Vec<CompletionItem>> {
-    let result: mlua::Result<LuaValue> = async {
-        let ctx = lua.create_table()?;
-        ctx.set("cwd", cwd)?;
-        let thread = lua.create_thread(provider.clone())?;
-        let async_thread = thread.into_async::<LuaValue>((query, ctx))?;
-        run_detached(lua, async_thread).await
-    }
-    .await;
+    let scope = TaskScope::new(
+        lua,
+        TaskCell::new(
+            CancelToken::none(),
+            Some(Instant::now() + COMPLETION_PROVIDER_DEADLINE),
+            None,
+        ),
+    );
+    let result: mlua::Result<LuaValue> = scope
+        .scope_future(async {
+            let ctx = lua.create_table()?;
+            ctx.set("cwd", cwd)?;
+            let thread = lua.create_thread(provider.clone())?;
+            let async_thread = thread.into_async::<LuaValue>((query, ctx))?;
+            async_thread.await
+        })
+        .await;
+    drop(scope);
     match result {
-        Ok(value) => Some(parse_completion_items(value)),
+        Ok(value) => Some(parse_completion_items(plugin, value)),
         Err(e) => {
             tracing::warn!(plugin, trigger, error = %strip_traceback(&e), "completion provider failed");
             None
@@ -2425,18 +2438,26 @@ async fn run_completion_provider(
     }
 }
 
-fn parse_completion_items(value: LuaValue) -> Vec<CompletionItem> {
+fn parse_completion_items(plugin: &str, value: LuaValue) -> Vec<CompletionItem> {
     let LuaValue::Table(arr) = value else {
         return Vec::new();
     };
     let mut items = Vec::new();
     for pair in arr.sequence_values::<LuaValue>() {
+        if items.len() >= COMPLETION_MAX_ITEMS {
+            break;
+        }
         let Ok(LuaValue::Table(item)) = pair else {
             continue;
         };
+        let insert: String = item.get("insert").unwrap_or_default();
+        if insert.is_empty() {
+            tracing::warn!(plugin, "completion item has empty insert, skipping");
+            continue;
+        }
         items.push(CompletionItem {
             label: item.get("label").unwrap_or_default(),
-            insert: item.get("insert").unwrap_or_default(),
+            insert,
             kind: item.get("kind").unwrap_or_default(),
         });
     }

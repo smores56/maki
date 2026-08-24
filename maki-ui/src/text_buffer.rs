@@ -54,7 +54,7 @@ impl TextBuffer {
     pub fn cursor_char_index(&self) -> usize {
         self.lines[..self.cursor_y]
             .iter()
-            .map(|line| line.chars().count())
+            .map(|line| line.chars().count() + 1)
             .sum::<usize>()
             + self.x()
     }
@@ -107,6 +107,7 @@ impl TextBuffer {
     /// start stays put.
     pub fn replace_range(&mut self, start: usize, end: usize, text: &str) {
         let value = self.value();
+        debug_assert!(start <= end && end <= value.chars().count());
         let byte_start = Self::char_to_byte(&value, start);
         let byte_end = Self::char_to_byte(&value, end);
 
@@ -301,7 +302,6 @@ impl TextBuffer {
         self.raw_x = x.min(self.current_line_len());
     }
 
-    #[allow(dead_code)]
     fn set_cursor_from_char_index(&mut self, mut char_idx: usize) {
         for (y, line) in self.lines.iter().enumerate() {
             let line_len = line.chars().count();
@@ -565,6 +565,18 @@ mod tests {
         buf.replace_range(start, end, text);
         assert_eq!(buf.value(), expected);
         assert_eq!(buf.cursor_char_index(), expected_cursor);
+    }
+
+    #[test_case(0, 0, 0 ; "first_line_start")]
+    #[test_case(0, 1, 1 ; "first_line_end")]
+    #[test_case(1, 0, 2 ; "second_line_start")]
+    #[test_case(1, 2, 4 ; "second_line_end")]
+    #[test_case(2, 0, 5 ; "third_line_start")]
+    #[test_case(2, 3, 8 ; "last_line_end")]
+    fn cursor_char_index_counts_newlines(y: usize, x: usize, expected: usize) {
+        let mut buf = TextBuffer::new("a\nbc\ndef".into());
+        buf.set_cursor(y, x);
+        assert_eq!(buf.cursor_char_index(), expected);
     }
 
     #[test]

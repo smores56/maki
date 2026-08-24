@@ -9,9 +9,7 @@ mod runtime;
 
 pub use api::keymap::{KeymapEntry, KeymapReader, KeymapSnapshot};
 pub use api::options::{OptionSpec, OptionType, PluginOptionSpecs};
-pub use api::tool::{
-    CompletionGroup, CompletionItem, CompletionReply, TriggerSnapshot, TriggerSnapshotReader,
-};
+pub use api::tool::{CompletionItem, CompletionReply, TriggerSnapshot, TriggerSnapshotReader};
 pub use api::util::command::{
     Anchor, Axis, Border, BuiltinAction, Dimension, Edge, FloatConfig, FloatConfigPatch,
     HintReader, HintSnapshot, LuaCommandInfo, LuaCommandReader, ModelRequest, SessionRequest,

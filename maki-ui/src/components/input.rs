@@ -124,11 +124,11 @@ impl InputBox {
         }
 
         match self.buffer.handle_key(key) {
-            EditResult::Changed => InputAction::PaletteSync {
+            EditResult::Changed | EditResult::Moved => InputAction::PaletteSync {
                 text: self.buffer.value(),
                 cursor: self.buffer.cursor_char_index(),
             },
-            EditResult::Moved | EditResult::Ignored => InputAction::None,
+            EditResult::Ignored => InputAction::None,
         }
     }
 

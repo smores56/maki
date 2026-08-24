@@ -355,22 +355,24 @@ Register a completion provider for a trigger.
 
 Typing a word that starts with {trigger} in the input bar opens the
 completion popup. Every provider registered for that trigger is asked
-for candidates; results are merged and shown grouped by plugin.
+for candidates; results are merged into one flat list.
 
 **Parameters:**
 
 - `{spec}` (`table`) Registration specification:
-  - `trigger` (`string`) Required. The trigger string that opens the
-    completion popup (e.g. "@"). Must be non-empty
-    and contain no whitespace.
+  - `trigger` (`string`) Required. The single character that opens the
+    completion popup (e.g. "@"). Must be a punctuation
+    or symbol: letters, digits, whitespace, and control
+    characters are rejected.
   - `provider` (`function`) Required. Called as `provider(query, ctx)` where
     `query` is the text after the trigger and `ctx.cwd`
     the session working directory. Must return an array
     of candidate tables: `{ label, insert, kind }`.
     label is shown in the popup, insert is the text
-    placed in the input when chosen, kind is one of
-    "file", "dir", "text", ... (missing fields default
-    to empty strings).
+    placed in the input when chosen (required, items
+    without it are dropped), kind is one of
+    "file", "dir", "text", ... (missing label and kind
+    default to empty strings).
 
 **Example:**
 
@@ -2180,9 +2182,11 @@ maki.fs.fuzzy_files({query}, {opts?})
 
 Fuzzy-search files and directories under {cwd}, like the native file picker.
 Results are ranked against paths relative to {cwd} and returned as absolute
-paths. The walk is cached by (cwd, max_depth, root mtime), so repeated calls
-only pay for matching. Directory symlinks are never followed and `.git` is
-skipped; hidden files are included.
+paths. The walk is cached by (max_depth, root mtime, direct-subdir mtimes):
+a new file anywhere in the root's direct subdirectories invalidates, but
+deeper changes may stay stale until the mtime of an ancestor subdirectory
+changes. Directory symlinks are never followed and `.git` is skipped;
+hidden files are included.
 
 Requires the `fs_read` [plugin permission](#plugin-permissions).
 
