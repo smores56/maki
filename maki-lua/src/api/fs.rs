@@ -777,7 +777,12 @@ fn fuzzy_files(lua: &Lua, query: String, opts: Option<Table>) -> LuaResult<Pair<
 
     let mtime = match std::fs::metadata(&root).and_then(|meta| meta.modified()) {
         Ok(mtime) => mtime,
-        Err(e) => return Ok(err_pair(format!("cannot stat root {}: {e}", root.display()))),
+        Err(e) => {
+            return Ok(err_pair(format!(
+                "cannot stat root {}: {e}",
+                root.display()
+            )));
+        }
     };
     if lua.app_data_ref::<WalkCache>().is_none() {
         lua.set_app_data(WalkCache::default());
@@ -1726,7 +1731,11 @@ mod tests {
         assert!(matches!(err, Value::Nil));
         let paths = extract_paths(&result.unwrap());
         assert_eq!(paths.len(), 2);
-        assert!(paths.iter().all(|p| !p.ends_with("inner.txt") && !p.ends_with("deep.txt")));
+        assert!(
+            paths
+                .iter()
+                .all(|p| !p.ends_with("inner.txt") && !p.ends_with("deep.txt"))
+        );
 
         let opts = lua.create_table().unwrap();
         opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
@@ -1827,7 +1836,13 @@ mod tests {
             assert!(matches!(err, Value::Nil));
             let names: Vec<String> = extract_paths(&result.unwrap())
                 .iter()
-                .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+                .map(|p| {
+                    Path::new(p)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
                 .collect();
             assert_eq!(names, walked, "query {query:?} must keep walk order");
         }
@@ -1847,7 +1862,10 @@ mod tests {
         assert!(matches!(err, Value::Nil));
         let paths = extract_paths(&result.unwrap());
         assert_eq!(paths.len(), 2);
-        assert!(paths[0].ends_with("auth.rs"), "prefix match must rank first");
+        assert!(
+            paths[0].ends_with("auth.rs"),
+            "prefix match must rank first"
+        );
     }
 
     #[test]
@@ -1873,7 +1891,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let lua = Lua::new();
         let opts = lua.create_table().unwrap();
-        opts.set("cwd", tmp.path().join("nope").to_str().unwrap()).unwrap();
+        opts.set("cwd", tmp.path().join("nope").to_str().unwrap())
+            .unwrap();
         let (result, err) = call_fuzzy(&lua, "", Some(opts));
         assert!(result.is_none());
         assert!(matches!(err, Value::String(_)));
@@ -1926,7 +1945,10 @@ mod tests {
         );
         let link_idx = paths.iter().position(|p| p.ends_with("link")).unwrap();
         assert_eq!(entries[link_idx].1, KIND_DIR);
-        let file_link_idx = paths.iter().position(|p| p.ends_with("file_link.txt")).unwrap();
+        let file_link_idx = paths
+            .iter()
+            .position(|p| p.ends_with("file_link.txt"))
+            .unwrap();
         assert_eq!(entries[file_link_idx].1, KIND_FILE);
     }
 }
