@@ -1,8 +1,12 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use arc_swap::ArcSwap;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -999,6 +1003,7 @@ lua_table! {
     /// ```
     extend "maki.api" => pub(crate) fn add_tool_fns(pending: PendingTools, pending_rules: PendingRules, plugin: Arc<str>, opts: PluginOpts), DOCS [
         register_tool(pending), register_permission_rule(pending_rules), register_command(plugin),
+        register_completion(plugin),
         register_prompt_hint(plugin), register_options(plugin, opts), set_prompt(plugin),
         get_tools, get_tool,
         manual run_command,
@@ -1404,6 +1409,160 @@ fn register_command_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaRe
     publish_command_snapshot(&map, &writer);
 
     Ok(())
+}
+
+pub struct CompletionItem {
+    pub label: String,
+    pub insert: String,
+    pub kind: String,
+}
+
+pub struct CompletionGroup {
+    pub provider: String,
+    pub items: Vec<CompletionItem>,
+}
+
+pub type CompletionReply = Vec<CompletionGroup>;
+
+#[derive(Clone, Default)]
+pub struct TriggerSnapshot {
+    pub triggers: Vec<String>,
+    pub generation: u64,
+}
+
+#[derive(Clone)]
+pub struct TriggerSnapshotReader(Arc<ArcSwap<TriggerSnapshot>>);
+
+impl TriggerSnapshotReader {
+    pub fn empty() -> Self {
+        Self(Arc::new(ArcSwap::from_pointee(TriggerSnapshot::default())))
+    }
+
+    pub fn load(&self) -> arc_swap::Guard<Arc<TriggerSnapshot>> {
+        self.0.load()
+    }
+}
+
+pub(crate) struct TriggerSnapshotWriter {
+    store: Arc<ArcSwap<TriggerSnapshot>>,
+    generation: AtomicU64,
+}
+
+impl TriggerSnapshotWriter {
+    pub fn new() -> (Self, TriggerSnapshotReader) {
+        let inner = Arc::new(ArcSwap::from_pointee(TriggerSnapshot::default()));
+        (
+            Self {
+                store: Arc::clone(&inner),
+                generation: AtomicU64::new(0),
+            },
+            TriggerSnapshotReader(inner),
+        )
+    }
+
+    pub fn publish(&self, triggers: Vec<String>) {
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.store.store(Arc::new(TriggerSnapshot {
+            triggers,
+            generation,
+        }));
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CompletionProviderEntry {
+    pub plugin: Arc<str>,
+    pub provider: Function,
+}
+
+/// Providers per trigger, in registration order.
+pub(crate) type CompletionRegistry = HashMap<String, Vec<CompletionProviderEntry>>;
+
+pub(crate) fn publish_completion_snapshot(
+    map: &CompletionRegistry,
+    writer: &TriggerSnapshotWriter,
+) {
+    let mut triggers: Vec<String> = map.keys().cloned().collect();
+    triggers.sort();
+    writer.publish(triggers);
+}
+
+const COMPLETION_TRIGGER_EMPTY_ERR: &str = "register_completion: trigger must be non-empty";
+const COMPLETION_TRIGGER_WS_ERR: &str = "register_completion: trigger must not contain whitespace";
+
+fn register_completion_from_lua(lua: &Lua, spec: &Table, plugin: Arc<str>) -> LuaResult<()> {
+    let trigger: String = spec
+        .get("trigger")
+        .map_err(|_| mlua::Error::runtime("register_completion: missing 'trigger'"))?;
+    if trigger.is_empty() {
+        return Err(mlua::Error::runtime(COMPLETION_TRIGGER_EMPTY_ERR));
+    }
+    if trigger.chars().any(char::is_whitespace) {
+        return Err(mlua::Error::runtime(COMPLETION_TRIGGER_WS_ERR));
+    }
+    let provider: Function = spec
+        .get("provider")
+        .map_err(|_| mlua::Error::runtime("register_completion: missing 'provider'"))?;
+
+    {
+        let mut map = lua
+            .app_data_mut::<CompletionRegistry>()
+            .ok_or_else(|| mlua::Error::runtime("register_completion: not initialized"))?;
+        let providers = map.entry(trigger.clone()).or_default();
+        match providers.iter_mut().find(|entry| entry.plugin == plugin) {
+            Some(entry) => {
+                tracing::warn!(plugin = %plugin, trigger = %trigger, "completion provider replaced");
+                entry.provider = provider;
+            }
+            None => providers.push(CompletionProviderEntry {
+                plugin: Arc::clone(&plugin),
+                provider,
+            }),
+        }
+    }
+
+    let map = lua
+        .app_data_ref::<CompletionRegistry>()
+        .ok_or_else(|| mlua::Error::runtime("register_completion: not initialized"))?;
+    let writer = lua
+        .app_data_ref::<TriggerSnapshotWriter>()
+        .ok_or_else(|| mlua::Error::runtime("register_completion: not initialized"))?;
+    publish_completion_snapshot(&map, &writer);
+
+    Ok(())
+}
+
+/// Register a completion provider for a trigger.
+///
+/// Typing a word that starts with {trigger} in the input bar opens the
+/// completion popup. Every provider registered for that trigger is asked
+/// for candidates; results are merged and shown grouped by plugin.
+///
+/// @param spec table Registration specification:
+///   trigger  (string)   Required. The trigger string that opens the
+///                        completion popup (e.g. "@"). Must be non-empty
+///                        and contain no whitespace.
+///   provider (function) Required. Called as `provider(query, ctx)` where
+///                        `query` is the text after the trigger and `ctx.cwd`
+///                        the session working directory. Must return an array
+///                        of candidate tables: `{ label, insert, kind }`.
+///                        label is shown in the popup, insert is the text
+///                        placed in the input when chosen, kind is one of
+///                        "file", "dir", "text", ... (missing fields default
+///                        to empty strings).
+/// @return
+/// @example
+/// maki.api.register_completion({
+///   trigger = "@",
+///   provider = function(query, ctx)
+///     return {
+///       { label = "src/main.rs", insert = "@src/main.rs", kind = "file" },
+///     }
+///   end,
+/// })
+#[lua_fn]
+fn register_completion(lua: &Lua, #[ctx] plugin: Arc<str>, spec: Table) -> LuaResult<()> {
+    register_completion_from_lua(lua, &spec, plugin)
 }
 
 pub(crate) type ToolCallResult = Result<String, String>;

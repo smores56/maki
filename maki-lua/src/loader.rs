@@ -12,6 +12,7 @@ use maki_config::{PluginsConfig, RawConfig};
 
 use crate::api::keymap::KeymapReader;
 use crate::api::options::{PluginOptionSpecs, PluginOpts};
+use crate::api::tool::{CompletionReply, TriggerSnapshotReader};
 use crate::api::util::command::{HintReader, LuaCommandReader, UiAction};
 use crate::error::PluginError;
 use crate::plugin_permissions::{PluginPermissions, load_plugin_permissions};
@@ -441,6 +442,10 @@ impl PluginHost {
         self.inner.keymap_reader.clone()
     }
 
+    pub fn completion_reader(&self) -> TriggerSnapshotReader {
+        self.inner.completion_reader.clone()
+    }
+
     pub fn hint_reader(&self) -> HintReader {
         self.inner.hint_reader.clone()
     }
@@ -503,6 +508,22 @@ impl EventHandle {
         let (tx, rx) = flume::bounded(1);
         let _ = self.tx.send(Request::CollectPromptSlots { reply: tx });
         rx.recv().unwrap_or_default()
+    }
+
+    pub fn resolve_completion(
+        &self,
+        trigger: &str,
+        query: &str,
+        cwd: &str,
+    ) -> flume::Receiver<CompletionReply> {
+        let (tx, rx) = flume::bounded(1);
+        let _ = self.tx.send(Request::ResolveCompletion {
+            trigger: trigger.to_owned(),
+            query: query.to_owned(),
+            cwd: cwd.to_owned(),
+            reply: tx,
+        });
+        rx
     }
 
     pub async fn collect_prompt_slots_async(&self) -> ResolvedSlots {
@@ -747,6 +768,129 @@ mod tests {
         let names: Vec<&str> = snap.commands.iter().map(|c| c.name.as_ref()).collect();
         assert!(names.contains(&"/alpha"));
         assert!(names.contains(&"/beta"));
+    }
+
+    const COMPLETION_SOURCE: &str = r#"
+        maki.api.register_completion({
+            trigger = "@",
+            provider = function(query, ctx)
+                return {
+                    { label = query .. "|" .. ctx.cwd, insert = "@pick", kind = "file" },
+                    { label = "no insert", kind = "dir" },
+                }
+            end,
+        })
+    "#;
+
+    #[test_case::test_case("", "non-empty" ; "empty_trigger")]
+    #[test_case::test_case("a b", "whitespace" ; "whitespace_trigger")]
+    fn register_completion_rejects_invalid_triggers(trigger: &str, expected: &str) {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        let r = host.load_source(
+            "bad",
+            &format!(
+                r#"maki.api.register_completion({{ trigger = "{trigger}", provider = function() return {{}} end }})"#
+            ),
+        );
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains(expected));
+    }
+
+    #[test]
+    fn completion_snapshot_tracks_registered_triggers() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        let reader = host.completion_reader();
+        assert!(reader.load().triggers.is_empty());
+        host.load_source(
+            "p1",
+            r#"maki.api.register_completion({ trigger = "@", provider = function() return {} end })"#,
+        )
+        .unwrap();
+        host.load_source(
+            "p2",
+            r#"maki.api.register_completion({ trigger = '#', provider = function() return {} end })"#,
+        )
+        .unwrap();
+        let snap = reader.load();
+        assert_eq!(snap.triggers, vec!["#", "@"]);
+        assert!(snap.generation > 0);
+    }
+
+    #[test]
+    fn resolve_completion_replies_with_provider_groups() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.load_source("picker", COMPLETION_SOURCE).unwrap();
+        let rx = host
+            .event_handle()
+            .resolve_completion("@", "src", "/home/u");
+        let groups = rx.recv().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].provider, "picker");
+        assert_eq!(groups[0].items[0].label, "src|/home/u");
+        assert_eq!(groups[0].items[0].insert, "@pick");
+        assert_eq!(groups[0].items[0].kind, "file");
+        assert_eq!(groups[0].items[1].insert, "");
+        assert_eq!(groups[0].items[1].kind, "dir");
+    }
+
+    #[test]
+    fn multiple_providers_same_trigger_merge_grouped_by_plugin_name() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.load_source("zeta", COMPLETION_SOURCE).unwrap();
+        host.load_source("alpha", COMPLETION_SOURCE).unwrap();
+        let rx = host.event_handle().resolve_completion("@", "q", "/tmp");
+        let groups = rx.recv().unwrap();
+        let providers: Vec<&str> = groups.iter().map(|g| g.provider.as_str()).collect();
+        assert_eq!(providers, ["alpha", "zeta"]);
+        for group in &groups {
+            assert_eq!(group.items[0].label, "q|/tmp");
+        }
+    }
+
+    #[test]
+    fn unload_removes_only_that_plugins_providers() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.load_source("zeta", COMPLETION_SOURCE).unwrap();
+        host.load_source("alpha", COMPLETION_SOURCE).unwrap();
+        host.unload("zeta").unwrap();
+        let rx = host.event_handle().resolve_completion("@", "q", "/tmp");
+        let groups = rx.recv().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].provider, "alpha");
+    }
+
+    #[test]
+    fn resolve_completion_replies_empty_for_unregistered_trigger() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        let rx = host.event_handle().resolve_completion("$", "q", "/tmp");
+        assert!(rx.recv().unwrap().is_empty());
+    }
+
+    #[test]
+    fn async_completion_provider_resolves() {
+        let host = PluginHost::new(Arc::new(ToolRegistry::new())).unwrap();
+        host.load_source(
+            "asyncp",
+            r#"
+            maki.api.register_completion({
+                trigger = "@",
+                provider = function(query)
+                    local results = maki.async.gather({
+                        function()
+                            return { { label = "async_" .. query, insert = "@a", kind = "text" } }
+                        end,
+                    })
+                    return results[1].value
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+        let rx = host.event_handle().resolve_completion("@", "lib", "/tmp");
+        let groups = rx.recv().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].items[0].label, "async_lib");
+        assert_eq!(groups[0].items[0].kind, "text");
     }
 
     #[test]

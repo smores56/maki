@@ -35,7 +35,9 @@ use crate::api::keymap::{KeymapStore, KeymapWriter};
 use crate::api::options::{PluginOptionSpecs, PluginOpts, collect_plugin_options};
 use crate::api::slot::SlotStore;
 use crate::api::tool::{
+    CompletionGroup, CompletionItem, CompletionProviderEntry, CompletionRegistry, CompletionReply,
     LuaTool, PendingRules, PendingTool, PendingTools, PermissionScopeSpec, ToolCallReply,
+    TriggerSnapshotReader, TriggerSnapshotWriter, publish_completion_snapshot,
 };
 use crate::api::ui::HintStore;
 use crate::api::ui::buf::{BufHandle, BufferStore};
@@ -168,6 +170,12 @@ pub enum Request {
         /// How many `maki.api.run_command` hops led here; seeds the handler's
         /// [`TaskCell::command_depth`] so an alias cycle terminates.
         depth: u8,
+    },
+    ResolveCompletion {
+        trigger: String,
+        query: String,
+        cwd: String,
+        reply: flume::Sender<CompletionReply>,
     },
     CollectPromptSlots {
         reply: flume::Sender<ResolvedSlots>,
@@ -1374,6 +1382,7 @@ impl LuaRuntime {
         ui_action_tx: Option<flume::Sender<UiAction>>,
         command_writer: LuaCommandWriter,
         keymap_writer: KeymapWriter,
+        completion_writer: TriggerSnapshotWriter,
         hint_writer: HintWriter,
         jit: bool,
         plugin_rules: Arc<PluginRuleStore>,
@@ -1414,6 +1423,8 @@ impl LuaRuntime {
         lua.set_app_data(SlotStore::default());
         lua.set_app_data(KeymapStore::new());
         lua.set_app_data(keymap_writer);
+        lua.set_app_data(CompletionRegistry::new());
+        lua.set_app_data(completion_writer);
         lua.set_app_data(HintStore::new());
         lua.set_app_data(hint_writer);
         lua.set_app_data(Arc::clone(&registry));
@@ -1893,6 +1904,23 @@ impl LuaRuntime {
                 writer.publish(entries);
             }
         }
+        if let Some(mut map) = self.lua.app_data_mut::<CompletionRegistry>() {
+            let changed = map.values_mut().any(|providers| {
+                let before = providers.len();
+                providers.retain(|entry| entry.plugin.as_ref() != plugin);
+                providers.len() != before
+            });
+            if changed {
+                map.retain(|_, providers| !providers.is_empty());
+                drop(map);
+                if let (Some(map), Some(writer)) = (
+                    self.lua.app_data_ref::<CompletionRegistry>(),
+                    self.lua.app_data_ref::<TriggerSnapshotWriter>(),
+                ) {
+                    publish_completion_snapshot(&map, &writer);
+                }
+            }
+        }
     }
 
     fn evict_warm(&self, tool_use_id: &str) {
@@ -2349,6 +2377,72 @@ fn run_describe(
     }
 }
 
+async fn resolve_completion(
+    lua: &Lua,
+    trigger: &str,
+    providers: &[CompletionProviderEntry],
+    query: &str,
+    cwd: &str,
+) -> CompletionReply {
+    let mut entries: Vec<&CompletionProviderEntry> = providers.iter().collect();
+    entries.sort_by_key(|entry| entry.plugin.as_ref());
+    let mut groups = Vec::new();
+    for entry in entries {
+        if let Some(items) =
+            run_completion_provider(lua, &entry.plugin, trigger, &entry.provider, query, cwd).await
+        {
+            groups.push(CompletionGroup {
+                provider: entry.plugin.to_string(),
+                items,
+            });
+        }
+    }
+    groups
+}
+
+async fn run_completion_provider(
+    lua: &Lua,
+    plugin: &str,
+    trigger: &str,
+    provider: &Function,
+    query: &str,
+    cwd: &str,
+) -> Option<Vec<CompletionItem>> {
+    let result: mlua::Result<LuaValue> = async {
+        let ctx = lua.create_table()?;
+        ctx.set("cwd", cwd)?;
+        let thread = lua.create_thread(provider.clone())?;
+        let async_thread = thread.into_async::<LuaValue>((query, ctx))?;
+        run_detached(lua, async_thread).await
+    }
+    .await;
+    match result {
+        Ok(value) => Some(parse_completion_items(value)),
+        Err(e) => {
+            tracing::warn!(plugin, trigger, error = %strip_traceback(&e), "completion provider failed");
+            None
+        }
+    }
+}
+
+fn parse_completion_items(value: LuaValue) -> Vec<CompletionItem> {
+    let LuaValue::Table(arr) = value else {
+        return Vec::new();
+    };
+    let mut items = Vec::new();
+    for pair in arr.sequence_values::<LuaValue>() {
+        let Ok(LuaValue::Table(item)) = pair else {
+            continue;
+        };
+        items.push(CompletionItem {
+            label: item.get("label").unwrap_or_default(),
+            insert: item.get("insert").unwrap_or_default(),
+            kind: item.get("kind").unwrap_or_default(),
+        });
+    }
+    items
+}
+
 /// Sends no `ToolSnapshot` on completion: the preview buf must stay live so
 /// the UI keeps polling it until the handler's own `LiveToolBuf` takes over.
 async fn run_tool_start(
@@ -2517,6 +2611,7 @@ pub(crate) struct LuaThread {
     pub shutdown: Arc<AtomicBool>,
     pub command_reader: LuaCommandReader,
     pub keymap_reader: KeymapReader,
+    pub completion_reader: TriggerSnapshotReader,
     pub hint_reader: crate::api::util::command::HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
 }
@@ -2538,6 +2633,7 @@ pub fn spawn(
     let (ui_action_tx, ui_action_rx) = flume::unbounded::<UiAction>();
     let (command_writer, command_reader) = LuaCommandWriter::new();
     let (keymap_writer, keymap_reader) = KeymapWriter::new();
+    let (completion_writer, completion_reader) = TriggerSnapshotWriter::new();
     let (hint_writer, hint_reader) = HintWriter::new();
 
     let handle = thread::Builder::new()
@@ -2551,6 +2647,7 @@ pub fn spawn(
                 Some(ui_action_tx),
                 command_writer,
                 keymap_writer,
+                completion_writer,
                 hint_writer,
                 jit,
                 plugin_rules,
@@ -2728,6 +2825,26 @@ pub fn spawn(
                                 })
                                 .detach();
                             }
+                        }
+                        Request::ResolveCompletion {
+                            trigger,
+                            query,
+                            cwd,
+                            reply,
+                        } => {
+                            let providers: Vec<CompletionProviderEntry> = rt
+                                .lua
+                                .app_data_ref::<CompletionRegistry>()
+                                .map(|map| map.get(&trigger).cloned().unwrap_or_default())
+                                .unwrap_or_default();
+                            let lua = rt.lua.clone();
+                            ex.spawn(async move {
+                                let groups =
+                                    resolve_completion(&lua, &trigger, &providers, &query, &cwd)
+                                        .await;
+                                let _ = reply.send(groups);
+                            })
+                            .detach();
                         }
                         Request::ComputeHeader {
                             plugin,
@@ -2910,6 +3027,7 @@ pub fn spawn(
         shutdown,
         command_reader,
         keymap_reader,
+        completion_reader,
         hint_reader,
         ui_action_rx,
     })
