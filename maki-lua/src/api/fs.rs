@@ -1,15 +1,26 @@
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fs::FileType;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use maki_lua_macro::{lua_fn, lua_table};
 use mlua::{Buffer, Lua, Result as LuaResult, Table, Value};
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::api::util::pair::{Pair, err_pair, pair, try_pair};
 use crate::plugin_permissions::PluginPermissions;
+
+const DEFAULT_MAX_DEPTH: u32 = 10;
+const DEFAULT_MAX_RESULTS: usize = 50;
+const MAX_WALK_ENTRIES: usize = 50_000;
+const GIT_DIR: &str = ".git";
+const KIND_FILE: &str = "file";
+const KIND_DIR: &str = "dir";
 
 pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -665,6 +676,147 @@ async fn grep(lua: Lua, pattern: String, opts: Option<Table>) -> LuaResult<Pair<
     Ok((Some(arr), None))
 }
 
+struct WalkEntry {
+    rel: String,
+    abs: String,
+    kind: &'static str,
+}
+
+#[derive(Default)]
+struct WalkCache(Mutex<HashMap<(PathBuf, SystemTime, u32), Vec<WalkEntry>>>);
+
+fn walk_root(root: &Path, max_depth: u32) -> Result<Vec<WalkEntry>, String> {
+    let mut entries = Vec::new();
+    walk_dir(root, root, 1, max_depth, &mut entries)?;
+    Ok(entries)
+}
+
+fn walk_dir(
+    root: &Path,
+    dir: &Path,
+    depth: u32,
+    max_depth: u32,
+    out: &mut Vec<WalkEntry>,
+) -> Result<(), String> {
+    if out.len() >= MAX_WALK_ENTRIES {
+        return Ok(());
+    }
+    let read = match std::fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) if dir == root => return Err(format!("cannot read root {}: {e}", root.display())),
+        Err(_) => return Ok(()),
+    };
+    for entry in read.flatten() {
+        if out.len() >= MAX_WALK_ENTRIES {
+            break;
+        }
+        let path = entry.path();
+        if path.file_name().is_some_and(|name| name == GIT_DIR) {
+            continue;
+        }
+        let Some(rel) = path.strip_prefix(root).ok().and_then(|p| p.to_str()) else {
+            continue;
+        };
+        let (kind, descend) = match entry.file_type() {
+            Ok(ft) if ft.is_dir() => (KIND_DIR, true),
+            Ok(ft) if ft.is_symlink() => match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_dir() => (KIND_DIR, false),
+                _ => (KIND_FILE, false),
+            },
+            _ => (KIND_FILE, false),
+        };
+        out.push(WalkEntry {
+            rel: rel.to_owned(),
+            abs: path.to_string_lossy().into_owned(),
+            kind,
+        });
+        if descend && depth < max_depth {
+            walk_dir(root, &path, depth + 1, max_depth, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn entry_table(lua: &Lua, entry: &WalkEntry) -> LuaResult<Table> {
+    let tbl = lua.create_table()?;
+    tbl.set("path", entry.abs.as_str())?;
+    tbl.set("kind", entry.kind)?;
+    Ok(tbl)
+}
+
+/// Fuzzy-search files and directories under {cwd}, like the native file picker.
+/// Results are ranked against paths relative to {cwd} and returned as absolute
+/// paths. The walk is cached by (cwd, max_depth, root mtime), so repeated calls
+/// only pay for matching. Directory symlinks are never followed and `.git` is
+/// skipped; hidden files are included.
+///
+/// @param query string Fuzzy search pattern. Empty or whitespace-only returns the first {max_results} entries in walk order.
+/// @param opts table? `cwd` (string, default process cwd): walk root; `~/` is expanded and relative paths resolve against the process cwd. `max_depth` (integer, default 10, at least 1): recursion depth, 1 = direct children. `max_results` (integer, default 50): maximum entries returned.
+/// @return (table?, string?) Array of `{path, kind}` tables with `kind` `"file"` or `"dir"`, or nil plus an error message.
+/// @example
+/// local files, err = maki.fs.fuzzy_files("auth", { cwd = "." })
+/// if err then return end
+/// for _, entry in ipairs(files) do print(entry.path, entry.kind) end
+#[lua_fn(guard = FsRead)]
+fn fuzzy_files(lua: &Lua, query: String, opts: Option<Table>) -> LuaResult<Pair<Table>> {
+    let opts = opts.as_ref();
+    let root = match opts.and_then(|t| t.get::<String>("cwd").ok()) {
+        Some(cwd) => make_absolute(&cwd)?,
+        None => std::env::current_dir()
+            .map_err(|e| mlua::Error::runtime(format!("cannot resolve cwd: {e}")))?,
+    };
+    let max_depth = opts
+        .and_then(|t| t.get::<u32>("max_depth").ok())
+        .unwrap_or(DEFAULT_MAX_DEPTH);
+    if max_depth == 0 {
+        return Ok(err_pair("max_depth must be at least 1"));
+    }
+    let max_results = opts
+        .and_then(|t| t.get::<usize>("max_results").ok())
+        .unwrap_or(DEFAULT_MAX_RESULTS);
+
+    let mtime = match std::fs::metadata(&root).and_then(|meta| meta.modified()) {
+        Ok(mtime) => mtime,
+        Err(e) => return Ok(err_pair(format!("cannot stat root {}: {e}", root.display()))),
+    };
+    if lua.app_data_ref::<WalkCache>().is_none() {
+        lua.set_app_data(WalkCache::default());
+    }
+    let cache = lua
+        .app_data_mut::<WalkCache>()
+        .expect("walk cache just ensured");
+    let mut guard = cache.0.lock().expect("walk cache poisoned");
+    let entries = match guard.entry((root.clone(), mtime, max_depth)) {
+        Entry::Occupied(slot) => slot.into_mut(),
+        Entry::Vacant(slot) => slot.insert(try_pair!(walk_root(&root, max_depth))),
+    };
+
+    let arr = lua.create_table()?;
+    let query = query.trim();
+    if query.is_empty() {
+        for (i, entry) in entries.iter().take(max_results).enumerate() {
+            arr.set(i + 1, entry_table(lua, entry)?)?;
+        }
+        return Ok((Some(arr), None));
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let mut buf = Vec::new();
+    let mut scored: Vec<(u32, &WalkEntry)> = entries
+        .iter()
+        .filter_map(|entry| {
+            pattern
+                .score(Utf32Str::new(entry.rel.as_str(), &mut buf), &mut matcher)
+                .map(|score| (score, entry))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    for (i, (_, entry)) in scored.iter().take(max_results).enumerate() {
+        arr.set(i + 1, entry_table(lua, entry)?)?;
+    }
+    Ok((Some(arr), None))
+}
+
 lua_table! {
     /// File-system utilities, modelled after `vim.fs` and `vim.uv`.
     ///
@@ -679,13 +831,13 @@ lua_table! {
         read(perms), read_bytes(perms), metadata(perms), dirname, basename,
         joinpath, normalize, abspath, parents, root(perms), relpath, ext,
         dir(perms), write(perms), atomic_write(perms), rm(perms), mkdir(perms),
-        glob(perms), grep(perms),
+        glob(perms), grep(perms), fuzzy_files(perms),
     ]
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs::OpenOptions;
+    use std::fs::{File, OpenOptions};
     use std::time::{Duration, SystemTime};
 
     use super::*;
@@ -696,6 +848,7 @@ mod tests {
     const FIRST_CONTENT: &str = "first";
     const REPLACEMENT_CONTENT: &str = "replacement";
     const FS_WRITE_PERMISSION: &str = "fs_write";
+    const FS_READ_PERMISSION: &str = "fs_read";
 
     #[test]
     fn read_file_ok() {
@@ -1526,5 +1679,254 @@ mod tests {
         let (val, err) = grep_call(&tbl, "[invalid", opts);
         assert_eq!(val, mlua::Value::Nil);
         assert!(matches!(err, mlua::Value::String(_)));
+    }
+
+    fn call_fuzzy(lua: &Lua, query: &str, opts: Option<Table>) -> (Option<Table>, Value) {
+        let tbl = create_fs_table(lua, &PluginPermissions::trusted()).unwrap();
+        let f: mlua::Function = tbl.get("fuzzy_files").unwrap();
+        match opts {
+            Some(o) => f.call((query, o)).unwrap(),
+            None => f.call(query).unwrap(),
+        }
+    }
+
+    fn extract_entries(tbl: &Table) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for i in 1..=tbl.len().unwrap() {
+            let e: Table = tbl.get(i).unwrap();
+            out.push((
+                e.get::<String>("path").unwrap(),
+                e.get::<String>("kind").unwrap(),
+            ));
+        }
+        out
+    }
+
+    fn extract_paths(tbl: &Table) -> Vec<String> {
+        extract_entries(tbl)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect()
+    }
+
+    #[test]
+    fn fuzzy_files_respects_max_depth() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("top.txt"), "").unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("inner.txt"), "").unwrap();
+        std::fs::write(sub.join("deep.txt"), "").unwrap();
+
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+        opts.set("max_depth", 1u32).unwrap();
+        let (result, err) = call_fuzzy(&lua, "", Some(opts));
+        assert!(matches!(err, Value::Nil));
+        let paths = extract_paths(&result.unwrap());
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|p| !p.ends_with("inner.txt") && !p.ends_with("deep.txt")));
+
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+        opts.set("max_depth", 2u32).unwrap();
+        let (result, err) = call_fuzzy(&lua, "", Some(opts));
+        assert!(matches!(err, Value::Nil));
+        let paths = extract_paths(&result.unwrap());
+        assert_eq!(paths.len(), 4);
+        assert!(paths.iter().any(|p| p.ends_with("inner.txt")));
+        assert!(paths.iter().any(|p| p.ends_with("deep.txt")));
+    }
+
+    #[test]
+    fn fuzzy_files_skips_git_and_keeps_hidden() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join(".git/config"), "").unwrap();
+        std::fs::write(tmp.path().join(".hidden"), "").unwrap();
+        std::fs::write(tmp.path().join("visible.txt"), "").unwrap();
+
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+        let (result, err) = call_fuzzy(&lua, "", Some(opts));
+        assert!(matches!(err, Value::Nil));
+        let paths = extract_paths(&result.unwrap());
+        assert!(paths.iter().any(|p| p.ends_with(".hidden")));
+        assert!(paths.iter().any(|p| p.ends_with("visible.txt")));
+        assert!(paths.iter().all(|p| !p.contains(".git")));
+    }
+
+    #[test]
+    fn fuzzy_files_stops_at_entry_cap() {
+        let tmp = TempDir::new().unwrap();
+        for i in 0..MAX_WALK_ENTRIES + 1 {
+            File::create(tmp.path().join(format!("f{i:05}"))).unwrap();
+        }
+
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+        opts.set("max_results", MAX_WALK_ENTRIES).unwrap();
+        let (result, err) = call_fuzzy(&lua, "", Some(opts));
+        assert!(matches!(err, Value::Nil));
+        assert_eq!(result.unwrap().len().unwrap(), MAX_WALK_ENTRIES as i64);
+    }
+
+    #[test]
+    fn fuzzy_files_cache_hit_skips_walk() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+        let before = std::fs::metadata(tmp.path()).unwrap().modified().unwrap();
+
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+
+        let (result, _) = call_fuzzy(&lua, "", Some(opts.clone()));
+        assert_eq!(extract_paths(&result.unwrap()).len(), 1);
+
+        std::fs::write(tmp.path().join("b.txt"), "").unwrap();
+        let times = std::fs::FileTimes::new().set_modified(before);
+        File::open(tmp.path()).unwrap().set_times(times).unwrap();
+        let (result, _) = call_fuzzy(&lua, "", Some(opts.clone()));
+        assert_eq!(
+            extract_paths(&result.unwrap()).len(),
+            1,
+            "cache hit must not include b.txt"
+        );
+
+        let times = std::fs::FileTimes::new().set_modified(before + Duration::from_secs(1));
+        File::open(tmp.path()).unwrap().set_times(times).unwrap();
+        let (result, _) = call_fuzzy(&lua, "", Some(opts));
+        assert_eq!(
+            extract_paths(&result.unwrap()).len(),
+            2,
+            "mtime change must re-walk"
+        );
+    }
+
+    #[test]
+    fn fuzzy_files_empty_query_keeps_walk_order() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("zebra.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("alpha.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("mango.txt"), "").unwrap();
+
+        let walked: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+        for query in ["", "   "] {
+            let (result, err) = call_fuzzy(&lua, query, Some(opts.clone()));
+            assert!(matches!(err, Value::Nil));
+            let names: Vec<String> = extract_paths(&result.unwrap())
+                .iter()
+                .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, walked, "query {query:?} must keep walk order");
+        }
+    }
+
+    #[test]
+    fn fuzzy_files_ranks_matching_files_first() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("auth.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("oauth.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("session.rs"), "").unwrap();
+
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+        let (result, err) = call_fuzzy(&lua, "auth", Some(opts));
+        assert!(matches!(err, Value::Nil));
+        let paths = extract_paths(&result.unwrap());
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].ends_with("auth.rs"), "prefix match must rank first");
+    }
+
+    #[test]
+    fn fuzzy_files_respects_max_results() {
+        let tmp = TempDir::new().unwrap();
+        for i in 0..10 {
+            std::fs::write(tmp.path().join(format!("file{i}.txt")), "").unwrap();
+        }
+
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+        opts.set("max_results", 3usize).unwrap();
+        for query in ["", "file"] {
+            let (result, err) = call_fuzzy(&lua, query, Some(opts.clone()));
+            assert!(matches!(err, Value::Nil));
+            assert_eq!(result.unwrap().len().unwrap(), 3);
+        }
+    }
+
+    #[test]
+    fn fuzzy_files_missing_root_returns_nil_err() {
+        let tmp = TempDir::new().unwrap();
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().join("nope").to_str().unwrap()).unwrap();
+        let (result, err) = call_fuzzy(&lua, "", Some(opts));
+        assert!(result.is_none());
+        assert!(matches!(err, Value::String(_)));
+    }
+
+    #[test]
+    fn fuzzy_files_rejects_zero_max_depth() {
+        let tmp = TempDir::new().unwrap();
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", tmp.path().to_str().unwrap()).unwrap();
+        opts.set("max_depth", 0u32).unwrap();
+        let (result, err) = call_fuzzy(&lua, "", Some(opts));
+        assert!(result.is_none());
+        assert!(matches!(err, Value::String(_)));
+    }
+
+    #[test]
+    fn fuzzy_files_requires_fs_read_permission() {
+        let lua = Lua::new();
+        let tbl = create_fs_table(&lua, &PluginPermissions::denied()).unwrap();
+        let f: mlua::Function = tbl.get("fuzzy_files").unwrap();
+        let error = f.call::<(Value, Value)>("").unwrap_err();
+        assert!(error.to_string().contains(FS_READ_PERMISSION));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fuzzy_files_does_not_follow_dir_symlinks() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let secret = tmp.path().join("secret_dir");
+        std::fs::create_dir(&secret).unwrap();
+        std::fs::write(secret.join("secret.txt"), "").unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("link")).unwrap();
+        std::fs::write(root.join("file_target.txt"), "").unwrap();
+        std::os::unix::fs::symlink("file_target.txt", root.join("file_link.txt")).unwrap();
+
+        let lua = Lua::new();
+        let opts = lua.create_table().unwrap();
+        opts.set("cwd", root.to_str().unwrap()).unwrap();
+        let (result, err) = call_fuzzy(&lua, "", Some(opts));
+        assert!(matches!(err, Value::Nil));
+        let entries = extract_entries(&result.unwrap());
+        let paths: Vec<String> = entries.iter().map(|(p, _)| p.clone()).collect();
+        assert!(
+            !paths.iter().any(|p| p.ends_with("secret.txt")),
+            "dir symlink must not be descended"
+        );
+        let link_idx = paths.iter().position(|p| p.ends_with("link")).unwrap();
+        assert_eq!(entries[link_idx].1, KIND_DIR);
+        let file_link_idx = paths.iter().position(|p| p.ends_with("file_link.txt")).unwrap();
+        assert_eq!(entries[file_link_idx].1, KIND_FILE);
     }
 }
