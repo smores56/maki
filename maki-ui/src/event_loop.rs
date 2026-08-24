@@ -25,7 +25,7 @@ use maki_agent::{
 use maki_config::{ModelPolicy, UiConfig};
 use maki_lua::{
     EventHandle, HintReader, KeymapReader, LuaCommandReader, ModelRequest, SessionRequest,
-    UiAction, UiReply,
+    TriggerSnapshotReader, UiAction, UiReply,
 };
 use maki_providers::Timeouts;
 use maki_providers::provider::{Provider, fetch_all_models, from_model};
@@ -83,6 +83,7 @@ pub struct EventLoopParams {
     pub timeouts: Timeouts,
     pub exit_on_done: bool,
     pub lua_command_reader: LuaCommandReader,
+    pub trigger_reader: TriggerSnapshotReader,
     pub keymap_reader: KeymapReader,
     pub hint_reader: HintReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
@@ -305,6 +306,7 @@ struct SpawnCtx {
     timeouts: Timeouts,
     custom_commands: Arc<[CustomCommand]>,
     lua_command_reader: LuaCommandReader,
+    trigger_reader: TriggerSnapshotReader,
     keymap_reader: KeymapReader,
     hint_reader: HintReader,
     lua_event_handle: EventHandle,
@@ -341,6 +343,7 @@ impl SpawnCtx {
             handles.mcp_reader(),
             handles.mcp_config_errors.clone(),
             self.lua_command_reader.clone(),
+            self.trigger_reader.clone(),
             self.keymap_reader.clone(),
             self.hint_reader.clone(),
             Arc::clone(&self.storage_writer),
@@ -488,6 +491,7 @@ impl<'t> EventLoop<'t> {
             timeouts,
             exit_on_done,
             lua_command_reader,
+            trigger_reader,
             keymap_reader,
             hint_reader,
             ui_action_rx,
@@ -541,6 +545,7 @@ impl<'t> EventLoop<'t> {
             timeouts,
             custom_commands: Arc::from(commands),
             lua_command_reader,
+            trigger_reader,
             keymap_reader,
             hint_reader,
             lua_event_handle,

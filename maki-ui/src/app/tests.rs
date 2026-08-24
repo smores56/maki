@@ -19,12 +19,13 @@ use maki_agent::{
 use maki_config::{PermissionsConfig, UiConfig};
 use maki_lua::test_support::{HintWriterHandle, hint_writer_pair};
 use maki_lua::{BuiltinAction, HintReader, KeymapReader, LuaCommandInfo, LuaCommandReader};
+use maki_lua::{PluginHost, TriggerSnapshotReader};
 use maki_providers::{ContentBlock, Effort, Message, Role, THINKING_USAGE, TokenUsage};
 use maki_storage::sessions::{StoredMode, StoredThinking};
 use ratatui::layout::Rect;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use test_case::test_case;
 
@@ -54,13 +55,21 @@ fn set_zone(app: &mut App, zone: SelectionZone, area: Rect) {
 }
 
 fn build_app(dir: StateDir, writer: Arc<StorageWriter>) -> App {
-    build_app_with_lua(dir, writer, LuaCommandReader::empty())
+    build_app_with_lua(
+        dir,
+        writer,
+        LuaCommandReader::empty(),
+        TriggerSnapshotReader::empty(),
+        maki_lua::EventHandle::disconnected_for_test(),
+    )
 }
 
 fn build_app_with_lua(
     dir: StateDir,
     writer: Arc<StorageWriter>,
     lua_commands: LuaCommandReader,
+    trigger_reader: TriggerSnapshotReader,
+    event_handle: maki_lua::EventHandle,
 ) -> App {
     let model = test_model();
     App::new(
@@ -71,6 +80,7 @@ fn build_app_with_lua(
         McpSnapshotReader::empty(),
         McpConfigErrors::new(PathBuf::new()),
         lua_commands,
+        trigger_reader,
         KeymapReader::empty(),
         HintReader::empty(),
         writer,
@@ -85,7 +95,7 @@ fn build_app_with_lua(
             Arc::default(),
         )),
         Arc::from([]),
-        maki_lua::EventHandle::disconnected_for_test(),
+        event_handle,
         Arc::new(maki_config::ModelPolicy::default()),
     )
 }
@@ -776,6 +786,164 @@ fn tab_in_palette_completes_command() {
     app.update(Msg::Key(key(KeyCode::Tab)));
     let val = app.input_box.buffer.value();
     assert!(val.starts_with('/'));
+}
+
+const COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
+const COMPLETION_PROVIDER: &str = r#"
+maki.api.register_completion({
+    trigger = "@",
+    provider = function(query, ctx)
+        return { { label = query .. "|" .. ctx.cwd, insert = "@" .. query .. ".rs", kind = "file" } }
+    end,
+})
+"#;
+
+fn host_with_completion(source: &str) -> PluginHost {
+    let host = PluginHost::new(Arc::new(maki_agent::tools::ToolRegistry::new())).unwrap();
+    host.load_source("picker", source).unwrap();
+    host
+}
+
+fn app_with_completion_host(host: &PluginHost) -> App {
+    let dir = StateDir::from_path(env::temp_dir());
+    let mut app = build_app_with_lua(
+        dir.clone(),
+        Arc::new(test_writer(dir)),
+        LuaCommandReader::empty(),
+        host.completion_reader(),
+        host.event_handle(),
+    );
+    let (shared_queue, _rx) = shared_queue::queue();
+    app.queue.set_shared(shared_queue);
+    app
+}
+
+/// The runtime answers on its own thread; this waits for the palette to
+/// drain a reply the same way the event loop does, with a deadline instead
+/// of a hang when the hop is missing.
+fn wait_for_mention(app: &mut App) {
+    let deadline = Instant::now() + COMPLETION_TIMEOUT;
+    while app.command_palette.match_count() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "completion reply never populated the popup"
+        );
+        let _ = app.tick();
+        std::thread::yield_now();
+    }
+}
+
+fn wait_for_mention_settle(app: &mut App) {
+    let deadline = Instant::now() + COMPLETION_TIMEOUT;
+    while app.command_palette.mention_pending() {
+        assert!(Instant::now() < deadline, "completion reply never settled");
+        let _ = app.tick();
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn mention_resolves_query_and_cwd_then_enter_replaces_token() {
+    let host = host_with_completion(COMPLETION_PROVIDER);
+    let mut app = app_with_completion_host(&host);
+    for c in "@src/fo".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    assert!(app.command_palette.is_active());
+    assert!(app.command_palette.mention_pending());
+
+    wait_for_mention(&mut app);
+    assert_eq!(
+        app.command_palette.match_label(0).as_deref(),
+        Some("src/fo|/tmp/test"),
+        "query and session cwd must reach the provider"
+    );
+
+    app.update(Msg::Key(key(KeyCode::Enter)));
+    assert_eq!(app.input_box.buffer.value(), "@src/fo.rs ");
+    assert_eq!(app.input_box.buffer.cursor_char_index(), 11);
+    assert!(
+        !app.command_palette.is_active(),
+        "popup closes after completion"
+    );
+}
+
+#[test]
+fn mention_no_match_enter_is_consumed() {
+    let host = host_with_completion(
+        r#"maki.api.register_completion({ trigger = "@", provider = function() return {} end })"#,
+    );
+    let mut app = app_with_completion_host(&host);
+    for c in "@zzz".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    wait_for_mention_settle(&mut app);
+
+    let actions = app.update(Msg::Key(key(KeyCode::Enter)));
+    assert!(actions.is_empty(), "no-match Enter must not submit");
+    assert_eq!(app.input_box.buffer.value(), "@zzz");
+    assert!(app.command_palette.is_active(), "empty popup stays open");
+}
+
+#[test]
+fn mention_esc_closes_without_touching_input() {
+    let host = host_with_completion(COMPLETION_PROVIDER);
+    let mut app = app_with_completion_host(&host);
+    for c in "@src".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    assert!(app.command_palette.is_active());
+
+    app.update(Msg::Key(key(KeyCode::Esc)));
+    assert!(!app.command_palette.is_active());
+    assert_eq!(app.input_box.buffer.value(), "@src");
+}
+
+#[test]
+fn mention_backspace_and_fix_reopens_with_new_query() {
+    let host = host_with_completion(COMPLETION_PROVIDER);
+    let mut app = app_with_completion_host(&host);
+    for c in "@src".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    wait_for_mention(&mut app);
+
+    app.update(Msg::Key(key(KeyCode::Backspace)));
+    app.update(Msg::Key(key(KeyCode::Backspace)));
+    assert!(
+        app.command_palette.is_active(),
+        "cursor inside the token stays active"
+    );
+    wait_for_mention(&mut app);
+    assert_eq!(
+        app.command_palette.match_label(0).as_deref(),
+        Some("s|/tmp/test"),
+        "backspace must re-resolve with the shortened query"
+    );
+}
+
+#[test]
+fn mention_does_not_trigger_in_bash_input() {
+    let host = host_with_completion(COMPLETION_PROVIDER);
+    let mut app = app_with_completion_host(&host);
+    for c in "!echo @foo".chars() {
+        app.update(Msg::Key(key(KeyCode::Char(c))));
+    }
+    assert!(!app.command_palette.is_active());
+    assert!(!app.command_palette.mention_pending());
+    assert_eq!(app.input_box.buffer.value(), "!echo @foo");
+}
+
+#[test]
+fn slash_commands_unchanged_with_mention_corpus() {
+    let host = host_with_completion(COMPLETION_PROVIDER);
+    let mut app = app_with_completion_host(&host);
+    type_slash(&mut app);
+    app.update(Msg::Key(key(KeyCode::Char('n'))));
+    assert!(app.command_palette.is_active());
+    let actions = app.update(Msg::Key(key(KeyCode::Enter)));
+    assert!(matches!(&actions[0], Action::NewSession));
+    assert!(!app.command_palette.is_active());
 }
 
 #[test]
@@ -2581,6 +2749,8 @@ fn typed_lua_command_with_args_executes() {
             plugin: "sessions".into(),
             max_args: usize::MAX,
         }]),
+        TriggerSnapshotReader::empty(),
+        maki_lua::EventHandle::disconnected_for_test(),
     );
     let (handle, probe) = maki_lua::test_support::probed_event_handle();
     app.lua_event_handle = handle;
@@ -2671,6 +2841,8 @@ fn run_cmdline_forwards_depth_to_lua_command() {
             plugin: "sessions".into(),
             max_args: 0,
         }]),
+        TriggerSnapshotReader::empty(),
+        maki_lua::EventHandle::disconnected_for_test(),
     );
     let (handle, probe) = maki_lua::test_support::probed_event_handle();
     app.lua_event_handle = handle;

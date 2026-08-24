@@ -105,7 +105,6 @@ impl TextBuffer {
     /// range end shifts by the length delta; a cursor inside the range lands
     /// at the range start plus the inserted length; a cursor at or before the
     /// start stays put.
-    #[allow(dead_code)]
     pub fn replace_range(&mut self, start: usize, end: usize, text: &str) {
         let value = self.value();
         let byte_start = Self::char_to_byte(&value, start);

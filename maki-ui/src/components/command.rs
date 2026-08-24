@@ -4,7 +4,9 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent};
 use maki_agent::command::CustomCommand;
 use maki_agent::{McpPromptInfo, McpSnapshotReader};
-use maki_lua::{LuaCommandInfo, LuaCommandReader};
+use maki_lua::{
+    CompletionReply, EventHandle, LuaCommandInfo, LuaCommandReader, TriggerSnapshotReader,
+};
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Matcher, Nucleo, Utf32String};
 use ratatui::Frame;
@@ -13,9 +15,15 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
+use crate::repaint::Dirty;
+use crate::text_buffer::TextBuffer;
 use crate::theme;
 
 const TICK_TIMEOUT_MS: u64 = 10;
+const PAD: usize = 1;
+const GAP: usize = 2;
+const MENTION_LOADING_ROW: &str = "…";
+const MENTION_EMPTY_ROW: &str = "no matches";
 
 pub struct BuiltinCommand {
     pub name: &'static str,
@@ -125,6 +133,11 @@ pub enum CommandAction {
     Consumed,
     Execute(ParsedCommand),
     Complete(String),
+    CompleteRange {
+        start: usize,
+        end: usize,
+        text: String,
+    },
     Passthrough,
 }
 
@@ -134,6 +147,21 @@ enum CommandType {
     Custom(usize),
     McpPrompt(usize),
     Lua(usize),
+    Mention(usize),
+}
+
+struct MentionItem {
+    label: String,
+    insert: String,
+    kind: String,
+}
+
+enum MentionState {
+    Pending {
+        generation: u64,
+        rx: flume::Receiver<CompletionReply>,
+    },
+    Settled,
 }
 
 struct CommandItem {
@@ -157,9 +185,19 @@ pub struct CommandPalette {
     lua_reader: LuaCommandReader,
     lua_commands: Vec<LuaCommandInfo>,
     lua_generation: u64,
+    trigger_reader: TriggerSnapshotReader,
+    triggers: Vec<String>,
+    trigger_generation: u64,
+    mention_items: Vec<MentionItem>,
+    mention_query: String,
+    mention_range: Option<(usize, usize)>,
+    mention_state: Option<MentionState>,
+    mention_generation: u64,
+    active_trigger: Option<char>,
     nucleo: Nucleo<CommandItem>,
     matcher: Matcher,
     current_arg_count: usize,
+    event_handle: EventHandle,
 }
 
 impl CommandPalette {
@@ -167,6 +205,8 @@ impl CommandPalette {
         custom_commands: Arc<[CustomCommand]>,
         mcp_reader: McpSnapshotReader,
         lua_reader: LuaCommandReader,
+        trigger_reader: TriggerSnapshotReader,
+        event_handle: EventHandle,
     ) -> Self {
         let snap = mcp_reader.load();
         let mcp_generation = snap.generation;
@@ -176,7 +216,11 @@ impl CommandPalette {
         let lua_generation = lua_snap.generation;
         let lua_commands = lua_snap.commands.clone();
 
-        let nucleo = Self::build_nucleo(&custom_commands, &prompts, &lua_commands);
+        let trigger_snap = trigger_reader.load();
+        let trigger_generation = trigger_snap.generation;
+        let triggers = trigger_snap.triggers.clone();
+
+        let nucleo = Self::build_nucleo(&custom_commands, &prompts, &lua_commands, &[]);
         Self {
             selected: 0,
             filtered: Vec::new(),
@@ -187,18 +231,29 @@ impl CommandPalette {
             lua_reader,
             lua_commands,
             lua_generation,
+            trigger_reader,
+            triggers,
+            trigger_generation,
+            mention_items: Vec::new(),
+            mention_query: String::new(),
+            mention_range: None,
+            mention_state: None,
+            mention_generation: 0,
+            active_trigger: None,
             nucleo,
             matcher: Matcher::new(Config::DEFAULT),
             current_arg_count: 0,
+            event_handle,
         }
     }
 
-    /// Every command the palette knows, in display order. The one place that
-    /// enumerates the four sources: matching and name lookup both read it.
+    /// Every item the palette matches, in display order. The one place that
+    /// enumerates the sources: matching and name lookup both read it.
     fn items<'a>(
         custom_commands: &'a [CustomCommand],
         mcp_prompts: &'a [McpPromptInfo],
         lua_commands: &'a [LuaCommandInfo],
+        mention_items: &'a [MentionItem],
     ) -> impl Iterator<Item = CommandItem> + 'a {
         let builtins = BUILTIN_COMMANDS.iter().map(|cmd| CommandItem {
             name: cmd.name.to_string(),
@@ -227,18 +282,31 @@ impl CommandPalette {
             max_args: cmd.max_args,
             command_type: CommandType::Lua(i),
         });
-        builtins.chain(custom).chain(prompts).chain(lua)
+        let mentions = mention_items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| CommandItem {
+                name: item.label.clone(),
+                max_args: usize::MAX,
+                command_type: CommandType::Mention(i),
+            });
+        builtins
+            .chain(custom)
+            .chain(prompts)
+            .chain(lua)
+            .chain(mentions)
     }
 
     fn build_nucleo(
         custom_commands: &[CustomCommand],
         mcp_prompts: &[McpPromptInfo],
         lua_commands: &[LuaCommandInfo],
+        mention_items: &[MentionItem],
     ) -> Nucleo<CommandItem> {
         let nucleo = Nucleo::new(Config::DEFAULT, Arc::new(|| {}), None, 1);
         let injector = nucleo.injector();
 
-        for item in Self::items(custom_commands, mcp_prompts, lua_commands) {
+        for item in Self::items(custom_commands, mcp_prompts, lua_commands, mention_items) {
             injector.push(item, |item, cols| {
                 cols[0] = Utf32String::from(item.name.as_str());
             });
@@ -251,6 +319,7 @@ impl CommandPalette {
         if !self.is_active() {
             return CommandAction::Passthrough;
         }
+        let mention_mode = self.mention_trigger().is_some();
         match key.code {
             KeyCode::Up => {
                 self.move_up();
@@ -264,15 +333,23 @@ impl CommandPalette {
                 self.close();
                 CommandAction::Consumed
             }
-            KeyCode::Enter => match self.confirm(input) {
-                Some(cmd) => {
-                    self.close();
-                    CommandAction::Execute(cmd)
+            KeyCode::Enter => {
+                if mention_mode {
+                    self.complete_mention(self.selected)
+                } else {
+                    match self.confirm(input) {
+                        Some(cmd) => {
+                            self.close();
+                            CommandAction::Execute(cmd)
+                        }
+                        None => CommandAction::Consumed,
+                    }
                 }
-                None => CommandAction::Consumed,
-            },
+            }
             KeyCode::Tab => {
-                if let Some(item) = self.filtered.get(self.selected) {
+                if mention_mode {
+                    self.complete_mention(0)
+                } else if let Some(item) = self.filtered.get(self.selected) {
                     let name = self.item_name(item);
                     let text = if self.item_has_args(item) {
                         format!("{name} ")
@@ -289,26 +366,69 @@ impl CommandPalette {
     }
 
     pub fn is_active(&self) -> bool {
-        !self.filtered.is_empty()
+        match self.active_trigger {
+            Some('/') => !self.filtered.is_empty(),
+            Some(_) => true,
+            None => false,
+        }
     }
 
-    pub fn sync(&mut self, input: &str) {
+    pub(crate) fn mention_pending(&self) -> bool {
+        matches!(self.mention_state, Some(MentionState::Pending { .. }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn match_count(&self) -> usize {
+        self.filtered.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn match_label(&self, index: usize) -> Option<String> {
+        self.filtered.get(index).map(|m| self.item_name(m))
+    }
+
+    pub fn sync(&mut self, input: &str, cursor: usize, cwd: &str) {
         let mcp_snap = self.mcp_reader.load();
         let lua_snap = self.lua_reader.load();
-        if mcp_snap.generation != self.mcp_generation || lua_snap.generation != self.lua_generation
+        let trigger_snap = self.trigger_reader.load();
+        if mcp_snap.generation != self.mcp_generation
+            || lua_snap.generation != self.lua_generation
+            || trigger_snap.generation != self.trigger_generation
         {
             self.mcp_generation = mcp_snap.generation;
             self.mcp_prompts = mcp_snap.prompts.clone();
             self.lua_generation = lua_snap.generation;
             self.lua_commands = lua_snap.commands.clone();
-            self.nucleo = Self::build_nucleo(&self.custom, &self.mcp_prompts, &self.lua_commands);
+            self.trigger_generation = trigger_snap.generation;
+            self.triggers = trigger_snap.triggers.clone();
+            self.nucleo = Self::build_nucleo(
+                &self.custom,
+                &self.mcp_prompts,
+                &self.lua_commands,
+                &self.mention_items,
+            );
         }
-        let Some(stripped) = input.strip_prefix('/') else {
-            self.filtered.clear();
-            self.current_arg_count = 0;
+
+        if input.starts_with('/') {
+            self.mention_state = None;
+            self.active_trigger = Some('/');
+            self.sync_slash(input);
+            return;
+        }
+
+        let Some((trigger, start, end)) = trigger_at(input, cursor, &self.triggers) else {
+            self.close();
             return;
         };
+        if trigger == '/' {
+            self.close();
+            return;
+        }
+        self.start_mention(trigger, start, end, input, cwd);
+    }
 
+    fn sync_slash(&mut self, input: &str) {
+        let stripped = &input[1..];
         let parts: Vec<&str> = stripped.split_whitespace().collect();
         let cmd_word = parts.first().copied().unwrap_or(stripped);
         let trailing_space = stripped.ends_with(char::is_whitespace);
@@ -327,10 +447,91 @@ impl CommandPalette {
             false,
         );
 
-        self.tick();
+        self.tick_nucleo();
     }
 
-    fn tick(&mut self) {
+    fn start_mention(&mut self, trigger: char, start: usize, end: usize, input: &str, cwd: &str) {
+        self.mention_range = Some((start, end));
+        self.mention_items.clear();
+        self.mention_query = input
+            [TextBuffer::char_to_byte(input, start + 1)..TextBuffer::char_to_byte(input, end)]
+            .to_string();
+        self.filtered.clear();
+        self.selected = 0;
+        self.active_trigger = Some(trigger);
+
+        if self.event_handle.is_disconnected() {
+            self.mention_state = Some(MentionState::Settled);
+        } else {
+            self.mention_generation += 1;
+            let rx = self.event_handle.resolve_completion(
+                &trigger.to_string(),
+                &self.mention_query,
+                cwd,
+            );
+            self.mention_state = Some(MentionState::Pending {
+                generation: self.mention_generation,
+                rx,
+            });
+        }
+    }
+
+    fn apply_mention_reply(&mut self, reply: CompletionReply) {
+        self.mention_items = reply
+            .into_iter()
+            .flat_map(|group| {
+                group.items.into_iter().map(|item| MentionItem {
+                    label: item.label,
+                    insert: item.insert,
+                    kind: item.kind,
+                })
+            })
+            .collect();
+        self.nucleo = Self::build_nucleo(
+            &self.custom,
+            &self.mcp_prompts,
+            &self.lua_commands,
+            &self.mention_items,
+        );
+        self.nucleo.pattern.reparse(
+            0,
+            &self.mention_query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            false,
+        );
+        self.tick_nucleo();
+    }
+
+    fn drain_mentions(&mut self) -> bool {
+        let Some(MentionState::Pending { generation, rx }) = self.mention_state.take() else {
+            return false;
+        };
+        if generation != self.mention_generation {
+            return false;
+        }
+        let mut applied = false;
+        loop {
+            match rx.try_recv() {
+                Ok(reply) => {
+                    self.apply_mention_reply(reply);
+                    applied = true;
+                }
+                Err(flume::TryRecvError::Empty) => break,
+                Err(flume::TryRecvError::Disconnected) => break,
+            }
+        }
+        if !applied {
+            self.mention_state = Some(MentionState::Pending { generation, rx });
+        }
+        applied
+    }
+
+    pub fn tick(&mut self) -> Dirty {
+        Dirty::from(self.drain_mentions())
+    }
+
+    fn tick_nucleo(&mut self) {
         loop {
             let status = self.nucleo.tick(TICK_TIMEOUT_MS);
             if status.changed {
@@ -346,12 +547,16 @@ impl CommandPalette {
         let snapshot = self.nucleo.snapshot();
         let pattern = snapshot.pattern();
         let has_pattern = !pattern.column_pattern(0).atoms.is_empty();
+        let mention_mode = self.mention_trigger().is_some();
 
         self.filtered.clear();
         let count = snapshot.matched_item_count();
         for item in snapshot.matched_items(0..count) {
             let cmd_item = &item.data;
             let col = &item.matcher_columns[0];
+            if matches!(cmd_item.command_type, CommandType::Mention(_)) != mention_mode {
+                continue;
+            }
 
             if self.current_arg_count > cmd_item.max_args {
                 continue;
@@ -381,6 +586,9 @@ impl CommandPalette {
     pub fn close(&mut self) {
         self.filtered.clear();
         self.current_arg_count = 0;
+        self.active_trigger = None;
+        self.mention_state = None;
+        self.mention_range = None;
     }
 
     pub fn move_up(&mut self) {
@@ -411,6 +619,7 @@ impl CommandPalette {
             CommandType::Custom(i) => self.custom[*i].display_name(),
             CommandType::McpPrompt(i) => format!("/{}", self.mcp_prompts[*i].display_name),
             CommandType::Lua(i) => self.lua_commands[*i].name.to_string(),
+            CommandType::Mention(i) => self.mention_items[*i].label.clone(),
         }
     }
 
@@ -420,6 +629,7 @@ impl CommandPalette {
             CommandType::Custom(i) => self.custom[*i].has_args(),
             CommandType::McpPrompt(i) => !self.mcp_prompts[*i].arguments.is_empty(),
             CommandType::Lua(i) => self.lua_commands[*i].max_args > 0,
+            CommandType::Mention(_) => false,
         }
     }
 
@@ -429,7 +639,36 @@ impl CommandPalette {
             CommandType::Custom(i) => &self.custom[*i].description,
             CommandType::McpPrompt(i) => &self.mcp_prompts[*i].description,
             CommandType::Lua(i) => &self.lua_commands[*i].description,
+            CommandType::Mention(_) => "",
         }
+    }
+
+    fn mention_item(&self, m: &Match) -> Option<&MentionItem> {
+        match &m.command_type {
+            CommandType::Mention(i) => self.mention_items.get(*i),
+            _ => None,
+        }
+    }
+
+    fn mention_trigger(&self) -> Option<char> {
+        match self.active_trigger {
+            Some(t) if t != '/' => Some(t),
+            _ => None,
+        }
+    }
+
+    fn complete_mention(&self, index: usize) -> CommandAction {
+        let Some(item) = self.filtered.get(index).and_then(|m| self.mention_item(m)) else {
+            return CommandAction::Consumed;
+        };
+        let Some((start, end)) = self.mention_range else {
+            return CommandAction::Consumed;
+        };
+        let mut text = item.insert.clone();
+        if !text.ends_with(char::is_whitespace) {
+            text.push(' ');
+        }
+        CommandAction::CompleteRange { start, end, text }
     }
 
     pub fn confirm(&self, input: &str) -> Option<ParsedCommand> {
@@ -451,9 +690,15 @@ impl CommandPalette {
     /// typing, but never fuzzy: an alias names one command on purpose, and a
     /// typo should report itself instead of running the closest neighbor.
     pub fn resolve(&self, name: &str) -> Option<String> {
-        Self::items(&self.custom, &self.mcp_prompts, &self.lua_commands)
-            .map(|item| item.name)
-            .find(|n| n.eq_ignore_ascii_case(name))
+        Self::items(
+            &self.custom,
+            &self.mcp_prompts,
+            &self.lua_commands,
+            &self.mention_items,
+        )
+        .filter(|item| !matches!(item.command_type, CommandType::Mention(_)))
+        .map(|item| item.name)
+        .find(|n| n.eq_ignore_ascii_case(name))
     }
 
     pub fn find_custom_command(&self, display_name: &str) -> Option<&CustomCommand> {
@@ -472,6 +717,10 @@ impl CommandPalette {
     }
 
     pub fn view(&self, frame: &mut Frame, input_area: Rect) -> Option<Rect> {
+        if self.mention_trigger().is_some() {
+            return self.view_mention(frame, input_area);
+        }
+
         let filtered = &self.filtered;
         if filtered.is_empty() {
             return None;
@@ -482,7 +731,6 @@ impl CommandPalette {
             return None;
         }
 
-        const GAP: usize = 2;
         let max_name = filtered
             .iter()
             .map(|item| self.item_name(item).len())
@@ -493,7 +741,6 @@ impl CommandPalette {
             .map(|item| self.item_description(item).len())
             .max()
             .unwrap_or(0);
-        const PAD: usize = 1;
         let popup_width = (PAD + max_name + GAP + max_desc + PAD) as u16;
 
         let popup = Rect {
@@ -543,6 +790,91 @@ impl CommandPalette {
         Some(popup)
     }
 
+    fn view_mention(&self, frame: &mut Frame, input_area: Rect) -> Option<Rect> {
+        let rows: Vec<MentionRow<'_>> = if self.mention_pending() {
+            vec![MentionRow::Status(MENTION_LOADING_ROW)]
+        } else if self.filtered.is_empty() {
+            vec![MentionRow::Status(MENTION_EMPTY_ROW)]
+        } else {
+            self.filtered
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| {
+                    let item = self.mention_item(m)?;
+                    Some(MentionRow::Item {
+                        label: &item.label,
+                        kind: &item.kind,
+                        indices: &m.indices,
+                        selected: i == self.selected,
+                    })
+                })
+                .collect()
+        };
+
+        let (max_label, max_kind) = rows.iter().fold((0, 0), |(label, kind), row| match row {
+            MentionRow::Status(text) => (label.max(text.len()), kind),
+            MentionRow::Item {
+                label: item_label,
+                kind: item_kind,
+                ..
+            } => (label.max(item_label.len()), kind.max(item_kind.len())),
+        });
+        let popup_height = (rows.len() as u16).min(input_area.y);
+        if popup_height == 0 {
+            return None;
+        }
+
+        let popup = Rect {
+            x: input_area.x,
+            y: input_area.y.saturating_sub(popup_height),
+            width: (PAD + max_label + GAP + max_kind + PAD).min(input_area.width as usize) as u16,
+            height: popup_height,
+        };
+
+        let t = theme::current();
+        let lines: Vec<Line> = rows
+            .into_iter()
+            .map(|row| match row {
+                MentionRow::Status(text) => Line::from(vec![Span::styled(
+                    format!("{}{}{}", " ".repeat(PAD), text, " ".repeat(PAD)),
+                    t.item_desc,
+                )]),
+                MentionRow::Item {
+                    label,
+                    kind,
+                    indices,
+                    selected,
+                } => {
+                    let label_pad = max_label - label.len() + GAP;
+                    if selected {
+                        let s = t.item_selected;
+                        let mut spans = vec![Span::styled(" ".repeat(PAD), s)];
+                        spans.extend(self.build_highlighted_spans(label, indices, s));
+                        spans.push(Span::styled(" ".repeat(label_pad), s));
+                        spans.push(Span::styled(kind, s));
+                        spans.push(Span::styled(" ".repeat(PAD), s));
+                        Line::from(spans)
+                    } else {
+                        let mut spans = vec![Span::raw(" ".repeat(PAD))];
+                        spans.extend(self.build_highlighted_spans(label, indices, t.item));
+                        spans.push(Span::raw(" ".repeat(label_pad)));
+                        spans.push(Span::styled(kind, t.item_desc));
+                        spans.push(Span::raw(" ".repeat(PAD)));
+                        Line::from(spans)
+                    }
+                }
+            })
+            .collect();
+
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines).style(Style::new().bg(t.background)),
+            popup,
+        );
+
+        Some(popup)
+    }
+
     fn build_highlighted_spans(&self, text: &str, indices: &[u32], base: Style) -> Vec<Span<'_>> {
         if indices.is_empty() {
             return vec![Span::styled(text.to_string(), base)];
@@ -577,6 +909,45 @@ impl CommandPalette {
     }
 }
 
+enum MentionRow<'a> {
+    Status(&'static str),
+    Item {
+        label: &'a str,
+        kind: &'a str,
+        indices: &'a [u32],
+        selected: bool,
+    },
+}
+
+/// The cursor token is the contiguous non-whitespace run containing
+/// `cursor` (a char index; the position right after the last char counts
+/// as inside the trailing token). When the token's first char is a
+/// registered trigger, returns (trigger char, token start, token end) in
+/// char indices. A token mid-word (e.g. `user@example.com`) never
+/// triggers.
+fn trigger_at(input: &str, cursor: usize, triggers: &[String]) -> Option<(char, usize, usize)> {
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let cursor = cursor.min(len);
+    if cursor < len && chars[cursor].is_whitespace() {
+        return None;
+    }
+    let mut start = cursor;
+    while start > 0 && !chars[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    let mut end = cursor;
+    while end < len && !chars[end].is_whitespace() {
+        end += 1;
+    }
+    if start == end {
+        return None;
+    }
+    let trigger = chars[start];
+    let registered = trigger == '/' || triggers.iter().any(|t| t.starts_with(trigger));
+    registered.then_some((trigger, start, end))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,14 +959,26 @@ mod tests {
     }
 
     fn synced(input: &str) -> CommandPalette {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
-        p.sync(input);
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
+        p.sync(input, input.chars().count(), "/tmp");
         p
     }
 
     fn synced_with_custom(input: &str, custom: Arc<[CustomCommand]>) -> CommandPalette {
-        let mut p = CommandPalette::new(custom, empty_snapshot(), LuaCommandReader::empty());
-        p.sync(input);
+        let mut p = CommandPalette::new(
+            custom,
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
+        p.sync(input, input.chars().count(), "/tmp");
         p
     }
 
@@ -665,7 +1048,13 @@ mod tests {
 
     #[test]
     fn confirm_when_inactive_returns_none() {
-        let p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
+        let p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
         assert!(p.confirm("").is_none());
     }
 
@@ -673,7 +1062,7 @@ mod tests {
     fn sync_clamps_selected() {
         let mut p = synced("/");
         p.selected = 100;
-        p.sync("/");
+        p.sync("/", 1, "/tmp");
         assert_eq!(p.selected, p.filtered.len() - 1);
     }
 
@@ -718,8 +1107,14 @@ mod tests {
     #[test_case("/pct", "/compact", ""    ; "fuzzy-match-2")]
     #[test_case("/btw hello world", "/btw", "hello world" ; "btw_multi_word")]
     fn confirm_parses_args(input: &str, expected_name: &str, expected_args: &str) {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), LuaCommandReader::empty());
-        p.sync(input);
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
+        p.sync(input, input.chars().count(), "/tmp");
         let cmd = p.confirm(input).unwrap();
         assert_eq!(cmd.name, expected_name);
         assert_eq!(cmd.args, expected_args);
@@ -728,8 +1123,14 @@ mod tests {
     #[test]
     fn confirm_custom_command() {
         let custom = sample_custom();
-        let mut p = CommandPalette::new(custom, empty_snapshot(), LuaCommandReader::empty());
-        p.sync("/project:review");
+        let mut p = CommandPalette::new(
+            custom,
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
+        p.sync("/project:review", 15, "/tmp");
         assert!(p.is_active());
         let cmd = p.confirm("/project:review some-file.rs").unwrap();
         assert_eq!(cmd.name, "/project:review");
@@ -739,7 +1140,13 @@ mod tests {
     #[test]
     fn find_custom_command_lookup() {
         let custom = sample_custom();
-        let p = CommandPalette::new(custom, empty_snapshot(), LuaCommandReader::empty());
+        let p = CommandPalette::new(
+            custom,
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
         let found = p.find_custom_command("/project:review");
         assert!(found.is_some());
         assert_eq!(found.unwrap().content, "Review $ARGUMENTS");
@@ -773,8 +1180,14 @@ mod tests {
     }
 
     fn synced_with_prompts(input: &str) -> CommandPalette {
-        let mut p = CommandPalette::new(Arc::from([]), sample_prompts(), LuaCommandReader::empty());
-        p.sync(input);
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            sample_prompts(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
+        p.sync(input, input.chars().count(), "/tmp");
         p
     }
 
@@ -831,9 +1244,15 @@ mod tests {
     #[test]
     fn mcp_update_clears_old_prompts() {
         let reader = sample_prompts();
-        let mut p = CommandPalette::new(Arc::from([]), reader, LuaCommandReader::empty());
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            reader,
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
 
-        p.sync("/");
+        p.sync("/", 1, "/tmp");
         let initial_count = p
             .filtered
             .iter()
@@ -854,7 +1273,7 @@ mod tests {
         });
 
         p.mcp_reader = updated_reader;
-        p.sync("/");
+        p.sync("/", 1, "/tmp");
 
         let updated_count = p
             .filtered
@@ -923,8 +1342,14 @@ mod tests {
             plugin: Arc::from("sessions"),
             max_args,
         }]);
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), reader);
-        p.sync(input);
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            reader,
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
+        p.sync(input, input.chars().count(), "/tmp");
         p
     }
 
@@ -951,8 +1376,14 @@ mod tests {
     }
 
     fn synced_with_lua(input: &str) -> CommandPalette {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), sample_lua_commands());
-        p.sync(input);
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            sample_lua_commands(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
+        p.sync(input, input.chars().count(), "/tmp");
         p
     }
 
@@ -989,8 +1420,14 @@ mod tests {
 
     #[test]
     fn confirm_lua_command_parses_args() {
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), sample_lua_commands());
-        p.sync("/memory");
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            sample_lua_commands(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
+        p.sync("/memory", 7, "/tmp");
         let cmd = p.confirm("/memory some-arg").unwrap();
         assert_eq!(cmd.name, "/memory");
         assert_eq!(cmd.args, "some-arg");
@@ -1005,8 +1442,14 @@ mod tests {
             plugin: Arc::from("p"),
             max_args: 0,
         }]);
-        let mut p = CommandPalette::new(Arc::from([]), empty_snapshot(), reader);
-        p.sync("/");
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            reader,
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        );
+        p.sync("/", 1, "/tmp");
         let initial_lua = p
             .filtered
             .iter()
@@ -1028,7 +1471,7 @@ mod tests {
                 max_args: 0,
             },
         ]);
-        p.sync("/");
+        p.sync("/", 1, "/tmp");
         let updated_lua = p
             .filtered
             .iter()
@@ -1037,5 +1480,302 @@ mod tests {
         assert_eq!(updated_lua, 2);
         assert!(p.find_lua_command("/old").is_none());
         assert!(p.find_lua_command("/new1").is_some());
+    }
+
+    fn trigger_list(triggers: &[&str]) -> Vec<String> {
+        triggers.iter().map(|t| t.to_string()).collect()
+    }
+
+    fn palette_with_triggers(triggers: &[&str]) -> CommandPalette {
+        CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            EventHandle::disconnected_for_test(),
+        )
+        .with_triggers(triggers)
+    }
+
+    impl CommandPalette {
+        fn with_triggers(mut self, triggers: &[&str]) -> Self {
+            self.triggers = trigger_list(triggers);
+            self
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
+    #[test_case("@foo", 0, Some(('@', 0, 4))      ; "cursor_at_trigger")]
+    #[test_case("@foo", 2, Some(('@', 0, 4))      ; "cursor_mid_token")]
+    #[test_case("@foo", 4, Some(('@', 0, 4))      ; "cursor_at_token_end")]
+    #[test_case("@", 1, Some(('@', 0, 1))         ; "trigger_as_last_char")]
+    #[test_case("a @foo", 4, Some(('@', 2, 6))    ; "mid_line_after_space")]
+    #[test_case("  @foo", 2, Some(('@', 2, 6))    ; "leading_space_token")]
+    #[test_case("user@example.com", 4, None       ; "email_at_mid_word")]
+    #[test_case("a@b", 1, None                     ; "trigger_mid_token")]
+    #[test_case("$foo", 0, None                    ; "unregistered_trigger")]
+    #[test_case("", 0, None                        ; "empty_input")]
+    #[test_case("foo ", 4, None                    ; "cursor_on_space")]
+    fn trigger_detection(input: &str, cursor: usize, expected: Option<(char, usize, usize)>) {
+        assert_eq!(trigger_at(input, cursor, &trigger_list(&["@"])), expected);
+    }
+
+    #[test]
+    fn slash_trigger_is_registered_for_detection() {
+        let registered = trigger_list(&["@"]);
+        assert_eq!(trigger_at("/new", 1, &registered), Some(('/', 0, 4)));
+        assert_eq!(trigger_at("a /new", 2, &registered), Some(('/', 2, 6)));
+    }
+
+    #[test]
+    fn slash_trigger_mid_input_stays_closed() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.sync("a /new", 2, "/tmp");
+        assert!(!p.is_active(), "slash commands only open at input start");
+    }
+
+    #[test]
+    fn mention_sync_enters_pending_and_fires_request() {
+        let (handle, probe) = maki_lua::test_support::probed_event_handle();
+        let mut p = CommandPalette::new(
+            Arc::from([]),
+            empty_snapshot(),
+            LuaCommandReader::empty(),
+            TriggerSnapshotReader::empty(),
+            handle,
+        )
+        .with_triggers(&["@"]);
+        p.sync("@src/fo", 7, "/tmp");
+        assert!(p.is_active());
+        assert!(p.mention_pending());
+        assert_eq!(p.mention_range, Some((0, 7)));
+        assert!(probe.try_recv().is_some(), "resolve request fired");
+    }
+
+    #[test]
+    fn mention_with_disconnected_handle_settles_empty() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.sync("@src/fo", 7, "/tmp");
+        assert!(p.is_active());
+        assert!(!p.mention_pending());
+        assert_eq!(p.match_count(), 0);
+    }
+
+    #[test]
+    fn mention_enter_consumed_while_pending() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((0, 8));
+        p.mention_state = Some(MentionState::Pending {
+            generation: 1,
+            rx: flume::bounded(1).1,
+        });
+        assert!(matches!(
+            p.handle_key(key(KeyCode::Enter), "@src/fo"),
+            CommandAction::Consumed
+        ));
+    }
+
+    #[test]
+    fn mention_enter_without_match_is_consumed() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((0, 8));
+        p.mention_state = Some(MentionState::Settled);
+        assert!(matches!(
+            p.handle_key(key(KeyCode::Enter), "@src/fo"),
+            CommandAction::Consumed
+        ));
+        assert!(p.is_active(), "popup stays open on consumed Enter");
+    }
+
+    #[test]
+    fn mention_enter_completes_selected_range() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((2, 8));
+        p.mention_state = Some(MentionState::Settled);
+        p.mention_items = vec![MentionItem {
+            label: "src/foo.rs".into(),
+            insert: "@src/foo.rs".into(),
+            kind: "file".into(),
+        }];
+        p.filtered = vec![Match {
+            command_type: CommandType::Mention(0),
+            indices: vec![],
+        }];
+        let action = p.handle_key(key(KeyCode::Enter), "hi @src/fo");
+        assert!(matches!(
+            action,
+            CommandAction::CompleteRange { start: 2, end: 8, text } if text == "@src/foo.rs "
+        ));
+    }
+
+    #[test]
+    fn mention_enter_keeps_insert_space_when_present() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((0, 1));
+        p.mention_state = Some(MentionState::Settled);
+        p.mention_items = vec![MentionItem {
+            label: "src/".into(),
+            insert: "@src/ ".into(),
+            kind: "dir".into(),
+        }];
+        p.filtered = vec![Match {
+            command_type: CommandType::Mention(0),
+            indices: vec![],
+        }];
+        let action = p.handle_key(key(KeyCode::Enter), "@");
+        assert!(matches!(
+            action,
+            CommandAction::CompleteRange { start: 0, end: 1, text } if text == "@src/ "
+        ));
+    }
+
+    #[test]
+    fn mention_tab_completes_top_match() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((0, 6));
+        p.mention_state = Some(MentionState::Settled);
+        p.mention_items = vec![
+            MentionItem {
+                label: "top".into(),
+                insert: "@top".into(),
+                kind: "file".into(),
+            },
+            MentionItem {
+                label: "bottom".into(),
+                insert: "@bottom".into(),
+                kind: "file".into(),
+            },
+        ];
+        p.filtered = vec![
+            Match {
+                command_type: CommandType::Mention(0),
+                indices: vec![],
+            },
+            Match {
+                command_type: CommandType::Mention(1),
+                indices: vec![],
+            },
+        ];
+        p.selected = 1;
+        let action = p.handle_key(key(KeyCode::Tab), "@topx");
+        assert!(matches!(
+            action,
+            CommandAction::CompleteRange { start: 0, end: 6, text } if text == "@top "
+        ));
+    }
+
+    #[test]
+    fn mention_esc_closes() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.sync("@src", 4, "/tmp");
+        assert!(p.is_active());
+        p.handle_key(key(KeyCode::Esc), "@src");
+        assert!(!p.is_active());
+    }
+
+    #[test]
+    fn stale_mention_reply_is_dropped() {
+        let mut p = palette_with_triggers(&["@"]);
+        let (tx, rx) = flume::bounded(1);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((0, 5));
+        p.mention_generation = 2;
+        p.mention_state = Some(MentionState::Pending { generation: 1, rx });
+        tx.send(vec![]).unwrap();
+        let _ = p.tick();
+        assert!(!p.mention_pending(), "stale reply never settles the popup");
+        assert_eq!(p.match_count(), 0);
+        assert!(p.mention_items.is_empty());
+    }
+
+    #[test]
+    fn fresh_mention_reply_populates_corpus() {
+        let mut p = palette_with_triggers(&["@"]);
+        let (tx, rx) = flume::bounded(1);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((0, 8));
+        p.mention_query = "src/fo".into();
+        p.mention_generation = 1;
+        p.mention_state = Some(MentionState::Pending { generation: 1, rx });
+        tx.send(vec![maki_lua::CompletionGroup {
+            provider: "picker".into(),
+            items: vec![maki_lua::CompletionItem {
+                label: "src/foo.rs".into(),
+                insert: "@src/foo.rs".into(),
+                kind: "file".into(),
+            }],
+        }])
+        .unwrap();
+        assert_eq!(p.tick(), Dirty::YES, "reply owes a frame");
+        assert!(!p.mention_pending());
+        assert_eq!(p.match_count(), 1);
+        assert_eq!(p.match_label(0).as_deref(), Some("src/foo.rs"));
+        let action = p.handle_key(key(KeyCode::Enter), "@src/fo");
+        assert!(matches!(
+            action,
+            CommandAction::CompleteRange { start: 0, end: 8, text } if text == "@src/foo.rs "
+        ));
+    }
+
+    #[test]
+    fn mention_mode_filters_out_commands() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.active_trigger = Some('@');
+        p.mention_range = Some((0, 4));
+        p.mention_query = "new".into();
+        p.mention_items = vec![MentionItem {
+            label: "new-file.txt".into(),
+            insert: "@new-file.txt".into(),
+            kind: "file".into(),
+        }];
+        p.nucleo = CommandPalette::build_nucleo(
+            &p.custom,
+            &p.mcp_prompts,
+            &p.lua_commands,
+            &p.mention_items,
+        );
+        p.nucleo
+            .pattern
+            .reparse(0, "new", CaseMatching::Ignore, Normalization::Smart, false);
+        p.tick_nucleo();
+        assert_eq!(p.match_count(), 1);
+        assert!(matches!(
+            p.filtered[0].command_type,
+            CommandType::Mention(0)
+        ));
+    }
+
+    #[test]
+    fn slash_mode_ignores_mention_items() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.mention_items = vec![MentionItem {
+            label: "compact".into(),
+            insert: "@compact".into(),
+            kind: "file".into(),
+        }];
+        p.sync("/cmp", 4, "/tmp");
+        assert!(p.is_active());
+        assert_eq!(p.filtered.len(), 1);
+        assert!(matches!(
+            p.filtered[0].command_type,
+            CommandType::Builtin(_)
+        ));
+    }
+
+    #[test]
+    fn trigger_at_after_mention_range_moves_out() {
+        let mut p = palette_with_triggers(&["@"]);
+        p.sync("@src", 4, "/tmp");
+        assert!(p.is_active());
+        p.sync("@src ", 5, "/tmp");
+        assert!(!p.is_active(), "space after token closes the popup");
     }
 }

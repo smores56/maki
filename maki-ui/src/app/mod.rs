@@ -60,7 +60,8 @@ use maki_agent::{
 };
 use maki_config::{ModelPolicy, UiConfig};
 use maki_lua::{
-    BuiltinAction, EventHandle, HintReader, HintSnapshot, KeymapReader, LuaCommandReader, WinView,
+    BuiltinAction, EventHandle, HintReader, HintSnapshot, KeymapReader, LuaCommandReader,
+    TriggerSnapshotReader, WinView,
 };
 use maki_providers::{ContentBlock, Message, Model, ThinkingConfig, add_cost};
 use maki_storage::StateDir;
@@ -278,6 +279,7 @@ impl App {
         mcp_reader: McpSnapshotReader,
         mcp_config_errors: McpConfigErrors,
         lua_command_reader: LuaCommandReader,
+        trigger_reader: TriggerSnapshotReader,
         keymap_reader: KeymapReader,
         hint_reader: HintReader,
         storage_writer: Arc<StorageWriter>,
@@ -309,6 +311,8 @@ impl App {
                 custom_commands,
                 mcp_reader.clone(),
                 lua_command_reader,
+                trigger_reader,
+                lua_event_handle.clone(),
             ),
             task_picker: ListPicker::new(),
             task_picker_original: None,
@@ -593,6 +597,17 @@ impl App {
         }
     }
 
+    /// Bash input (`!` prefix) must never open the palette: the `@` mention
+    /// trigger would otherwise pop up mid-command.
+    fn sync_palette(&mut self, text: &str, cursor: usize) {
+        if self.is_bash_input() {
+            self.command_palette.close();
+            return;
+        }
+        self.command_palette
+            .sync(text, cursor, &self.state.session.cwd);
+    }
+
     fn handle_ctrl(&mut self, key: KeyEvent) -> Option<Vec<Action>> {
         if !is_ctrl(&key) {
             return None;
@@ -711,10 +726,10 @@ impl App {
                 FilePickerModalAction::Consumed => vec![],
                 FilePickerModalAction::Select(path) => {
                     self.file_picker.close();
-                    if let InputAction::PaletteSync { text, .. } =
+                    if let InputAction::PaletteSync { text, cursor } =
                         self.input_box.handle_paste_with_spaces(&path)
                     {
-                        self.command_palette.sync(&text);
+                        self.sync_palette(&text, cursor);
                     }
                     vec![]
                 }
@@ -953,25 +968,36 @@ impl App {
                 return self.run_builtin(BuiltinAction::FilePicker);
             } else if key.code == KeyCode::Char('v') && self.image_paste_rx.is_empty() {
                 self.start_image_paste();
-            } else if let InputAction::PaletteSync { text, .. } = self.input_box.handle_key(key) {
-                self.command_palette.sync(&text);
+            } else if let InputAction::PaletteSync { text, cursor } = self.input_box.handle_key(key)
+            {
+                self.sync_palette(&text, cursor);
             }
             return vec![];
         }
 
-        match self
-            .command_palette
-            .handle_key(key, &self.input_box.buffer.value())
-        {
+        let action = if self.is_bash_input() {
+            CommandAction::Passthrough
+        } else {
+            self.command_palette
+                .handle_key(key, &self.input_box.buffer.value())
+        };
+        match action {
             CommandAction::Consumed => return vec![],
             CommandAction::Execute(cmd) => {
                 self.input_box.discard();
                 return self.execute_command(cmd, 0);
             }
             CommandAction::Complete(text) => {
-                self.command_palette.sync(&text);
+                self.sync_palette(&text, text.chars().count());
                 self.input_box.set_input(text);
                 self.input_box.buffer.move_to_end();
+                return vec![];
+            }
+            CommandAction::CompleteRange { start, end, text } => {
+                self.input_box.buffer.replace_range(start, end, &text);
+                let value = self.input_box.buffer.value();
+                let cursor = self.input_box.buffer.cursor_char_index();
+                self.sync_palette(&value, cursor);
                 return vec![];
             }
             CommandAction::Passthrough => {}
@@ -980,8 +1006,8 @@ impl App {
         let streaming = self.status == Status::Streaming;
         match self.input_box.handle_key(key) {
             InputAction::Submit(sub) => self.handle_submit(sub),
-            InputAction::PaletteSync { text, .. } => {
-                self.command_palette.sync(&text);
+            InputAction::PaletteSync { text, cursor } => {
+                self.sync_palette(&text, cursor);
                 vec![]
             }
             InputAction::Passthrough(key) => {
@@ -1710,6 +1736,7 @@ impl App {
             | self.usage_modal.poll(&self.usage_slot)
             | self.hints.poll(self.hint_reader.load_full())
             | self.tick_file_picker()
+            | self.command_palette.tick()
             | Dirty::any(self.chats.iter_mut().map(Chat::tick))
     }
 
@@ -1811,8 +1838,8 @@ impl App {
         if !self.is_main_chat() {
             return;
         }
-        if let InputAction::PaletteSync { text, .. } = self.input_box.handle_paste(text) {
-            self.command_palette.sync(&text);
+        if let InputAction::PaletteSync { text, cursor } = self.input_box.handle_paste(text) {
+            self.sync_palette(&text, cursor);
         }
     }
 

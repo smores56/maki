@@ -55,11 +55,7 @@ pub enum Placeholder {
 pub enum InputAction {
     Submit(Submission),
     ContinueLine,
-    PaletteSync {
-        text: String,
-        #[allow(dead_code)]
-        cursor: usize,
-    },
+    PaletteSync { text: String, cursor: usize },
     Passthrough(KeyEvent),
     None,
 }
